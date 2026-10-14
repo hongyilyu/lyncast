@@ -1,0 +1,10 @@
+[package]
+name = "lyncast"
+description = "A fast, small launcher for niri: apps, clipboard history, and an inline calculator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lyncast-core.workspace = true

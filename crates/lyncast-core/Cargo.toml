@@ -1,0 +1,9 @@
+[package]
+name = "lyncast-core"
+description = "Pure launcher logic for lyncast: ranking, calculator, and delivery policy. No IO, no UI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

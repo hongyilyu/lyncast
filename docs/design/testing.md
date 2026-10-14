@@ -1,0 +1,128 @@
+# Testing lyncast on a headless box
+
+The dev box has no display, so every lyncast test drives the CLI and checks what it prints. The [decision log](../decisions.md#testing) wins any disagreement with this page.
+
+## Tests assert literal output
+
+Each test runs `lyncast` and compares stdout, stderr, and the exit code with literal strings. Every palette action also exists as a CLI command over the same socket protocol, so a CLI test takes the palette's path. `lyncast --headless` runs the core, the clipboard watcher, and the socket without GPUI.
+
+MIME types are the exception. Their order differed between two probe runs, so tests check membership ([notes/07](../research/notes/07-paste-seam-workflow.md), measured). A failed action exits 1 with the reason on stderr (notes/07). A usage error exits 2, and a stale rate snapshot will exit 3 ([decision log](../decisions.md#calculator-engine)).
+
+## Each tier proves a different part
+
+| Tier | Runs under | Proves | Cannot prove |
+|---|---|---|---|
+| 1 | No display, `WAYLAND_DISPLAY` cleared | Logic that needs no compositor, such as promote rules and the no-compositor error | The clipboard or the window |
+| 2 | Xvfb plus smithay `anvil` | The marker MIME, serving, promotion, daemon ownership of the selection, and, with GPUI, summon and close | ext-data-control, niri IPC, niri focus, real GPU timing |
+| 3 | GPUI `TestAppContext` | Actions, keymaps, focus, simulated keystrokes, seeded async work (`SEED`), layout, offscreen pixels | Layer shell, compositor focus, IME, the clipboard between processes, real presentation |
+
+Tier 1 clears `WAYLAND_DISPLAY` because wayland-client connects whenever it is set ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source). A run inside niri would otherwise copy into the real clipboard. The notes/07 review also unsets `WAYLAND_SOCKET` and uses a temp `XDG_RUNTIME_DIR`. The Tier 3 lists come from [notes/02](../research/notes/02-gpui-on-linux.md), where GPUI's own headless tests passed with no display (measured).
+
+## Tier 2 runs anvil inside Xvfb
+
+Each test starts its own Xvfb and anvil, with its own `XDG_RUNTIME_DIR` ([notes/03](../research/notes/03-wayland-niri-integration.md), recommended).
+
+These facts come from notes/03 unless marked:
+
+- Xvfb 21.1.13 is installed (tested).
+- anvil at smithay HEAD 8a27023 built with `cargo build -p anvil --no-default-features --features egl,winit` in 32 s with no new packages. It runs as `DISPLAY=:97 anvil --winit` (tested).
+- anvil offers `wl_seat` v9, layer-shell v5, zwlr-data-control v2, and xdg-activation, but no ext-data-control (tested).
+- GPUI drew an 800x500 layer-shell window on the Overlay layer, but anvil never gave it keyboard focus ([notes/05](../research/notes/05-probe-summon-latency.md), measured).
+- wgpu picked Vulkan lavapipe (notes/05, measured). Open zed PR #63346 would disable software ICDs at startup and could affect lavapipe in CI (notes/02, unverified).
+
+### Headless weston cannot host GPUI
+
+Weston 13.0.3 headless has no `wl_seat`, layer shell, data-control, or xdg-activation (notes/03, tested). gpui 0.2.2 panicked there on `seat.unwrap()` at `wayland/client.rs:503` ([notes/04](../research/notes/04-probe-gpui-0.2.2-headless.md), measured). `weston --backend=x11` inside Xvfb has a seat and drew a normal window (notes/04, measured), but GPUI returns `LayerShellNotSupportedError` on weston (notes/02, measured).
+
+### Bare Xvfb needs an outside X event before GPUI presents
+
+notes/03 recommends bare Xvfb for the later X11 path. With gpui 0.2.2 and no window manager, nothing is presented there (notes/04, measured). x11rb reads the MapNotify event into its in-process queue during `open_window`, so the socket never wakes GPUI's event loop. Any outside X event starts it, such as `xprop -set` or the probe's `PROBE_X11_KICK`, which changes a window property from a second X connection. No note re-checks the quirk on gpui-pre 0.3.9.
+
+## Packages on Amazon Linux 2023
+
+The notes record these needs:
+
+- To build GPUI, headers for xkbcommon, xcb, wayland, and fontconfig, plus `libxkbcommon-x11-devel` for `-lxkbcommon-x11` (notes/02, notes/04).
+- To run GPUI, Vulkan or EGL, which GPUI loads with dlopen (notes/02).
+- To render without a GPU, Mesa 24.2.6 lavapipe and llvmpipe (notes/02, notes/05).
+
+The probe installed these packages with `dnf` on 2026-10-14, read from its install log:
+
+```sh
+sudo dnf install mesa-vulkan-drivers vulkan-loader vulkan-tools weston xorg-x11-server-Xvfb \
+	wayland-devel libxkbcommon-devel libxkbcommon-x11 libxkbcommon-x11-devel libxcb-devel \
+	fontconfig-devel freetype-devel
+```
+
+`weston` is only needed to host GPUI under Xvfb for the old probe. Tier 2 uses anvil instead.
+
+These are missing on the dev box:
+
+- `wl-copy` and `wl-paste` (notes/07, measured). Tier 2 seeds and reads the clipboard with an in-process wl-clipboard-rs helper.
+- niri. Its build needs libinput, libseat, systemd, mesa-libgbm, pango, cairo, and libdisplay-info `-devel` packages, all in the AL2023 repos (notes/03). No note built it (notes/07), so niri inside Xvfb is unverified.
+
+## Planned Tier 2 cases for copy and close
+
+None of these cases has run. They come from [notes/07](../research/notes/07-paste-seam-workflow.md), and [clipboard-and-paste.md](clipboard-and-paste.md) holds the full design. Each seed waits for its row, because back-to-back seeds can race the watcher:
+
+```rust
+seed("alpha"); wait_rows(1);
+seed("beta"); wait_rows(2);
+assert_eq!(cli("activate clip:1"), "copied clip 1\n");
+assert_eq!(read_text(), "alpha");
+assert!(read_mimes().contains(OWN));
+assert_eq!(cli("clip list"), "1\talpha\n2\tbeta\n"); // promoted, no new row
+assert_eq!(cli("activate calc:2+3*4"), "copied 14\n");
+assert_eq!(cli("clip list"), "3\t14\n1\talpha\n2\tbeta\n");
+stop_daemon();
+assert_eq!(read_text_or_empty(), ""); // the daemon owned the selection
+```
+
+The design and reviews add these cases:
+
+- **Core sees own writes.** After the calc copy, `activate clip:3` must not print `lyncast: no clip 3`. In the reviewed design it did, and that finding led to `Clips` owning every clip row.
+- **Missing blob.** With an image's blob deleted, `lyncast activate clip:1` exits 1 with `lyncast: clip 1: blob missing`, and the selection lacks `OWN`.
+- **Image re-copy.** Reading a re-copied image with `MimeType::Any` gives a non-empty PNG. An empty marker failed 5 of 12 such reads (measured).
+- **Close after copy.** After `lyncast toggle` and `lyncast activate clip:1`, a status query prints `closed`, `read_text()` still returns the entry, and a second toggle opens one window. The case catches a nested close and a missing `QuitMode::Explicit`, which would quit and clear the selection.
+- **Close after launch.** Activating an app row closes the window. The reviewed Launch arm never closed it.
+
+The close cases run the GPUI daemon under anvil, not `--headless`.
+
+`read_text()` right after `copied clip 1` can flake, because wl-clipboard-rs reports success before it serves (notes/07, read in source). The notes do not say what Tier 2 expects for a clip's Source, which comes from niri IPC.
+
+## A fake niri socket stands in for niri IPC
+
+Paste comes after the MVP, with the niri virtual keyboard as its first backend ([decision log](../decisions.md#clipboard-and-paste)). niri IPC takes one JSON request per line on `$NIRI_SOCKET` (notes/03). The fake in notes/07 answers `FocusedWindow` with window 7 (foot), serves `Workspaces` and `Windows`, streams `WindowFocusChanged { id: Some(7) }`, and logs each request.
+
+In the unrun spec, `lyncast activate clip:1 --action paste` prints `pasted clip 1 into window 7 with ctrl+shift+v`, and a sink client on anvil prints `ctrl+shift+v alpha`. If the stream sends `Some(9)`, the CLI prints `copied clip 1; not pasted: focus went to window 9`.
+
+The reviews found three limits, read in source:
+
+- A new `EventStream` subscriber first gets a state burst with `WindowsChanged` and no `WindowFocusChanged`. The fake must send that burst first, or the test passes while real niri times out.
+- anvil never restores the keymap after the virtual keyboard, so each paste test needs a fresh anvil.
+- anvil focuses a toplevel only on a pointer click, and an exclusive layer surface only when a key event arrives.
+
+## The bench gate holds the budgets
+
+The limits are in the [Budgets table](../decisions.md#budgets). [notes/05](../research/notes/05-probe-summon-latency.md) measured each one on lavapipe under anvil, as medians:
+
+- **Warm summon.** Time to present, the client's buffer attach and commit, was 44.9 ms, range 44.1 to 48.9, over summons 2 to 20 in 3 processes, run twice.
+- **PSS before the first summon.** 11.9 MiB across 3 processes.
+- **Private anonymous memory after summons.** `Pss_Anon` was 57.3 MiB after 20 summons and after 70 cycles.
+- **Growth.** Flat by about cycle 10, then -0.6 to +7 kB per cycle from cycle 21 to 70, across 6 processes. The budget asks for 100 cycles.
+- **Idle CPU.** 0.0% over 10 s while hidden, which is below the 10 ms tick, in 3 runs.
+
+### Private memory is Pss_Anon because of tmpfs
+
+The probe's binary sat on tmpfs, so its pages, about 10 MiB, or 17 MiB after a summon, count as Private_Dirty. On a disk install they would be clean page cache. notes/05 therefore uses `Pss_Anon` as the real cost, and the decision log's 57 MiB is that column. PSS still counts the binary, which is 9.8 of the 11.9 MiB before the first summon.
+
+### Lavapipe numbers catch regressions but are not absolute
+
+Runs repeat closely, with a rerun median of 45.3 ms and a memory spread of 0.6 MiB or less, so a regression stands out (inferred). The absolute values describe lavapipe, which compiles shaders and draws on the CPU:
+
+- 78% of stack samples in a warm summon were in GPUI's pipeline creation, mostly lavapipe's SPIR-V to NIR compile (sampled). A warm cache on radv or anv should beat 45 ms (inferred).
+- A real driver replaces libLLVM, libgallium, and lavapipe's memfd memory (inferred).
+- anvil sent frame-done 2.2 ms after present (measured). niri shows a frame at the next vblank, up to about 16.7 ms at 60 Hz (inferred).
+- The 45 ms needs a warm Mesa shader cache. With the cache off, a warm summon took 424.5 ms (measured).
+
+Structural results, such as no drift per cycle and near-zero idle CPU, should carry over (notes/05). Real numbers come from Hongyi's niri machine.
