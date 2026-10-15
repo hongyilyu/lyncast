@@ -22,6 +22,36 @@ Tier 1 clears `WAYLAND_DISPLAY` because wayland-client connects whenever it is s
 
 Each test starts its own Xvfb and anvil, with its own `XDG_RUNTIME_DIR` ([notes/03](../research/notes/03-wayland-niri-integration.md), recommended).
 
+`scripts/test-env.sh` starts one. On first use it builds anvil through `scripts/anvil.sh`, which pins the smithay rev and the lockfile of the tested build:
+
+```sh
+scripts/test-env.sh run -- cargo test   # run a command inside a new one, then stop it
+scripts/test-env.sh                     # start one and print shell lines that point at it
+scripts/test-env.sh stop DIR            # stop the one whose XDG_RUNTIME_DIR is DIR
+```
+
+Prefer `run`. It stops the environment when the command exits, and the command never runs if the start fails. For an interactive shell inside one, run `scripts/test-env.sh run -- bash`.
+
+`start` prints three lines, after `scripts/wl-globals.py` completes a roundtrip with anvil and sees `wl_seat`, `zwlr_layer_shell_v1`, and `zwlr_data_control_manager_v1`:
+
+```sh
+export XDG_RUNTIME_DIR=/tmp/lyncast-env.XXXXXX
+export WAYLAND_DISPLAY=wayland-1
+unset WAYLAND_SOCKET DISPLAY NIRI_SOCKET DBUS_SESSION_BUS_ADDRESS
+```
+
+Commands under `run` get the same environment. The `unset` line keeps a child off the caller's Wayland, X, niri, and D-Bus sessions. libwayland tries `WAYLAND_SOCKET` before `WAYLAND_DISPLAY`, a real `NIRI_SOCKET` would launch real apps, and GPUI reads the color scheme and cursor theme from the desktop portal on the session bus (read in source, gpui-pre 0.3.9). anvil gets no `WAYLAND_DISPLAY`, so it opens inside Xvfb even when the script runs inside niri.
+
+A start fails within about 11 s if anvil never answers, and at once if Xvfb or anvil exits. Xvfb picks a free display with `-displayfd`, so several environments can run at once. Each one lives under `/tmp` whatever `TMPDIR` says, because the socket path must fit in 108 bytes. These known cases leave something behind (measured):
+
+- SIGKILL to the script leaves the whole environment, because no trap can catch it. `stop DIR` still cleans it up.
+- A signal in the instant between `mktemp` and recording the directory leaves the directory with an empty `pids` file, which `stop DIR` removes.
+- Two copies of one signal that arrive within about a millisecond can skip the cleanup.
+- SIGINT to `run` alone waits for the command to exit, as bash always does for SIGINT. Ctrl-C signals the whole process group, so it cleans up at once.
+- SIGTERM or SIGHUP to `run` alone stops the environment and sends SIGTERM to the command. A command that survives SIGTERM, and any process the command started in the background, keep running without the compositor.
+
+From step 6, each Tier 2 Rust test calls `start` and `stop` itself.
+
 These facts come from notes/03 unless marked:
 
 - Xvfb 21.1.13 is installed (tested).
@@ -55,6 +85,8 @@ sudo dnf install mesa-vulkan-drivers vulkan-loader vulkan-tools weston xorg-x11-
 ```
 
 `weston` is only needed to host GPUI under Xvfb for the old probe. Tier 2 uses anvil instead.
+
+The scripts in `scripts/` and `bench/` also need Python 3. The dev box has 3.9.25 at `/usr/bin/python3`, and both `scripts/wl-globals.py` and `bench/summon.py` ran on it. `scripts/check.sh` also needs `shellcheck`, which the AL2023 repos do not have. The dev box has a release binary, 0.11.0, in `~/.local/bin`.
 
 These are missing on the dev box:
 
@@ -112,9 +144,15 @@ The limits are in the [Budgets table](../decisions.md#budgets). [notes/05](../re
 - **Growth.** Flat by about cycle 10, then -0.6 to +7 kB per cycle from cycle 21 to 70, across 6 processes. The budget asks for 100 cycles.
 - **Idle CPU.** 0.0% over 10 s while hidden, which is below the 10 ms tick, in 3 runs.
 
-### Private memory is Pss_Anon because of tmpfs
+### Run the bench with scripts/bench.sh
 
-The probe's binary sat on tmpfs, so its pages, about 10 MiB, or 17 MiB after a summon, count as Private_Dirty. On a disk install they would be clean page cache. notes/05 therefore uses `Pss_Anon` as the real cost, and the decision log's 57 MiB is that column. PSS still counts the binary, which is 9.8 of the 11.9 MiB before the first summon.
+`scripts/bench.sh` builds `bench/probe`, starts a test environment, selects lavapipe through `VK_DRIVER_FILES`, and runs `bench/summon.py`. Its arguments go to `summon.py`, for example `--procs 1 --cycles 30`. The default is 3 processes of 100 summon cycles, with latency from the first 20 summons, and takes about 6 minutes. `summon.py` prints each budget measurement and writes the raw data to `target/bench/`.
+
+`bench/probe` is the notes/05 probe without its spawn-per-summon mode. It is its own cargo workspace, with the lockfile that notes/05 ran, so `cargo test` never builds GPUI. Until step 7 it stands in for the palette. Any program that reads the same socket lines and prints the same `PROBE` events can replace it, and the `summon.py` docstring lists both. The bench is not in `scripts/check.sh` yet, because no lyncast commit changes the probe.
+
+### Private memory is Pss_Anon because binary pages can count as dirty
+
+The probe's binary sat on tmpfs in notes/05, so its pages, about 10 MiB, or 17 MiB after a summon, counted as Private_Dirty. A binary on disk does the same until the kernel writes its pages back. On xfs, a fresh copy of the probe showed 9.6 MiB of Private_Dirty right after the write and 0.9 MiB after `sync`, and its PSS stayed 9.6 MiB (measured). `scripts/bench.sh` therefore runs `sync` on the binary before it measures. notes/05 uses `Pss_Anon` as the real cost, and the decision log's 57 MiB is that column. PSS still counts the binary, which is 9.8 of the 11.9 MiB before the first summon.
 
 ### Lavapipe numbers catch regressions but are not absolute
 
