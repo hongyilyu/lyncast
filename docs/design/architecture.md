@@ -32,31 +32,57 @@ The `lyncast` binary holds the daemon, the GPUI palette, the CLI, and all platfo
 
 ## A few shapes carry a row from feature to action
 
-This sketch shows the core data shapes. The names come from the decision log and notes 07 and 08. The code settles the details.
+This sketch shows the core data shapes. The names come from the decision log and notes 07 and 08. The code settles the details. The shapes down to `Actions` are in `lyncast-core` now, and later steps add the rest.
 
 ```rust
 // lyncast-core
-pub struct Key(String); // "app:<id>", "cmd:<id>", "clip:<id>", "calc:<raw query>"
+pub enum Key { App(AppId), Command(Command), Clip(ClipId), Calc(String) } // "app:<id>", "cmd:<id>", "clip:<digits>", "calc:<raw query>"
+pub enum Kind { App, Command, Clip, Calculator } // key.kind()
+pub struct AppId(pub String); // a desktop entry id
+pub struct ClipId(pub i64); // the sqlite rowid type
 
 pub struct Row {
-	pub key: Key,
-	pub kind: Kind, // App, Command, Clip, Calculator
+	pub subject: Subject, // the key, kind, and actions all come from it
 	pub section: Section,
-	pub actions: Vec<ActionItem>, // from the chord table; the first is the default
 	// title, kind label, badges, and other display text
 }
 
-pub enum Section { Answer, Results, Suggestions, Commands } // merge order is a table
+pub enum Section { Answer, Results, Suggestions, Commands } // declaration order is the merge order
 
 pub enum Command {
 	ClipboardHistory, OpenConfig, ReloadApps, Quit,
 	LockScreen, Suspend, LogOut, Reboot, PowerOff,
 }
 
+pub enum Subject { // the facts the chord table reads
+	App { id: AppId, actions: Vec<DesktopAction> },
+	Command(Command),
+	Clip { id: ClipId, pinned: bool },
+	Calc { query: String },
+}
+pub struct DesktopAction { pub id: String, pub name: String } // one [Desktop Action <id>] group
+impl Subject {
+	pub fn key(&self) -> Key; // ignores the facts, so a clip has one key pinned or not
+	pub fn actions(&self) -> Actions; // the chord table
+}
+
 pub enum Chord { Enter, CtrlEnter }
 pub enum Verb { Launch, LaunchAction(String), CopyPath, Copy, Pin, Unpin, Delete, Run } // paste adds a variant
-pub struct ActionItem { pub verb: Verb, pub label: String, pub chord: Option<Chord> }
-pub fn actions(kind: Kind) -> Vec<ActionItem>; // the chord table, one source for keys and the Actions menu
+pub enum ActionItem { // bound to the row's ids
+	Launch(AppId), LaunchAction(AppId, DesktopAction), CopyPath(AppId),
+	CopyClip(ClipId), CopyAnswer(String), Pin(ClipId), Unpin(ClipId), Delete(ClipId),
+	Run(Command),
+}
+impl ActionItem {
+	pub fn verb(&self) -> Verb;
+	pub fn label(&self) -> &str;
+}
+pub struct Actions { /* the default item, then the menu-only items */ }
+impl Actions {
+	pub fn on(&self, chord: Chord) -> &ActionItem; // both chords run the default in the MVP
+	pub fn pick(&self, verb: &Verb) -> Option<&ActionItem>; // None if the row does not offer the verb
+	pub fn iter(&self) -> impl Iterator<Item = (Option<Chord>, &ActionItem)>; // menu order, default first
+}
 
 pub enum Delivery { Clip(ClipId), Answer(CalcAnswer) }
 pub struct CalcAnswer(String); // only the calculator can build one
@@ -74,12 +100,14 @@ pub enum Request {
 
 Each shape has one reason to exist:
 
-- `Row` is one shape for every feature, so the palette and `lyncast query --json` show the same rows.
+- `Row` is one shape for every feature, so the palette and `lyncast query --json` show the same rows. It stores a `Subject`, and its key, kind, and actions come from that, so they cannot disagree.
 - `Section` makes order a table. A new feature adds a section, not a rule in the merge.
-- `Key` names a row without daemon state. The calculator key carries the raw query, not the echo, so activation evaluates the same text again ([notes/08](../research/notes/08-calc-engine-workflow.md)).
-- `Chord` and `Verb` keep meaning out of the palette. The palette reports which keys were pressed, or which Actions menu item was picked, and one pure table maps row kind to its verbs. Paste then adds a verb to the table and leaves the palette alone.
-- `ActionItem` makes the chord table the only list of what a row can do. The footer, the Actions menu, and `lyncast query --json` all read it.
-- `Command` is a closed enum of built-in commands, so a new command is one variant and the compiler finds every match to update.
+- `Key` names a row without daemon state. It is a typed enum that the CLI and the socket parse once, so no resolver splits the prefix again. The calculator key carries the raw query, not the echo, so activation evaluates the same text again ([notes/08](../research/notes/08-calc-engine-workflow.md)).
+- `Subject` holds the facts the chord table reads, such as an app's Desktop Actions and a clip's pin state. A table keyed only on kind could not list Desktop Actions or choose Pin or Unpin. The daemon builds the subject again from current state at every activation.
+- `Chord` and `Verb` keep meaning out of the palette. The palette reports which keys were pressed, or which Actions menu item was picked, and one pure table maps the row's subject to its actions. A menu pick sends only the verb. Paste then adds a verb to the table and leaves the palette alone.
+- `ActionItem` binds each action to its row's ids, such as `Pin(ClipId)` and `Run(Command)`. The daemon's dispatch is then an exhaustive match, with no unreachable arm for a pair such as an app and Pin.
+- `Actions` makes the chord table the only list of what a row can do. Only `Subject::actions` builds one, so it is never empty and Enter always has an item. The footer, the Actions menu, and `lyncast query --json` all read it.
+- `Command` is a closed enum of built-in commands. A new command is one variant plus its `Command::ALL` entry. The compiler finds every match to update, but not a missing `ALL` entry.
 - `Delivery` follows the notes/07 rule that the core "says what to hand over, never how". It names the row, not the bytes, because the store already owns the bytes.
 - `Outcome` is all the calculator returns. The daemon builds the row around it, so the engine knows no verbs.
 - `Request` is one protocol for the palette and the CLI. Requests are async from the start, because a paste result will arrive after the window closes.
@@ -114,7 +142,7 @@ Log Out, Reboot, and Power Off ask for confirmation. The daemon answers the firs
 
 ## Ctrl+K opens the Actions menu
 
-Ctrl+K opens a small, searchable menu for the selected row. The menu lists the row's `ActionItem`s, default first with its key. Apps offer Open, Copy Path to .desktop, and the entry's Desktop Actions. Clipboard rows offer Copy, Pin or Unpin, and Delete. The calculator card offers Copy Answer. Commands offer Run. Picking an item sends `Activate` with `Via::Menu(verb)`, and the daemon checks that the verb is in the row's list before running it.
+Ctrl+K opens a small, searchable menu for the selected row. The menu lists the row's `ActionItem`s, default first with its key. Apps offer Open, the entry's Desktop Actions, then Copy Path to .desktop. Clipboard rows offer Copy, Pin or Unpin, and Delete. The calculator card offers Copy Answer. Commands offer Run. Picking an item sends `Activate` with `Via::Menu(verb)`. The daemon rebuilds the row's subject from current state, and `pick` returns the item only if the rebuilt list still offers the verb.
 
 
 ## A summon is one window, from toggle to close
@@ -124,7 +152,7 @@ A summon goes through these steps:
 1. A niri bind runs `lyncast toggle`, which sends `Request::Toggle`.
 2. If no summon is open, the daemon opens a new layer-shell window. If one is open, the toggle closes it.
 3. Each keystroke runs the input box and redraws the rows.
-4. The activating keys, or a pick in the Actions menu, send `Request::Activate { key, via, confirmed }`. The daemon resolves the key to an `Action`, looks up the verb, and runs it. If the action fails, the window stays open.
+4. The activating keys, or a pick in the Actions menu, send `Request::Activate { key, via, confirmed }`. The daemon rebuilds the row's `Subject` from the key and current state, takes the item for the chord or the picked verb from its `Actions`, and runs it. If the action fails, the window stays open.
 5. After a successful action, the daemon schedules the close with `cx.defer`. A close from inside the window's own handler fails in GPUI (`src/app.rs:2215`), because GPUI takes a window out of its slot while it updates ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source).
 6. The palette closes when the activating keys are released. Once paste exists, a held Shift or Alt would otherwise merge with the injected Ctrl+V.
 7. `on_window_closed` clears the summon. The hook also sees a close that niri starts when an output goes away, so the toggle state follows the real window (notes/07, read in source).

@@ -4,7 +4,7 @@ This page explains how the calculator turns root search text into a card, why th
 
 ## The engine answers every root query with an outcome
 
-Every root feature evaluates a plain query, and the section table puts Answer first, then Apps, then Fallback ([decision log](../decisions.md#input-box)). The calculator's share is one pure call per keystroke:
+Every root feature evaluates a plain query, and the section table puts Answer first, then Results ([decision log](../decisions.md#row-shapes)). The calculator's share is one pure call per keystroke:
 
 ```rust
 calc::evaluate(text, &Env) -> Outcome

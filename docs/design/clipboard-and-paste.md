@@ -57,7 +57,7 @@ So the GPUI app runs with `QuitMode::Explicit`, because by default GPUI on Linux
 
 ## The palette reports chords and closes on key release
 
-The palette reports a chord, Enter or Ctrl+Enter, and one pure table maps the row kind and the chord to a verb. Both chords copy in the MVP, and Ctrl+Enter is the slot paste will use. Paste then adds only a verb to the table. Requests to the daemon are async from the start, because a paste result arrives after the window closes.
+The palette reports a chord, Enter or Ctrl+Enter, and one pure table maps the row's subject and the chord to an action. Both chords copy in the MVP, and Ctrl+Enter is the slot paste will use. Paste then gives clip and calculator rows their own Ctrl+Enter item in the table, and the palette stays the same. Requests to the daemon are async from the start, because a paste result arrives after the window closes.
 
 The palette closes when the activating keys are released. A held Shift or Alt would merge with an injected Ctrl+V, and the virtual keyboard cannot release the user's key. smithay drops a release while another source still holds the key (`src/input/keyboard/mod.rs:313-341`, read in source).
 

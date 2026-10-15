@@ -2,7 +2,7 @@
 
 lyncast is a small, fast launcher for the [niri](https://github.com/niri-wm/niri) Wayland compositor, written in Rust with GPUI. It is modeled on TinyCast and Raycast.
 
-**Status:** step 1 of the [MVP build plan](docs/plan.md), the scaffold, is done. The launcher itself is not written yet.
+**Status:** steps 1 and 2 of the [MVP build plan](docs/plan.md), the scaffold and the core shapes, are done. The launcher itself is not written yet.
 
 ## What the MVP does
 

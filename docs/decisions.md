@@ -55,6 +55,21 @@ All entries below were made on 2026-10-14 unless they say otherwise.
 | Section order for a typed query: Answer (calculator card), then Results (apps and commands ranked together). A Fallback section, such as web search, can come later. The MVP has no fallback rows. | Lead | TinyCast puts the card at index 0 ([notes/06](research/notes/06-tinycast-behaviour-spec.md)). |
 | The MVP registers no text prefixes. Tab is the only scope, and it opens the clipboard screen, as the Clipboard History command does. | Lead | |
 
+## Row shapes
+
+These entries were made on 2026-10-15.
+
+| Decision | Who | Evidence |
+|---|---|---|
+| Keys are a typed enum, parsed at the CLI and the socket. Parsing splits at the first colon. `clip:` takes ASCII digits only. Command ids are kebab-case, such as `cmd:power-off` and `cmd:quit`. | Lead | A string key makes every resolver split the prefix again. The notes/07 judge marked raw-string ids down ([notes/07](research/notes/07-paste-seam-workflow.md)). |
+| The chord table reads a `Subject`, which is the row's kind plus the facts its menu needs, such as an app's Desktop Actions and a clip's pin state. `Row` stores the subject, and its key and kind come from it. The daemon rebuilds the subject from current state at every activation. It runs a menu pick only if the rebuilt list has it. | Lead | A table keyed only on kind cannot list Desktop Actions or choose Pin or Unpin ([notes/08](research/notes/08-calc-engine-workflow.md) review). The notes/07 judge's dispatch never checked an app action against its entry. |
+| Each action item is bound to its row's ids, such as `Pin(ClipId)` and `Run(Command)`, so the daemon's dispatch is an exhaustive match. A menu pick sends only the verb. | Lead | A dispatch on key and verb pairs needs an unreachable arm for a pair such as an app and Pin. |
+| Ctrl+Enter on app and command rows does what Enter does. | User | One rule covers every row. Ctrl+Enter runs the row's own Ctrl+Enter item if it has one, else the default, so it is never a dead key. |
+| Confirmation is a fact on `Command`. The daemon checks it after the verb resolves and before the runner. | Lead | TinyCast keeps confirmation in the coordinator, not the runner ([notes/06](research/notes/06-tinycast-behaviour-spec.md)). |
+| One `Section` enum orders both lists. Its order is Answer, Results, Suggestions, Commands. The empty and typed lists never share a section. | Lead | TinyCast describes the two lists separately ([notes/06](research/notes/06-tinycast-behaviour-spec.md)). |
+| The calculator card and clip rows show no kind label. Only app and command rows show one, as the input box entries say. | Lead | The card has its own layout, and clip rows live on the clipboard screen. |
+| A clip id is an `i64`, the sqlite rowid type. | Lead | |
+
 ## Calculator engine
 
 Full design: [design/calculator.md](design/calculator.md). Evidence: [notes/08-calc-engine-workflow.md](research/notes/08-calc-engine-workflow.md).
@@ -81,8 +96,8 @@ Full design: [design/clipboard-and-paste.md](design/clipboard-and-paste.md). Evi
 
 | Decision | Who | Evidence |
 |---|---|---|
-| The palette reports chords (Enter, Ctrl+Enter), never verbs. One pure table maps row kind and chord to a verb. | Lead | Paste adds a verb to the table, not a palette change. |
-| Ctrl+K opens a minimal, searchable Actions menu for the selected row. The default action is listed first with its key. Apps: Open, Copy Path to .desktop, and the entry's Desktop Actions. Clipboard: Copy, Pin or Unpin, Delete. Calculator: Copy Answer. Commands: Run. The menu lists the verbs the chord table allows for that row. | User (scope), Lead (contents) | Raycast and TinyCast screenshots. |
+| The palette reports chords (Enter, Ctrl+Enter), never verbs. One pure table maps a row's subject and a chord to an action. | Lead | Paste adds a verb to the table, not a palette change. |
+| Ctrl+K opens a minimal, searchable Actions menu for the selected row. The default action is listed first with its key. Apps: Open, the entry's Desktop Actions, then Copy Path to .desktop. Clipboard: Copy, Pin or Unpin, Delete. Calculator: Copy Answer. Commands: Run. The menu lists the verbs the chord table allows for that row. | User (scope), Lead (contents) | Raycast and TinyCast screenshots. |
 | Palette requests to the daemon are async from the start. | Lead | A paste result arrives after the window closes. |
 | The palette closes when the activating keys are released. | Lead | A held Shift or Alt would merge with an injected Ctrl+V. |
 | After a successful action, the daemon schedules the close with `cx.defer`. `on_window_closed` clears the summon. Losing keyboard focus cancels the summon. | Lead | A nested close fails in GPUI (`src/app.rs:2215`). TinyCast hides on focus loss. |
@@ -140,7 +155,7 @@ Measured on lavapipe in CI. They catch regressions. Real numbers come from Hongy
 | The words badge appears for whole numbers only. | Short badges. |
 | Division by zero shows no card. | `10/0` is a prefix of `10/0.5`. |
 | A copied calculator answer goes into clipboard history. | It is on the clipboard. |
-| Ctrl+Enter copies in the MVP, the same as Enter. | It is the slot paste will use. |
+| On clip and calculator rows, Ctrl+Enter copies in the MVP, the same as Enter. | It is the slot paste will use. |
 | The MVP ships a dark theme only. Following the system light or dark setting comes later. | The reference screenshots are dark, and one theme halves the visual checks. |
 | App icons are shown, resolved lazily for visible rows on a background thread, with a bounded cache. | Raycast and TinyCast show them. zlaunch's uncapped caches cost hundreds of MB. |
 | The palette opens on the focused output (niri IPC), centered horizontally, about one third down. Blur comes from a niri `layer-rule`, not from lyncast. | GPUI's blur speaks only the KDE protocol. |
