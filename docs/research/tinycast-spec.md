@@ -138,7 +138,7 @@ The verdicts start from [notes/06](notes/06-tinycast-behaviour-spec.md#7-port-to
 | Storage, pins, limits | Adapt | `rusqlite`, with blobs as files named by hash. Unpinned entries expire after 3 months by default, and entries over 25 MB are not recorded. |
 | Clipboard screen | Keep | Type filter, day groups, preview pane, and information panel ([clipboard and paste](../decisions.md#clipboard-and-paste)). |
 | Paste-back | Adapt | Copy only in the MVP ([scope](../decisions.md#scope-of-the-mvp)). Synthetic Ctrl+V is unverified on niri ([notes/07](notes/07-paste-seam-workflow.md#grounding-tinycast-paste-and-copy-contract)). |
-| Calculator engine | Keep | A pure `calc::evaluate(text, &Env) -> Outcome` with `+`, `-`, `*`, `/`, and square root. |
+| Calculator engine | Keep | A pure `calc::evaluate(text, &Env) -> Outcome` with `+`, `-`, `*`, and `/`. |
 | Units, currency, dates, time zones | Defer | Units and currency come later as new kinds of quantity. Date-shaped input stays silent ([calculator engine](../decisions.md#calculator-engine)). |
 | Memory and leak rules | Keep | Numeric limits ([budgets](../decisions.md#budgets)). |
 | Test harnesses | Adapt | CLI integration tests in three tiers ([testing](../decisions.md#testing)). |

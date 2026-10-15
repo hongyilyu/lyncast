@@ -29,7 +29,7 @@ All entries below were made on 2026-10-14 unless they say otherwise.
 | niri on Wayland only. X11 (a DCV session) and other wlroots compositors come later. | User |
 | Clipboard delivery is copy only. Enter puts the entry back on the clipboard and closes the palette. | User |
 | Paste must plug in later per platform without a redesign. | User |
-| Calculator supports `+`, `-`, `*`, `/`, and square root only. | User |
+| Calculator supports `+`, `-`, `*`, and `/` only. Square root left on 2026-10-15. | User |
 | Ranking uses frecency and TinyCast's matching rules. User aliases and favorites come right after the MVP, with a settings surface to edit them. | User |
 | The calculator reads the root search input and answers in a card at index 0, as TinyCast does. Units and currency come later in the same engine, as new kinds of quantity, not as separate features. | User |
 
@@ -80,15 +80,27 @@ Full design: [design/calculator.md](design/calculator.md). Evidence: [notes/08-c
 | Values are quantities with a dimension. The dimension is always empty in the MVP. | Measured | Same bake-off. |
 | One operator table owns spelling, binding power, echo glyph, badge name, and the arithmetic. | Measured | Same bake-off. |
 | Parsing never reads `Env`. Atoms are priced during evaluation. | Lead | Keeps "No exchange rate" and "no snapshot" error cards possible later. |
-| Numbers are exact `i128` rationals, or `f64` for irrational results. Overflow is silent. No big-number crates. | Lead | TinyCast rejects overflow. Zero dependencies. |
+| Numbers are exact `i128` rationals. Overflow is silent. No big-number crates. | Lead | TinyCast rejects overflow. Zero dependencies. |
 | The engine returns only its `Outcome`. The daemon builds the row: key `calc:<raw query>`, index 0, section, and actions from the chord table. | Lead | The engine knows no verbs, which keeps the paste seam intact. |
-| `0x`, `0b`, and `0o` followed by digits form one radix token, and the MVP stays silent on it. | Lead | `0x10` gave a `0 × 10 = 0` card in all three prototypes. |
+| `0x`, `0b`, and `0o` followed by letters or digits form one radix token, and the MVP stays silent on it. | Lead | `0x10` gave a `0 × 10 = 0` card in all three prototypes. |
 | Date-shaped input (`dddd-dd-dd`, `dd/dd/dddd`) stays silent until dates are supported. | Lead | `2026-10-14` gave `Difference 2,002`. |
 | Full-width characters (U+FF01 to U+FF5E, U+3000) are folded to ASCII first. | Lead | TinyCast canonicalizes first. |
 | The input cap is 1024 bytes, with a parse depth cap of 32. | Lead | 256 bytes silenced ordinary pasted sums. |
-| Exact decimals keep every digit. Approximate values round to at most 15 significant digits. | Lead | `123456789012.34+0` lost its cents. |
+| Exact decimals keep every digit. | Lead | `123456789012.34+0` lost its cents. |
 | Any `NxN` shape is math. `1920x1080` shows 2,073,600, and an app or file with that name stays one row below the card. look's corpus treats it as a search, and lyncast does not follow look here. | User | "Why would anyone type 1920x1080 not mean to calculate." |
 | Queries that start with a hyphen are accepted by the CLI (`allow_hyphen_values`). A usage error exits 2. A stale rate snapshot will exit 3. | Lead | clap rejected `lyncast query -5+3`. |
+
+These entries were made on 2026-10-15.
+
+| Decision | Who | Evidence |
+|---|---|---|
+| The words badge has at most 40 characters. Longer words are dropped, so `1920x1080` shows no words. | User | A 64-character cap keeps words on every number below a million. At 40, 8% of 4- to 6-digit numbers keep them (measured on a seeded sample). |
+| The engine test reads the `fixtures` blocks in [design/calculator.md](design/calculator.md), so that page is the only copy of the fixtures. | Lead | The base's rule fixtures lived only in a scratch file under `/tmp`. |
+| The echo writes literals as the engine reads them. `.5` echoes `0.5`, and `007` echoes `7`. | Lead | The echo already rewrites `x` as `×` and groups digits. The notes/08 judge proposed it. |
+| A date shape anywhere in the query is silent, not only a whole-query date. A minus sign counts as a hyphen. | Lead | The date stage will read the whole query, so `2026-10-14+1` would change its answer. `2026−10−14` showed `Difference 2,002` until the minus sign counted. |
+| An exact value never drops an integer digit, so it prints in plain notation however large it is. A terminating decimal also keeps every fraction digit, and only a repeating decimal below 10^-7 prints in scientific notation. | Lead | `123456789012345678901234+1` shows all 24 digits instead of `1.23456789012e23`. |
+| The MVP has no square root, so every value is an exact fraction and nothing is approximate. `√`, `sqrt`, and `square root of` spell nothing, so a query with them is silent. | User | With `f64` roots, `√2×√2−2` showed `4.4408920985e-16` and `√2+10000000000000000−10000000000000000` showed `2` (measured). People rarely type roots. |
+| The MVP has no `Rates` type. `catalog::lookup(word)` takes no `Env` and finds nothing yet. | Lead | The base's `Rates` held `f64` rates, which the notes/08 review rejected. The parser's two lookup calls keep the measured extension cost. |
 
 ## Clipboard and paste
 
