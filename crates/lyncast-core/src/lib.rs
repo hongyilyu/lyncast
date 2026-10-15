@@ -3,6 +3,7 @@
 //! See `docs/design/architecture.md`.
 
 mod actions;
+pub mod calc;
 mod command;
 mod key;
 

@@ -2,13 +2,13 @@
 
 lyncast is a small, fast launcher for the [niri](https://github.com/niri-wm/niri) Wayland compositor, written in Rust with GPUI. It is modeled on TinyCast and Raycast.
 
-**Status:** steps 1 and 2 of the [MVP build plan](docs/plan.md), the scaffold and the core shapes, are done. The launcher itself is not written yet.
+**Status:** steps 1 to 3 of the [MVP build plan](docs/plan.md), the scaffold, the core shapes, and the calculator engine, are done. The launcher itself is not written yet.
 
 ## What the MVP does
 
 - Launches apps from their `.desktop` entries, with fuzzy search and frecency ranking.
 - Keeps a clipboard history of text, images, and files, and copies an entry back with Enter.
-- Answers arithmetic typed into the search box (`+`, `-`, `*`, `/`, square root) in a card above the results.
+- Answers arithmetic typed into the search box (`+`, `-`, `*`, `/`) in a card above the results.
 - Runs built-in commands, including lock, suspend, log out, reboot, and power off.
 
 The palette opens in about 45 ms from a resident daemon (measured on a software renderer). The memory budget is in the [decision log](docs/decisions.md#budgets).
