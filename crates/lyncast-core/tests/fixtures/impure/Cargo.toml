@@ -1,0 +1,19 @@
+# A stand-in for lyncast-core that reaches one banned crate through each kind
+# of edge. tests/deps.rs reads it.
+[package]
+name = "lyncast-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+mid = { path = "mid" }
+niri-ipc = { path = "niri-ipc", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+rusqlite = { path = "rusqlite" }
+
+[dev-dependencies]
+gpui-pre = { path = "gpui-pre" }
