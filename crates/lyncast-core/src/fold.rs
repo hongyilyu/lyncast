@@ -27,6 +27,10 @@ impl Folded {
     pub fn lower(&self) -> &str {
         &self.lower
     }
+
+    pub(crate) fn into_parts(self) -> (String, String) {
+        (self.kept, self.lower)
+    }
 }
 
 /// Folds text: full-width forms narrowed, format characters (general category Cf) dropped,

@@ -7,4 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Pinned exactly: the score fixtures in docs/design/ranking.md are frizbee 0.13.0's real scores.
+frizbee = "=0.13.0"
 unicode-normalization = "0.1.25"

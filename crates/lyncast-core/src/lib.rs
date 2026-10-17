@@ -8,6 +8,7 @@ mod command;
 pub mod desktop;
 mod fold;
 mod key;
+pub mod rank;
 
 pub use actions::{ActionItem, Actions, Chord, DesktopAction, Subject, Verb};
 pub use command::Command;
@@ -19,6 +20,8 @@ pub use key::{AppId, ClipId, Key, KeyError, Kind};
 pub struct Row {
     pub subject: Subject,
     pub section: Section,
+    /// An app's `Name` in the session locale, or a command's title.
+    pub title: String,
 }
 
 /// The root list's sections. Declaration order is the merge order. A typed query

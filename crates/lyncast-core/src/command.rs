@@ -27,6 +27,36 @@ impl Command {
         Command::PowerOff,
     ];
 
+    /// The title the row shows and the index matches.
+    pub fn title(self) -> &'static str {
+        match self {
+            Command::ClipboardHistory => "Clipboard History",
+            Command::OpenConfig => "Open Config",
+            Command::ReloadApps => "Reload Apps",
+            Command::Quit => "Quit lyncast",
+            Command::LockScreen => "Lock Screen",
+            Command::Suspend => "Suspend",
+            Command::LogOut => "Log Out",
+            Command::Reboot => "Reboot",
+            Command::PowerOff => "Power Off",
+        }
+    }
+
+    /// Words that make the command show without ranking it, as an app's `Keywords` do.
+    pub fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Command::ClipboardHistory => &["paste"],
+            Command::OpenConfig => &["settings", "preferences"],
+            Command::ReloadApps => &["refresh"],
+            Command::Quit => &["exit"],
+            Command::LockScreen => &[],
+            Command::Suspend => &["sleep"],
+            Command::LogOut => &["logout", "sign out"],
+            Command::Reboot => &["restart"],
+            Command::PowerOff => &["shutdown"],
+        }
+    }
+
     /// The id in a `cmd:` key.
     pub(crate) fn id(self) -> &'static str {
         match self {
