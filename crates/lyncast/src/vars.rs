@@ -2,9 +2,11 @@ use std::env;
 use std::ffi::OsString;
 
 /// The environment the daemon reads at start. The app scan reads all of it but
-/// `XDG_CONFIG_HOME`. An empty variable counts as unset, except `PATH`. A value that is not
-/// UTF-8 counts as unset, except in `XDG_DATA_DIRS` and `PATH`, whose entries count one by one.
-/// `Vars::default()` is an environment with nothing set.
+/// `XDG_CONFIG_HOME` and `WAYLAND_DISPLAY`. An empty variable counts as unset, except `PATH`. A
+/// value that is not UTF-8 counts as unset, except in `XDG_DATA_DIRS`, `PATH`, and
+/// `WAYLAND_DISPLAY`, and the entries of the first two count one by one. `WAYLAND_SOCKET` counts
+/// as set whenever it is in the environment, even empty or not UTF-8, and has no field, since
+/// [`Vars::read`] then fails. `Vars::default()` is an environment with nothing set.
 #[derive(Default)]
 pub struct Vars {
     /// The locale names to try, best first. `LANGUAGE` split on `:`, as GLib reads it, or else
@@ -17,10 +19,21 @@ pub struct Vars {
     pub home: Option<String>,
     /// As set, even when empty, because an empty `PATH` holds one empty entry and not the default.
     pub path: Option<OsString>,
+    /// The compositor whose clipboard the daemon keeps. wl-clipboard-rs reads it again from the
+    /// environment, which the daemon never changes, through wayland-client's `connect_to_env`,
+    /// which takes the descriptor that `WAYLAND_SOCKET` names first, so [`Vars::read`] refuses it.
+    pub wayland_display: Option<OsString>,
 }
 
 impl Vars {
-    pub fn read() -> Vars {
+    /// Fails when `WAYLAND_SOCKET` is set, since the daemon reaches its compositor only through
+    /// `WAYLAND_DISPLAY`.
+    pub fn read() -> Result<Vars, String> {
+        if env::var_os("WAYLAND_SOCKET").is_some() {
+            return Err(
+                "WAYLAND_SOCKET is set; lyncast connects through WAYLAND_DISPLAY".to_owned(),
+            );
+        }
         let var = |name: &str| env::var(name).ok().filter(|value| !value.is_empty());
         let locales = match var("LANGUAGE") {
             Some(list) => list.split(':').map(str::to_owned).collect(),
@@ -30,7 +43,7 @@ impl Vars {
                 .into_iter()
                 .collect(),
         };
-        Vars {
+        Ok(Vars {
             locales,
             current_desktop: var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
             data_home: var("XDG_DATA_HOME"),
@@ -38,7 +51,8 @@ impl Vars {
             config_home: var("XDG_CONFIG_HOME"),
             home: var("HOME"),
             path: env::var_os("PATH"),
-        }
+            wayland_display: env::var_os("WAYLAND_DISPLAY").filter(|value| !value.is_empty()),
+        })
     }
 
     /// An absolute `XDG_DATA_HOME`, else `$HOME/.local/share` for an absolute `HOME`, as the

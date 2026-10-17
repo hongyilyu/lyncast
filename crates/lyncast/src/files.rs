@@ -29,16 +29,26 @@ impl fmt::Display for Unread {
     }
 }
 
-/// A write that did not reach the file at its path, and why, as its warning spells it.
+/// A change that did not reach the disk, and why. A warning spells it with its path, for a
+/// write that failed or a clip refused because too much waits for the writer, and a reply spells
+/// it without one, for a pin, an unpin, or a delete refused because the writer has no room or has
+/// ended.
 pub struct Unsaved {
-    path: PathBuf,
+    path: Option<PathBuf>,
     why: String,
 }
 
 impl Unsaved {
     pub fn new(path: &Path, why: impl ToString) -> Unsaved {
         Unsaved {
-            path: path.to_owned(),
+            path: Some(path.to_owned()),
+            why: why.to_string(),
+        }
+    }
+
+    pub fn refused(why: impl ToString) -> Unsaved {
+        Unsaved {
+            path: None,
             why: why.to_string(),
         }
     }
@@ -46,7 +56,10 @@ impl Unsaved {
 
 impl fmt::Display for Unsaved {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: not saved: {}", self.path.display(), self.why)
+        if let Some(path) = &self.path {
+            write!(f, "{}: ", path.display())?;
+        }
+        write!(f, "not saved: {}", self.why)
     }
 }
 

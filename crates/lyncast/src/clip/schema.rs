@@ -1,9 +1,11 @@
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
+use super::blob::Hash;
 use super::{Content, Seq};
 
-/// The schema of `schema.sql` in docs/design/clipboard-and-paste.md. A file that holds anything
-/// loads only when it holds what this makes.
+/// The schema that the writer creates in one transaction before its first change, which
+/// `schema.sql` in docs/design/clipboard-and-paste.md holds too. A file that holds anything loads
+/// only when it holds what this makes.
 pub const SCHEMA: &str = "PRAGMA application_id = 1819897443;
 CREATE TABLE IF NOT EXISTS clips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,9 +23,27 @@ CREATE TABLE IF NOT EXISTS clips (
     CHECK ((kind = 'image') = (preview IS NULL))
 ) STRICT;";
 
+impl ToSql for Content {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.spelling().into())
+    }
+}
+
 impl FromSql for Content {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Content> {
         Content::read(value.as_str()?).ok_or(FromSqlError::InvalidType)
+    }
+}
+
+impl ToSql for Hash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl FromSql for Hash {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Hash> {
+        Hash::from_hex(value.as_str()?).ok_or(FromSqlError::InvalidType)
     }
 }
 

@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lyncast_core::rank::{Index, Timestamp, Visits};
-use lyncast_core::{ActionItem, Command, Key, Subject, root};
+use lyncast_core::{ActionItem, ClipId, Command, Key, Subject, root};
 
-use crate::clip::{self, Clips};
+use crate::clip::{self, Capture, Clips, Entry};
 use crate::config;
 use crate::vars::Vars;
 use crate::view::{self, Spelled};
@@ -49,11 +49,18 @@ pub struct Daemon {
     /// ended after Quit, so nothing is left to write.
     store: Option<Store>,
     clips: Clips,
+    capture: CaptureThread,
     summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
     /// Quit has begun, so every request fails.
     quitting: bool,
+}
+
+enum CaptureThread {
+    NoCompositor,
+    Running(Capture),
+    Ended,
 }
 
 /// What one request comes to.
@@ -107,6 +114,7 @@ impl Daemon {
         visits: Visits,
         store: Option<Store>,
         clips: Clips,
+        capture: Option<Capture>,
     ) -> Daemon {
         Daemon {
             vars: Arc::new(vars),
@@ -116,6 +124,7 @@ impl Daemon {
             visits,
             store,
             clips,
+            capture: capture.map_or(CaptureThread::NoCompositor, CaptureThread::Running),
             summon: Summon::Closed,
             jobs: 0,
             quitting: false,
@@ -189,9 +198,37 @@ impl Daemon {
         reply
     }
 
-    /// Quit has begun, no job is out, and each writer has ended after its last write.
+    /// Records what the clipboard offered. The capture thread keeps running while Quit waits
+    /// for the work in flight, so its entries still count.
+    pub fn captured(&mut self, entry: Entry, now: Timestamp) {
+        self.clips.record(entry, now);
+    }
+
+    /// The writer of the clips could not save the new row `id`, so the history drops it.
+    pub fn unsaved(&mut self, id: ClipId) {
+        self.clips.unsaved(id);
+    }
+
+    /// The capture thread has ended: Quit cancelled it, or the compositor went once the stop had
+    /// begun.
+    pub fn capture_ended(&mut self) {
+        self.capture = CaptureThread::Ended;
+        self.settle();
+    }
+
+    /// The compositor has gone, so the daemon stops as Quit does, with no reply to send.
+    pub fn compositor_closed(&mut self) {
+        self.quitting = true;
+        self.capture_ended();
+    }
+
+    /// Quit has begun, no job is out, the capture thread has ended, and each writer has ended
+    /// after its last write.
     pub fn stopped(&self) -> bool {
-        self.idle() && self.store.is_none() && self.clips.has_no_writer()
+        self.idle()
+            && !matches!(self.capture, CaptureThread::Running(_))
+            && self.store.is_none()
+            && self.clips.has_no_writer()
     }
 
     /// A writer has ended. Each ends only once Quit has begun and no job is out.
@@ -214,6 +251,9 @@ impl Daemon {
         }
         if let Some(store) = &self.store {
             store.close();
+        }
+        if let CaptureThread::Running(capture) = &self.capture {
+            return capture.cancel();
         }
         self.clips.close();
     }
@@ -440,7 +480,8 @@ mod tests {
             Index::new(Vec::new()),
             Visits::default(),
             None,
-            Clips::open(None, Retention::DEFAULT, || {}).unwrap(),
+            Clips::open(None, Retention::DEFAULT, |_| {}, || {}).unwrap(),
+            None,
         );
         let (older, older_success) = reload(&mut daemon);
         let (newer, newer_success) = reload(&mut daemon);

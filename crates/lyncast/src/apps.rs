@@ -180,6 +180,7 @@ mod tests {
             config_home: None,
             home: Some(format!("{root}/home/")),
             path: None,
+            wayland_display: None,
         };
         let paths = |vars: Vars| -> Vec<(String, Vec<String>)> {
             scan(&vars)
@@ -247,6 +248,7 @@ mod tests {
             config_home: None,
             home: None,
             path: None,
+            wayland_display: None,
         })
         .iter()
         .map(|app| app.name().to_owned())

@@ -96,7 +96,7 @@ fn uris_fixtures() {
         .into_iter()
         .map(|line| {
             let (list, want) = split(&line);
-            let got = clip::paths(&doc::unescape(list));
+            let got = clip::paths(&doc::unescape(list), usize::MAX);
             (line.clone(), doc::unescape(want), got)
         })
         .collect();
@@ -120,6 +120,37 @@ fn a_preview_is_the_longest_whole_prefix_of_1024_bytes() {
                     "{case}: the next character fits"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_preview_of_paths_decodes_only_what_it_shows() {
+    let check = |list: &str, case: &str| {
+        let all = clip::paths(list, usize::MAX);
+        let bounded = clip::paths(list, clip::PREVIEW_BYTES);
+        assert_eq!(clip::preview(&bounded), clip::preview(&all), "{case}");
+        let decoded = bounded.chars().count();
+        assert!(
+            decoded <= clip::PREVIEW_BYTES + 3,
+            "{case}: {decoded} characters decoded"
+        );
+    };
+    for name in ["a", "%C3%A9", "%FF", "a%20b", "%F0%9F%98%80"] {
+        for count in 1..200 {
+            let line = format!("file:///{}", name.repeat(count));
+            let list = [
+                line.as_str(),
+                "copy",
+                line.as_str(),
+                &line[..line.len() / 2],
+            ]
+            .join("\n");
+            check(&list, &format!("{count} of {name}"));
+        }
+        for lead in 1010..1030 {
+            let line = format!("file:///{}{}", "a".repeat(lead), name.repeat(20));
+            check(&line, &format!("{lead} a then {name}"));
         }
     }
 }

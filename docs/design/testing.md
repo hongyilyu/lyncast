@@ -90,7 +90,7 @@ The clipboard fixtures run `sqlite3`, from the `sqlite` package, which the dev b
 
 These are missing on the dev box:
 
-- `wl-copy` and `wl-paste` (notes/07, measured). Tier 2 seeds and reads the clipboard with an in-process wl-clipboard-rs helper.
+- `wl-copy` and `wl-paste` (notes/07, measured). Tier 2 seeds the clipboard through the test binary run again as a wl-clipboard-rs helper ([clipboard and paste](clipboard-and-paste.md#the-fixtures)).
 - niri. Its build needs libinput, libseat, systemd, mesa-libgbm, pango, cairo, and libdisplay-info `-devel` packages, all in the AL2023 repos (notes/03). No note built it (notes/07), so niri inside Xvfb is unverified.
 
 ## Tier 2 cases for copy and close

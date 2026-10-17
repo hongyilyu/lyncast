@@ -55,18 +55,29 @@ pub fn preview(text: &str) -> &str {
     &text[..end]
 }
 
-/// The paths of the local files that a `text/uri-list` or `x-special/gnome-copied-files` list
-/// names, one per line, as a file entry shows and pastes them. A local file is a `file://` line
-/// whose host is empty or `localhost`, and every other line goes: a comment, another scheme,
-/// another host, and the `copy` or `cut` that starts a GNOME list. Each `%XX` is decoded, and a
-/// decoded byte that is not UTF-8 reads as U+FFFD.
-pub fn paths(list: &str) -> String {
+/// The lines of a `text/uri-list` or `x-special/gnome-copied-files` list that name a local file,
+/// in order, each without a trailing carriage return. A local file is a `file://` line whose host
+/// is empty or `localhost`, and every other line goes: a comment, another scheme, another host,
+/// and the `copy` or `cut` that starts a GNOME list.
+pub fn local_uris(list: &str) -> impl Iterator<Item = &str> {
+    lines(list).filter(|line| local_path(line).is_some())
+}
+
+/// The paths of the local files that a list names, one per line, as a file entry shows and pastes
+/// them, with each `%XX` decoded. A decoded byte that is not UTF-8 reads as U+FFFD. The decoding
+/// stops once the paths hold `max` bytes and 3 more, inside a line too, which ends every character
+/// that starts before `max`, so a preview of `max` bytes decodes only what it shows.
+pub fn paths(list: &str, max: usize) -> String {
+    let limit = max.saturating_add(3);
     let mut paths = Vec::new();
     for path in lines(list).filter_map(local_path) {
+        if paths.len() >= limit {
+            break;
+        }
         if !paths.is_empty() {
             paths.push(b'\n');
         }
-        percent_decode(path, &mut paths);
+        percent_decode(path, &mut paths, limit);
     }
     String::from_utf8_lossy(&paths).into_owned()
 }
@@ -82,10 +93,10 @@ fn local_path(line: &str) -> Option<&str> {
     path.starts_with('/').then_some(path)
 }
 
-fn percent_decode(text: &str, out: &mut Vec<u8>) {
+fn percent_decode(text: &str, out: &mut Vec<u8>, limit: usize) {
     let bytes = text.as_bytes();
     let mut at = 0;
-    while at < bytes.len() {
+    while at < bytes.len() && out.len() < limit {
         // from_str_radix also reads a sign, as in `%+1`, so the digits are checked first.
         let hex = bytes
             .get(at + 1..at + 3)

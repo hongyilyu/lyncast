@@ -16,6 +16,14 @@ impl Permits {
         }
     }
 
+    /// Whether `n` more would fit, without taking them.
+    pub fn room(&self, n: u64) -> bool {
+        self.taken
+            .load(Ordering::Relaxed)
+            .checked_add(n)
+            .is_some_and(|taken| taken <= self.max)
+    }
+
     /// A permit for `n` more, or `None` when they would bring the count past its most.
     pub fn take(&self, n: u64) -> Option<Permit> {
         self.taken

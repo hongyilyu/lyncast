@@ -2,10 +2,13 @@
 //! connection, for [`MAX_CONNECTIONS`] at most at once, which reads the request line, parses it,
 //! and passes it to the owner loop over a channel. The owner loop holds the [`Daemon`] and never
 //! touches a socket. Work that blocks runs on a worker thread, whose result comes back over the
-//! same channel, and each writer says there when it has ended. No [`Daemon`] method blocks, and
-//! only this headless host waits, on its channel. Plan step 7 makes the same calls from a GPUI task
-//! that reads an async channel.
+//! same channel. The capture thread hands over each entry there, and says there when it has ended,
+//! after Quit or because the compositor has gone. The writer of the clips hands over each new row
+//! it could not save, and each writer says there when it has ended. No [`Daemon`] method blocks,
+//! and only this headless host waits, on its channel. Plan step 7 makes the same calls from a GPUI
+//! task that reads an async channel.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::mem;
@@ -17,13 +20,14 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lyncast_core::ClipId;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
 use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, WriterKind, quitting};
 use crate::apps;
-use crate::clip::Clips;
+use crate::clip::{Capture, Clips, Seen};
 use crate::config;
 use crate::permit::Permits;
 use crate::vars::Vars;
@@ -68,6 +72,13 @@ enum Event {
     Finished(Success, Result<Done, String>, ReplyTo),
     /// A writer ended, after Quit.
     WriterEnded(WriterKind),
+    Unsaved(ClipId),
+    Seen(Seen),
+}
+
+enum Stop {
+    Quit(Reply, ReplyTo),
+    Closed,
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -123,7 +134,7 @@ pub fn run(record: Option<PathBuf>) -> ExitCode {
 fn start(record: Option<PathBuf>) -> Result<(), String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
-    let vars = Vars::read();
+    let vars = Vars::read().map_err(not_started)?;
     let config = config::read(vars.config_home().as_deref().map(Path::new));
     let index = Index::new(apps::scan(&vars));
     let (events, inbox) = mpsc::channel();
@@ -138,13 +149,30 @@ fn start(record: Option<PathBuf>) -> Result<(), String> {
         Some(dir) => Store::open(dir, ended(WriterKind::Visits)).map_err(not_started)?,
         None => (Visits::default(), None),
     };
+    let unsaved = {
+        let events = events.clone();
+        move |id| {
+            let _ = events.send(Event::Unsaved(id));
+        }
+    };
     let clips = Clips::open(
         data_home.as_deref(),
         config.retention,
+        unsaved,
         ended(WriterKind::Clips),
     )
     .map_err(not_started)?;
-    let daemon = Daemon::new(vars, index, visits, store, clips);
+    let capture = match vars.wayland_display {
+        Some(_) => {
+            let events = events.clone();
+            let seen = move |seen| {
+                let _ = events.send(Event::Seen(seen));
+            };
+            Some(Capture::start(clips.pending(), seen).map_err(not_started)?)
+        }
+        None => None,
+    };
+    let daemon = Daemon::new(vars, index, visits, store, clips, capture);
     let socket = runtime.join(wire::SOCKET);
     warning::flush(Instant::now() + WARNINGS_BEFORE_BIND);
     let listener = bind(&socket)?;
@@ -156,8 +184,9 @@ fn start(record: Option<PathBuf>) -> Result<(), String> {
     serve(daemon, host, inbox, listener, Claim { lock, socket })
 }
 
-/// The reason the daemon gives when a thread it needs cannot start.
-fn not_started(error: io::Error) -> String {
+/// The reason the daemon gives when `WAYLAND_SOCKET` is set, when a thread it needs cannot start,
+/// or when the compositor cannot be reached or offers no seat or neither data-control protocol.
+fn not_started(error: impl fmt::Display) -> String {
     format!("not started: {error}")
 }
 
@@ -201,9 +230,9 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     UnixListener::bind(socket).map_err(failed)
 }
 
-/// The owner loop. It serves until a Quit command, and then stops in the order
-/// docs/design/daemon.md gives: no new connections, the work in flight, the last write, the
-/// reply. The daemon keeps answering while it stops.
+/// The owner loop. It serves until a Quit command or until the compositor goes, and then stops in
+/// the order docs/design/daemon.md gives: no new connections, the work in flight, the last
+/// writes, the reply. The daemon keeps answering while it stops.
 fn serve(
     mut daemon: Daemon,
     mut host: Host,
@@ -216,10 +245,10 @@ fn serve(
         .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
     daemon.started(now());
-    let (reply, reply_to) = loop {
+    let stop = loop {
         let event = inbox.recv().expect("the host holds a sender");
-        if let Some(quit) = host.dispatch(&mut daemon, event) {
-            break quit;
+        if let Some(stop) = host.dispatch(&mut daemon, event) {
+            break stop;
         }
     };
     let _ = fs::remove_file(&claim.socket);
@@ -234,8 +263,7 @@ fn serve(
         let Ok(event) = inbox.recv_timeout(wait) else {
             break;
         };
-        // The daemon fails every request now, so no second Quit comes back.
-        host.dispatch(&mut daemon, event);
+        host.drain(&mut daemon, event);
     }
     // The daemon takes no more events, so each one still queued fails.
     for event in inbox.try_iter() {
@@ -250,10 +278,16 @@ fn serve(
     } else {
         mem::forget(claim.lock);
     }
-    warning::flush(Instant::now() + WARNINGS_BEFORE_REPLY);
-    host.unwritten.send(reply_to, reply);
+    let stopped = match stop {
+        Stop::Quit(reply, reply_to) => {
+            warning::flush(Instant::now() + WARNINGS_BEFORE_REPLY);
+            host.unwritten.send(reply_to, reply);
+            Ok(())
+        }
+        Stop::Closed => Err("the Wayland connection closed".to_owned()),
+    };
     host.unwritten.wait(Instant::now() + REPLIES_BEFORE_EXIT);
-    Ok(())
+    stopped
 }
 
 /// What the owner loop holds beside the daemon.
@@ -265,22 +299,51 @@ struct Host {
 }
 
 impl Host {
-    /// Hands one event to the daemon and sends the reply it gives, or starts the job it hands
-    /// back. Gives back the reply to a Quit, which waits.
-    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<(Reply, ReplyTo)> {
+    /// Hands one event to the daemon while it serves, and sends the reply it gives, or starts the
+    /// job it hands back. Gives back the reply to a Quit, which waits, or the compositor's end.
+    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<Stop> {
         match event {
             Event::Request(request, reply_to) => match daemon.handle(request, now()) {
-                Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
-                Handled::Job(job) => self.start(daemon, job, reply_to),
-                Handled::Quit(reply) => return Some((reply, reply_to)),
+                Handled::Quit(reply) => return Some(Stop::Quit(reply, reply_to)),
+                handled => self.answer(daemon, handled, reply_to),
             },
+            Event::Seen(Seen::Closed) => {
+                daemon.compositor_closed();
+                return Some(Stop::Closed);
+            }
+            event => self.drain(daemon, event),
+        }
+        None
+    }
+
+    /// Hands one event to the daemon, and no event here begins a stop. The stop hands it every
+    /// event, since the daemon then fails every request and the compositor's end only ends the
+    /// capture thread, and [`Host::dispatch`] hands it the events that never begin one.
+    fn drain(&mut self, daemon: &mut Daemon, event: Event) {
+        match event {
+            Event::Request(request, reply_to) => {
+                let handled = daemon.handle(request, now());
+                self.answer(daemon, handled, reply_to);
+            }
+            Event::Seen(Seen::Entry(entry)) => daemon.captured(entry, now()),
+            Event::Seen(Seen::Ended | Seen::Closed) => daemon.capture_ended(),
             Event::Finished(success, done, reply_to) => {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
             Event::WriterEnded(writer) => daemon.writer_ended(writer),
+            Event::Unsaved(id) => daemon.unsaved(id),
         }
-        None
+    }
+
+    /// Sends the reply that a request came to, or starts its job. A Quit gets the reply of any
+    /// request once the stop has begun, because [`Host::dispatch`] takes the Quit that begins it.
+    fn answer(&mut self, daemon: &mut Daemon, handled: Handled, reply_to: ReplyTo) {
+        match handled {
+            Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
+            Handled::Job(job) => self.start(daemon, job, reply_to),
+            Handled::Quit(_) => self.unwritten.send(reply_to, quitting()),
+        }
     }
 
     /// Answers an event that is still queued once Quit stops waiting, without handing it to the
