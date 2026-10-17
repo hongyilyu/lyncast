@@ -88,7 +88,7 @@ fn query_prints_the_doc_rows() {
         "$ XDG_DATA_DIRS=$TREE/nowhere\\x{FF}:$TREE/usr lyncast query firef --json",
         "$ PATH=$TREE/nowhere\\x{FF}:$TREE/bin lyncast query notes --json",
     ] {
-        let line = command_line(command, &tree).expect("a cli line runs lyncast");
+        let line = command_line(command, &[("$TREE", &tree)]).expect("a cli line runs lyncast");
         assert!(
             line.vars[0]
                 .1
@@ -141,7 +141,7 @@ fn query_prints_the_doc_rows() {
             .lines
             .split_first()
             .expect("a cli block has a command");
-        let line = command_line(command, &tree).expect("a cli line runs lyncast");
+        let line = command_line(command, &[("$TREE", &tree)]).expect("a cli line runs lyncast");
         let runtime = Runtime::new();
         let mut daemon = line.command(["daemon", "--headless"], &env);
         daemon
@@ -184,6 +184,9 @@ fn query_prints_the_doc_rows() {
         blocks.len(),
         failures.join("\n")
     );
+    // A run that fails keeps the trees to look at, and materialize removes them first.
+    fs::remove_dir_all(&tree).unwrap();
+    fs::remove_dir_all(&out_dir).unwrap();
 }
 
 /// A write that fails exits 1, even when the error message cannot be written either, and a usage

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lyncast_core::rank::Index;
 
-use super::{Done, Work};
+use super::{Done, Task};
 use crate::apps;
 
 #[derive(Clone)]
@@ -59,16 +59,16 @@ impl Runner {
     }
 }
 
-impl Work {
+impl Task {
     pub fn run(self, runner: &Runner) -> Result<Done, String> {
         match self {
-            Work::Spawn(argv) => runner.spawn(&argv).map(|()| Done::Ran),
-            Work::OpenConfig(path) => {
+            Task::Spawn(argv) => runner.spawn(&argv).map(|()| Done::Ran),
+            Task::OpenConfig(path) => {
                 create(&path)?;
                 let argv = ["xdg-open".to_owned(), path.display().to_string()];
                 runner.spawn(&argv).map(|()| Done::Ran)
             }
-            Work::Scan { vars, number } => Ok(Done::Scanned {
+            Task::Scan { vars, number } => Ok(Done::Scanned {
                 number,
                 index: Index::new(apps::scan(&vars)),
             }),

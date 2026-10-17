@@ -278,18 +278,18 @@ These rows pin the echo and digit rules in the MVP section above. `10^22+1-10^22
 
 ### Hyphen queries reach the engine
 
-The engine gives these cards. [Plan step 5](../plan.md) checks them again through the CLI.
+The engine gives these cards. The daemon's [card session](daemon.md#the-calculator-card-comes-first) checks them again through the CLI.
 
 ```fixtures
 −5+3 => −5 + 3 | Sum | -2 | -2 | Minus Two
 -(2+3) => −(2 + 3) | Negation | -5 | -5 | Minus Five
 ```
 
-Default clap rejected `lyncast query -5+3` (measured), so the query text sets `allow_hyphen_values`. Plan step 5 tests these through the CLI:
+Default clap rejected `lyncast query -5+3` (measured), so the query text sets `allow_hyphen_values`. That session and [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `-5+3` cli block check these through the CLI:
 
 - `lyncast query -5+3` prints the `-5+3` card.
 - `lyncast query --5` prints no calculator row.
-- `lyncast query '-(2+3)'` prints `−(2 + 3) | Negation | -5 | -5 | Minus Five`.
+- `lyncast query -(2+3)` prints the card whose `card` object holds `−(2 + 3)`, `Negation`, `-5`, `-5`, and `Minus Five`.
 - A usage error exits 2.
 
 ### Generated inputs do not fit on one line

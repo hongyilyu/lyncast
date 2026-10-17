@@ -18,6 +18,7 @@ use lyncast_core::rank::{Timestamp, Visit, Visits};
 use serde::{Deserialize, Serialize};
 
 use crate::files::{self, Unread};
+use crate::warning::warn;
 
 /// One member of the file.
 #[derive(Serialize, Deserialize)]
@@ -109,10 +110,13 @@ impl Store {
                     let why = format!(
                         "{error}; not moved to ranking.json.bad: {moved}; the visits stay in memory"
                     );
-                    warn(&path, &why);
+                    warn(format_args!("{}: {why}", path.display()));
                     return Ok((Visits::default(), None));
                 }
-                warn(&path, &format!("{error}; moved it to ranking.json.bad"));
+                warn(format_args!(
+                    "{}: {error}; moved it to ranking.json.bad",
+                    path.display()
+                ));
                 BTreeMap::new()
             }
         };
@@ -142,7 +146,7 @@ impl Store {
         thread::Builder::new().spawn(move || {
             while let Some(bytes) = writer.next() {
                 if let Err(error) = write(&path, &bytes) {
-                    warn(&path, &format!("not saved: {error}"));
+                    warn(format_args!("{}: not saved: {error}", path.display()));
                 }
             }
             ended();
@@ -216,7 +220,7 @@ fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(io::Error::other(too_large()));
     }
-    fs::create_dir_all(path.parent().expect("ranking.json is in a directory"))?;
+    files::create_private_dir(path.parent().expect("ranking.json is in a directory"))?;
     let temporary = path.with_extension(format!("json.{}.tmp", process::id()));
     let written = File::create(&temporary).and_then(|mut file| {
         file.write_all(bytes)?;
@@ -252,10 +256,4 @@ fn move_aside(path: &Path, bad: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-/// Prints a warning about the file on stderr.
-fn warn(path: &Path, message: &str) {
-    // eprintln! panics when stderr fails, which would take the daemon down.
-    let _ = writeln!(io::stderr(), "lyncast: {}: {message}", path.display());
 }

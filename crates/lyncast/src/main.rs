@@ -4,14 +4,23 @@
 
 mod apps;
 mod client;
+mod clip;
+mod config;
 mod daemon;
+// The fixture reader that lyncast-core's tests use, for the unit tests that read a design doc.
+#[cfg(test)]
+#[path = "../../lyncast-core/tests/doc/mod.rs"]
+mod doc;
 mod files;
+mod vars;
 mod view;
+mod warning;
 mod wire;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use lyncast_core::{Chord, Key, Verb};
@@ -56,6 +65,11 @@ enum Cmd {
         #[arg(long, action = clap::ArgAction::Help)]
         help: Option<bool>,
     },
+    /// Work with the clipboard history.
+    Clip {
+        #[command(subcommand)]
+        command: ClipCmd,
+    },
     /// Run one action of a row, and print what happened.
     Activate {
         /// The row's key, such as `app:firefox.desktop`, `cmd:reboot`, or `calc:-5+3`.
@@ -76,6 +90,16 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ClipCmd {
+    /// Print every clip in screen order, one per line.
+    List {
+        /// Print each clip as one compact JSON object. Required until a plain view exists.
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
 /// Exits 0 on success, 1 when the request fails or stdout cannot be written, and 2 on a usage
 /// error.
 fn main() -> ExitCode {
@@ -88,6 +112,9 @@ fn main() -> ExitCode {
         Cmd::Toggle => summon(&Request::Toggle),
         Cmd::Status => summon(&Request::Status),
         Cmd::Query { text, .. } => query(text),
+        Cmd::Clip {
+            command: ClipCmd::List { .. },
+        } => clips(),
         Cmd::Activate {
             key,
             chord,
@@ -104,6 +131,8 @@ fn main() -> ExitCode {
     match done {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
+            // A daemon that stops on an error prints the warnings it queued before the reason.
+            warning::flush(Instant::now() + Duration::from_secs(1));
             // eprintln! panics when stderr fails too, which would exit 101.
             let _ = writeln!(io::stderr(), "lyncast: {reason}");
             ExitCode::FAILURE
@@ -131,7 +160,14 @@ fn summon(request: &Request) -> Result<(), String> {
 
 fn query(text: String) -> Result<(), String> {
     match client::send(&Request::Query { text })? {
-        Reply::Rows { rows } => print(|out| view::write_rows(out, &rows)),
+        Reply::Rows { rows } => print(|out| view::write_lines(out, &rows)),
+        reply => Err(client::refusal(reply)),
+    }
+}
+
+fn clips() -> Result<(), String> {
+    match client::send(&Request::Clips)? {
+        Reply::Clips { clips } => print(|out| view::write_lines(out, &clips)),
         reply => Err(client::refusal(reply)),
     }
 }

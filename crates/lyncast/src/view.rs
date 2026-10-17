@@ -1,13 +1,16 @@
-//! The JSON view that `lyncast query --json` prints: one compact object per row and line, with
-//! the fields in declaration order. The daemon sends the same objects in its `rows` reply, and
-//! the client prints them as they came. The wire spellings of keys, kinds, sections, verbs, and
-//! chords live here, and serde stays out of lyncast-core.
+//! The JSON views that `lyncast query --json` and `lyncast clip list --json` print: one compact
+//! object per row and line, with the fields in declaration order. The daemon sends the same
+//! objects in its `rows` and `clips` replies, and the client prints them as they came. The wire
+//! spellings of keys, kinds, sections, verbs, and chords live here, and serde stays out of
+//! lyncast-core.
 
 use std::io::{self, Write};
 
 use lyncast_core::calc::Answer;
 use lyncast_core::{Actions, Chord, Key, KeyError, Kind, Row, Section, Verb};
 use serde::{Deserialize, Serialize};
+
+use crate::clip;
 
 /// A value that the CLI and the wire spell as `query --json` prints it.
 pub trait Spelled: Sized {
@@ -49,6 +52,32 @@ struct ActionView {
     chords: Vec<String>,
 }
 
+/// One clip as `clip list --json` prints it.
+#[derive(Serialize, Deserialize)]
+pub struct ClipView {
+    id: i64,
+    kind: String,
+    pinned: bool,
+    mime: String,
+    bytes: u64,
+    /// `null` for an image.
+    preview: Option<String>,
+}
+
+/// The view of each clip, in the order given.
+pub fn clips(rows: &[&clip::Row]) -> Vec<ClipView> {
+    rows.iter()
+        .map(|row| ClipView {
+            id: row.id.0,
+            kind: row.content.spelling().to_owned(),
+            pinned: row.pinned,
+            mime: row.mime.clone(),
+            bytes: row.bytes,
+            preview: row.preview.clone(),
+        })
+        .collect()
+}
+
 /// The view of each row, numbered in order.
 pub fn rows(rows: &[Row]) -> Vec<RowView> {
     rows.iter()
@@ -68,8 +97,8 @@ pub fn rows(rows: &[Row]) -> Vec<RowView> {
         .collect()
 }
 
-/// Writes one line per row.
-pub fn write_rows(out: &mut impl Write, rows: &[RowView]) -> io::Result<()> {
+/// Writes one line per row or clip.
+pub fn write_lines<T: Serialize>(out: &mut impl Write, rows: &[T]) -> io::Result<()> {
     for row in rows {
         serde_json::to_writer(&mut *out, row)?;
         out.write_all(b"\n")?;

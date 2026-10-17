@@ -1,9 +1,9 @@
 //! The socket and the threads around the daemon's state. An accept thread starts one thread per
 //! connection, which reads the request line, parses it, and passes it to the owner loop over a
 //! channel. The owner loop holds the [`Daemon`] and never touches a socket. Work that blocks runs
-//! on a worker thread, whose result comes back over the same channel. No [`Daemon`] method
-//! blocks, and only this headless host waits, on its channel. Plan step 7 makes the same calls
-//! from a GPUI task that reads an async channel.
+//! on a worker thread, and a copy on the copier thread, and each result comes back over the same
+//! channel. No [`Daemon`] method blocks, and only this headless host waits, on its channel. Plan
+//! step 7 makes the same calls from a GPUI task that reads an async channel.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -15,22 +15,30 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lyncast_core::ClipId;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
-use crate::apps::{self, Vars};
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, Writer, quitting};
+use crate::apps;
+use crate::clip::{Capture, Clips, Copier, Seen};
+use crate::config;
+use crate::vars::Vars;
+use crate::warning;
 use crate::wire::{self, Reply, Request};
 
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
 const LOCK: &str = "lyncast.lock";
 
-/// How long a connection may take to send its request or to read its reply.
+/// How long each read of a request and each write of a reply may wait, so a client that sends
+/// or reads slowly is still served.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long Quit waits for the replies to be written before the process exits.
-const QUIT_WRITE: Duration = Duration::from_secs(1);
+/// How long the start waits for its warnings to reach stderr before it binds the socket, so a
+/// client that the socket answers finds them there, and how long Quit waits for its warnings and
+/// its replies before the process exits.
+const LAST_WRITES: Duration = Duration::from_secs(1);
 
 /// The most bytes a request line may hold, with its newline.
 const MAX_REQUEST: u64 = 1 << 20;
@@ -40,8 +48,20 @@ enum Event {
     Request(Request, ReplyTo),
     /// A worker thread's job ended.
     Finished(Success, Result<Done, String>, ReplyTo),
-    /// The writer of the visits ended, after Quit.
-    WriterEnded,
+    /// A writer ended, after Quit.
+    WriterEnded(Writer),
+    /// The writer of the clips could not save a new row.
+    Unsaved(ClipId),
+    /// The capture thread saw an offer, or ended.
+    Seen(Seen),
+}
+
+/// Why the owner loop stops serving.
+enum Stop {
+    /// A Quit command, whose reply goes out once the daemon has stopped.
+    Quit(Reply, ReplyTo),
+    /// The compositor has gone.
+    Closed,
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -75,28 +95,62 @@ impl Unwritten {
 }
 
 /// Claims the socket and serves until a Quit command. The lock comes first, so a second daemon
-/// fails before it scans or reads `ranking.json`, and only the lock holder removes a stale
-/// socket and binds. `record` swaps the runner for a recorder that writes to that file.
+/// fails before it scans or reads `ranking.json` and `clips.sqlite3`, and only the lock holder
+/// removes a stale socket and binds. `record` swaps the runner for a recorder that writes to that
+/// file.
 pub fn run(record: Option<PathBuf>) -> Result<(), String> {
+    warning::start().map_err(not_started)?;
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
     let vars = Vars::read();
+    let config = config::read(vars.config_home().as_deref().map(Path::new));
     let index = Index::new(apps::scan(&vars));
     let (events, inbox) = mpsc::channel();
-    let writer = events.clone();
-    let ended = move || {
-        let _ = writer.send(Event::WriterEnded);
+    let ended = |writer: Writer| {
+        let events = events.clone();
+        move || {
+            let _ = events.send(Event::WriterEnded(writer));
+        }
     };
-    let (visits, store) = match vars.data_home() {
-        Some(dir) => Store::open(Path::new(&dir), ended).map_err(not_started)?,
+    let data_home = vars.data_home().map(PathBuf::from);
+    let (visits, store) = match &data_home {
+        Some(dir) => Store::open(dir, ended(Writer::Visits)).map_err(not_started)?,
         None => (Visits::default(), None),
     };
-    let daemon = Daemon::new(vars, index, visits, store);
+    let unsaved = {
+        let events = events.clone();
+        move |id| {
+            let _ = events.send(Event::Unsaved(id));
+        }
+    };
+    let clips = Clips::open(
+        data_home.as_deref(),
+        config.retention,
+        now(),
+        unsaved,
+        ended(Writer::Clips),
+    )
+    .map_err(not_started)?;
+    let (capture, copier) = match vars.wayland_display {
+        Some(_) => {
+            let events = events.clone();
+            let seen = move |seen| {
+                let _ = events.send(Event::Seen(seen));
+            };
+            let (capture, copier) =
+                Capture::start(seen).map_err(|error| format!("not started: {error}"))?;
+            (Some(capture), Some(copier))
+        }
+        None => (None, None),
+    };
+    let daemon = Daemon::new(vars, index, visits, store, clips, capture);
     let socket = runtime.join(wire::SOCKET);
+    warning::flush(Instant::now() + LAST_WRITES);
     let listener = bind(&socket)?;
     let host = Host {
         events,
         runner: record.map_or(Runner::Real, Runner::recorder),
+        copier,
         unwritten: Unwritten::default(),
     };
     serve(daemon, host, inbox, listener, Claim { lock, socket })
@@ -147,9 +201,9 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     UnixListener::bind(socket).map_err(failed)
 }
 
-/// The owner loop. It serves until a Quit command, and then stops in the order
-/// docs/design/daemon.md gives: no new connections, the work in flight, the last write, the
-/// reply. The daemon keeps answering while it stops.
+/// The owner loop. It serves until a Quit command or until the compositor goes, and then stops in
+/// the order docs/design/daemon.md gives: no new connections, the work in flight, the last
+/// writes, the reply. The daemon keeps answering while it stops.
 fn serve(
     mut daemon: Daemon,
     mut host: Host,
@@ -161,10 +215,10 @@ fn serve(
     thread::Builder::new()
         .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
-    let (reply, reply_to) = loop {
+    let stop = loop {
         let event = inbox.recv().expect("the host holds a sender");
-        if let Some(quit) = host.dispatch(&mut daemon, event) {
-            break quit;
+        if let Some(stop) = host.dispatch(&mut daemon, event) {
+            break stop;
         }
     };
     let _ = fs::remove_file(&claim.socket);
@@ -179,7 +233,8 @@ fn serve(
         let Ok(event) = inbox.recv_timeout(wait) else {
             break;
         };
-        // The daemon fails every request now, so no second Quit comes back.
+        // The daemon fails every request now, and the capture thread has ended or been
+        // cancelled, so no second stop comes back.
         host.dispatch(&mut daemon, event);
     }
     // The daemon takes no more events, so each one still queued fails.
@@ -195,9 +250,17 @@ fn serve(
     } else {
         mem::forget(claim.lock);
     }
-    host.unwritten.send(reply_to, reply);
-    host.unwritten.wait(Instant::now() + QUIT_WRITE);
-    Ok(())
+    let deadline = Instant::now() + LAST_WRITES;
+    warning::flush(deadline);
+    let closed = match stop {
+        Stop::Quit(reply, reply_to) => {
+            host.unwritten.send(reply_to, reply);
+            Ok(())
+        }
+        Stop::Closed => Err("the Wayland connection closed".to_owned()),
+    };
+    host.unwritten.wait(deadline);
+    closed
 }
 
 /// What the owner loop holds beside the daemon.
@@ -205,24 +268,34 @@ struct Host {
     /// A sender for the worker threads.
     events: Sender<Event>,
     runner: Runner,
+    /// The copier, which runs one copy at a time. `None` without a compositor.
+    copier: Option<Copier>,
     unwritten: Unwritten,
 }
 
 impl Host {
     /// Hands one event to the daemon and sends the reply it gives, or starts the job it hands
-    /// back. Gives back the reply to a Quit, which waits.
-    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<(Reply, ReplyTo)> {
+    /// back. Gives back why the daemon stops serving: the reply to a Quit, which waits, or the
+    /// compositor's end.
+    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<Stop> {
         match event {
             Event::Request(request, reply_to) => match daemon.handle(request, now()) {
                 Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
                 Handled::Job(job) => self.start(daemon, job, reply_to),
-                Handled::Quit(reply) => return Some((reply, reply_to)),
+                Handled::Quit(reply) => return Some(Stop::Quit(reply, reply_to)),
             },
+            Event::Seen(Seen::Entry(entry)) => daemon.captured(entry, now()),
+            Event::Seen(Seen::Ended) => daemon.capture_ended(),
+            Event::Seen(Seen::Closed) => {
+                daemon.compositor_closed();
+                return Some(Stop::Closed);
+            }
             Event::Finished(success, done, reply_to) => {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
-            Event::WriterEnded => daemon.writer_ended(),
+            Event::WriterEnded(writer) => daemon.writer_ended(writer),
+            Event::Unsaved(id) => daemon.unsaved(id),
         }
         None
     }
@@ -236,25 +309,40 @@ impl Host {
         }
     }
 
-    /// Runs the job on a worker thread, whose result comes back as an event. A job whose thread
-    /// cannot start finishes at once, failed.
+    /// Runs the job's task on a worker thread, or hands its copy to the copier, and its result
+    /// comes back as an event. A task whose thread cannot start finishes at once, failed.
     fn start(&mut self, daemon: &mut Daemon, job: Job, reply_to: ReplyTo) {
+        let Job { work, success } = job;
+        let task = match work {
+            Work::Task(task) => task,
+            Work::Copy(payload) => {
+                let copier = self
+                    .copier
+                    .as_ref()
+                    .expect("the daemon hands out a copy only with a compositor");
+                let events = self.events.clone();
+                return copier.copy(payload, move |copied| {
+                    let done = copied.map(|()| Done::Copied);
+                    let _ = events.send(Event::Finished(success, done, reply_to));
+                });
+            }
+        };
         let (events, runner) = (self.events.clone(), self.runner.clone());
-        // The job goes to the thread once it runs, so a thread that cannot start leaves it here.
-        let (hand, handed) = mpsc::channel();
+        // The task goes to the thread once it runs, so a thread that cannot start leaves it here.
+        let (hand, handed) = mpsc::channel::<(Task, Success, ReplyTo)>();
         let started = thread::Builder::new().spawn(move || {
-            if let Ok((Job { work, success }, reply_to)) = handed.recv() {
-                let done = work.run(&runner);
+            if let Ok((task, success, reply_to)) = handed.recv() {
+                let done = task.run(&runner);
                 let _ = events.send(Event::Finished(success, done, reply_to));
             }
         });
         match started {
             Ok(_) => {
-                let _ = hand.send((job, reply_to));
+                let _ = hand.send((task, success, reply_to));
             }
             Err(error) => {
                 let done = Err(format!("not run: {error}"));
-                let reply = daemon.finish(job.success, done, now());
+                let reply = daemon.finish(success, done, now());
                 self.unwritten.send(reply_to, reply);
             }
         }

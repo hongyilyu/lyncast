@@ -12,3 +12,11 @@ lyncast-core.workspace = true
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
+sha2 = "0.11"
+wl-clipboard-rs = "=0.9.4"
+# Only for their `log` features. Without them, wl-clipboard-rs's Wayland crates print a closed
+# connection on stderr themselves, and the daemon reports it in its own words.
+wayland-backend = { version = "0.3", features = ["log"] }
+wayland-client = { version = "0.31", features = ["log"] }

@@ -12,10 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lyncast_core::clip::{Delivery, Handed};
 use lyncast_core::rank::{Index, Timestamp, Visits};
-use lyncast_core::{ActionItem, Command, Key, Subject, root};
+use lyncast_core::{ActionItem, ClipId, Command, Key, Subject, root};
 
-use crate::apps::Vars;
+use crate::clip::{Capture, Clips, Entry, Payload};
+use crate::vars::Vars;
 use crate::view::{self, Spelled};
 use crate::wire::{Reply, Request, Summon, Via};
 use store::Store;
@@ -46,6 +48,10 @@ pub struct Daemon {
     /// Where the visits persist. `None` when they stay in memory, and also once the writer has
     /// ended after Quit, so nothing is left to write.
     store: Option<Store>,
+    clips: Clips,
+    /// The capture thread, without which there is no compositor to copy to. `None` too once
+    /// it has ended, after Quit or when the compositor went.
+    capture: Option<Capture>,
     summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
@@ -56,20 +62,28 @@ pub struct Daemon {
 /// What one request comes to.
 pub enum Handled {
     Reply(Reply),
-    /// Work that blocks, for a worker thread. Its result goes to [`Daemon::finish`].
+    /// Work that waits, for the host. Its result goes to [`Daemon::finish`].
     Job(Job),
     /// Quit has begun. The reply goes out once the daemon has [stopped](Daemon::stopped).
     Quit(Reply),
 }
 
-/// An activation's blocking work, and what the activation does once the work succeeds.
+/// An activation's work that waits, and what the activation does once the work succeeds.
 pub struct Job {
     pub work: Work,
     pub success: Success,
 }
 
-/// Work that blocks, so the owner loop hands it to a worker thread.
+/// Work that waits, so the owner loop hands it to the host.
 pub enum Work {
+    /// For a worker thread.
+    Task(Task),
+    /// For the copier thread, which runs one copy at a time.
+    Copy(Payload),
+}
+
+/// Work that blocks, for a worker thread.
+pub enum Task {
     /// Starts the argv through the runner.
     Spawn(Vec<String>),
     /// Creates the config file if it is missing, then opens it.
@@ -78,22 +92,50 @@ pub enum Work {
     Scan { vars: Arc<Vars>, number: u64 },
 }
 
+/// A thread that writes to the disk. Each ends only once Quit has begun and no job is out.
+pub enum Writer {
+    Visits,
+    Clips,
+}
+
 /// What finished work brings back.
 pub enum Done {
     Ran,
-    Scanned { number: u64, index: Index },
+    /// The compositor took a copy's selection.
+    Copied,
+    Scanned {
+        number: u64,
+        index: Index,
+    },
 }
 
 /// What a successful activation records and replies.
 pub struct Success {
-    key: Key,
-    /// The search text, which the visit keeps as a term.
-    query: String,
+    record: Record,
     message: String,
 }
 
+/// What a successful activation records.
+enum Record {
+    /// A visit, for an app or a command.
+    Visit {
+        key: Key,
+        /// The search text, which the visit keeps as a term.
+        query: String,
+    },
+    /// The write a copy made, which the history records.
+    Write(Delivery),
+}
+
 impl Daemon {
-    pub fn new(vars: Vars, index: Index, visits: Visits, store: Option<Store>) -> Daemon {
+    pub fn new(
+        vars: Vars,
+        index: Index,
+        visits: Visits,
+        store: Option<Store>,
+        clips: Clips,
+        capture: Option<Capture>,
+    ) -> Daemon {
         Daemon {
             vars: Arc::new(vars),
             index,
@@ -101,6 +143,8 @@ impl Daemon {
             indexed: 0,
             visits,
             store,
+            clips,
+            capture,
             summon: Summon::Closed,
             jobs: 0,
             quitting: false,
@@ -124,6 +168,9 @@ impl Daemon {
             Request::Status => Reply::Summon { state: self.summon },
             Request::Query { text } => Reply::Rows {
                 rows: view::rows(&root::rows(&self.index, &self.visits, &text, now)),
+            },
+            Request::Clips => Reply::Clips {
+                clips: view::clips(&self.clips.rows()),
             },
             Request::Activate {
                 key,
@@ -166,15 +213,42 @@ impl Daemon {
         reply
     }
 
-    /// Quit has begun, no job is out, and the writer of the visits has ended after its last
-    /// write.
-    pub fn stopped(&self) -> bool {
-        self.idle() && self.store.is_none()
+    /// Records what the clipboard offered. The capture thread keeps running while Quit waits
+    /// for the work in flight, so its entries still count.
+    pub fn captured(&mut self, entry: Entry, now: Timestamp) {
+        self.clips.record(entry, now);
     }
 
-    /// The writer of the visits has ended. It ends only once Quit has begun and no job is out.
-    pub fn writer_ended(&mut self) {
-        self.store = None;
+    /// The writer of the clips could not save the new row `id`, so the history drops it.
+    pub fn unsaved(&mut self, id: ClipId) {
+        self.clips.unsaved(id);
+    }
+
+    /// The capture thread has ended after Quit cancelled it.
+    pub fn capture_ended(&mut self) {
+        self.capture = None;
+        self.settle();
+    }
+
+    /// The compositor has gone, so the daemon stops as Quit does, with no reply to send.
+    pub fn compositor_closed(&mut self) {
+        self.capture = None;
+        self.quitting = true;
+        self.settle();
+    }
+
+    /// Quit has begun, no job is out, the capture thread has ended, and each writer has ended
+    /// after its last write.
+    pub fn stopped(&self) -> bool {
+        self.idle() && self.capture.is_none() && self.store.is_none() && self.clips.ended()
+    }
+
+    /// A writer has ended. Each ends only once Quit has begun and no job is out.
+    pub fn writer_ended(&mut self, writer: Writer) {
+        match writer {
+            Writer::Visits => self.store = None,
+            Writer::Clips => self.clips.writer_ended(),
+        }
     }
 
     /// Quit has begun and no job is out, so nothing records a visit again.
@@ -182,12 +256,19 @@ impl Daemon {
         self.quitting && self.jobs == 0
     }
 
-    /// Once the daemon is idle, the writer can end after its last write.
+    /// Once the daemon is idle, the capture thread can end, and the writers can end after
+    /// their last writes. The writer of the clips waits for the capture thread, whose last entry
+    /// it records.
     fn settle(&self) {
-        if self.idle()
-            && let Some(store) = &self.store
-        {
+        if !self.idle() {
+            return;
+        }
+        if let Some(store) = &self.store {
             store.close();
+        }
+        match &self.capture {
+            Some(capture) => capture.cancel(),
+            None => self.clips.close(),
         }
     }
 
@@ -221,8 +302,10 @@ impl Daemon {
             return Handled::Reply(Reply::Confirm { title });
         }
         let success = |message: String| Success {
-            key: key.clone(),
-            query: query.clone(),
+            record: Record::Visit {
+                key: key.clone(),
+                query: query.clone(),
+            },
             message,
         };
         let launch = |id, message: String| {
@@ -232,7 +315,7 @@ impl Daemon {
                 .and_then(|app| app.argv_for(item))
                 .expect("an app's row offers only its own Open and Desktop Actions");
             Handled::Job(Job {
-                work: Work::Spawn(argv.to_vec()),
+                work: Work::Task(Task::Spawn(argv.to_vec())),
                 success: success(message),
             })
         };
@@ -241,11 +324,27 @@ impl Daemon {
             ActionItem::LaunchAction(id, action) => {
                 launch(id, format!("launched {key} {}", action.id))
             }
-            ActionItem::CopyPath(_) | ActionItem::CopyAnswer(_) | ActionItem::CopyClip(_) => {
-                failed("not copied: no Wayland compositor".to_owned())
+            ActionItem::CopyClip(id) => self.copy(Delivery::Clip(*id)),
+            // The calculator runs here, once per activation.
+            ActionItem::CopyAnswer(query) => match root::answer(query) {
+                Some(answer) => self.copy(answer.delivery()),
+                None => failed(format!("{key} has no answer")),
+            },
+            ActionItem::CopyPath(id) => {
+                let app = self.index.app(id).expect("an app's row is in the index");
+                self.copy(Delivery::Text(app.path().to_owned()))
             }
-            ActionItem::Pin(id) | ActionItem::Unpin(id) | ActionItem::Delete(id) => {
-                failed(format!("no clip {}", id.0))
+            ActionItem::Pin(id) => {
+                self.clips.pin(*id, now);
+                self.changed(format!("pinned clip {}", id.0))
+            }
+            ActionItem::Unpin(id) => {
+                self.clips.unpin(*id, now);
+                self.changed(format!("unpinned clip {}", id.0))
+            }
+            ActionItem::Delete(id) => {
+                self.clips.delete(*id);
+                self.changed(format!("deleted clip {}", id.0))
             }
             ActionItem::Run(command) => self.command(*command, success(format!("ran {key}")), now),
         }
@@ -253,8 +352,8 @@ impl Daemon {
 
     /// What each command does, as the table in docs/design/daemon.md lists it.
     fn command(&mut self, command: Command, success: Success, now: Timestamp) -> Handled {
-        let spawn = |argv: &[&str]| Work::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
-        let work = match command {
+        let spawn = |argv: &[&str]| Task::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
+        let task = match command {
             Command::ClipboardHistory => {
                 return Handled::Reply(self.succeed(success, Summon::Open, now));
             }
@@ -267,7 +366,7 @@ impl Daemon {
                 });
             }
             Command::OpenConfig => match self.vars.config_home() {
-                Some(dir) => Work::OpenConfig(PathBuf::from(dir).join("lyncast/config.toml")),
+                Some(dir) => Task::OpenConfig(PathBuf::from(dir).join("lyncast/config.toml")),
                 None => {
                     let reason = "not run: XDG_CONFIG_HOME and HOME are not set".to_owned();
                     return Handled::Reply(Reply::Failed { reason });
@@ -275,7 +374,7 @@ impl Daemon {
             },
             Command::ReloadApps => {
                 self.scans += 1;
-                Work::Scan {
+                Task::Scan {
                     vars: Arc::clone(&self.vars),
                     number: self.scans,
                 }
@@ -286,56 +385,93 @@ impl Daemon {
             Command::Reboot => spawn(&["systemctl", "reboot"]),
             Command::PowerOff => spawn(&["systemctl", "poweroff"]),
         };
-        Handled::Job(Job { work, success })
+        Handled::Job(Job {
+            work: Work::Task(task),
+            success,
+        })
     }
 
     /// The subject of the row a key names, from current state: an app from the index, a command
-    /// from its key, and a calculator row from the answer to the key's text, as the root list
-    /// finds it. Clips come in plan step 6.
+    /// from its key, a clip from the history, and a calculator row from the key's text, which
+    /// Copy Answer evaluates.
     fn rebuild(&self, key: &Key) -> Result<Subject, String> {
-        match key {
+        Ok(match key {
             Key::App(id) => match self.index.app(id) {
-                Some(app) => Ok(app.subject()),
-                None => Err(format!("no app {}", id.0)),
+                Some(app) => app.subject(),
+                None => return Err(format!("no app {}", id.0)),
             },
-            Key::Command(command) => Ok(Subject::Command(*command)),
-            Key::Clip(id) => Err(format!("no clip {}", id.0)),
-            Key::Calc(query) => match root::answer(query) {
-                Some(_) => Ok(Subject::Calc {
-                    query: query.clone(),
-                }),
-                None => Err(format!("{key} has no answer")),
+            Key::Command(command) => Subject::Command(*command),
+            Key::Clip(id) => match self.clips.get(*id) {
+                Some(row) => Subject::Clip {
+                    id: *id,
+                    pinned: row.pinned,
+                },
+                None => return Err(format!("no clip {}", id.0)),
             },
-        }
+            Key::Calc(query) => Subject::Calc {
+                query: query.clone(),
+            },
+        })
     }
 
-    /// Records the visit, sets the summon, hands the visits to the writer, and gives the success
-    /// line.
-    fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Reply {
-        self.visits.record(success.key, &success.query, now);
-        self.summon = summon;
-        if let Some(store) = &self.store {
-            store.save(&self.visits);
+    /// A copy of what `delivery` names, for the copier, which needs the compositor.
+    fn copy(&self, delivery: Delivery) -> Handled {
+        let failed = |reason: String| Handled::Reply(Reply::Failed { reason });
+        if self.capture.is_none() {
+            return failed("not copied: no Wayland compositor".to_owned());
         }
+        let payload = match self.clips.payload(&delivery) {
+            Ok(payload) => payload,
+            Err(reason) => return failed(reason),
+        };
+        let message = match delivery.handed() {
+            Handed::Clip(id) => format!("copied clip {}", id.0),
+            Handed::Text(text) => format!("copied {text}"),
+        };
+        Handled::Job(Job {
+            work: Work::Copy(payload),
+            success: Success {
+                record: Record::Write(delivery),
+                message,
+            },
+        })
+    }
+
+    /// The reply to a change to a clip, which records no visit and closes the summon.
+    fn changed(&mut self, message: String) -> Handled {
+        self.summon = Summon::Closed;
+        Handled::Reply(Reply::Done { message })
+    }
+
+    /// Records the visit and hands the visits to the writer, or records the write a copy made,
+    /// then sets the summon and gives the success line.
+    fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Reply {
+        match success.record {
+            Record::Visit { key, query } => {
+                self.visits.record(key, &query, now);
+                if let Some(store) = &self.store {
+                    store.save(&self.visits);
+                }
+            }
+            Record::Write(delivery) => self.clips.wrote(&delivery, now),
+        }
+        self.summon = summon;
         Reply::Done {
             message: success.message,
         }
     }
 }
 
-// Inside `mod tests`, a `#[path]` would resolve under src/daemon/tests/, which does not exist.
-#[cfg(test)]
-#[path = "../../../lyncast-core/tests/doc/mod.rs"]
-mod doc;
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
+    use lyncast_core::clip::Retention;
     use lyncast_core::desktop::{self, Session, Verdict};
     use lyncast_core::{AppId, Chord};
 
     use super::*;
+    use crate::doc;
 
     /// Reload Apps, and the number and the success of the scan it hands out.
     fn reload(daemon: &mut Daemon) -> (u64, Success) {
@@ -347,7 +483,7 @@ mod tests {
         };
         match daemon.handle(request, Timestamp(0)) {
             Handled::Job(Job {
-                work: Work::Scan { number, .. },
+                work: Work::Task(Task::Scan { number, .. }),
                 success,
             }) => (number, success),
             _ => panic!("Reload Apps hands out a scan"),
@@ -390,6 +526,8 @@ mod tests {
             Vars::default(),
             Index::new(Vec::new()),
             Visits::default(),
+            None,
+            Clips::open(None, Retention::DEFAULT, Timestamp(0), |_| {}, || {}).unwrap(),
             None,
         );
         let (older, older_success) = reload(&mut daemon);
