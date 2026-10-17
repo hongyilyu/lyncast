@@ -16,7 +16,7 @@ The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
 The kernel releases the lock when the process exits, however it exits. A `Quit` command also removes the socket. The lock file stays, because removing it would let a second daemon lock a new file while the first still holds the old one.
 
-If the daemon cannot start the thread that writes its warnings, the one that accepts connections, the one that writes the visits, the one that writes the clips, or the capture thread, or cannot reach the compositor that `WAYLAND_DISPLAY` names, or finds that it offers no seat or neither ext- nor wlr-data-control, it prints `lyncast: not started: <error>` and exits 1. So does a daemon started with `WAYLAND_SOCKET` set, before it connects to any compositor ([clipboard and paste](clipboard-and-paste.md#the-capture-thread-reads-one-representation-per-offer)). The warnings thread is the first that the daemon starts, so [the session of a daemon that can start no thread](#a-stderr-that-does-not-drain-holds-up-no-start-no-quit-and-no-exit) shows its failure alone. No session can fail a later thread alone, so that each later thread that cannot start fails the start with the same line is read in source: each starts through `thread::Builder`, and the start hands its error to `not_started` in `crates/lyncast/src/daemon/serve.rs`. When the compositor goes later, the daemon stops as Quit does, prints `lyncast: the Wayland connection closed`, and exits 1 ([clipboard and paste](clipboard-and-paste.md#the-capture-thread-reads-one-representation-per-offer)).
+If the daemon cannot start the thread that writes its warnings, the one that accepts connections, the one that writes the visits, the one that writes the clips, the capture thread, or the copier thread, or cannot reach the compositor that `WAYLAND_DISPLAY` names, or finds that it offers no seat or neither ext- nor wlr-data-control, it prints `lyncast: not started: <error>` and exits 1. So does a daemon started with `WAYLAND_SOCKET` set, before it connects to any compositor ([clipboard and paste](clipboard-and-paste.md#the-capture-thread-reads-one-representation-per-offer)). The warnings thread is the first that the daemon starts, so [the session of a daemon that can start no thread](#a-stderr-that-does-not-drain-holds-up-no-start-no-quit-and-no-exit) shows its failure alone. No session can fail a later thread alone, so that each later thread that cannot start fails the start with the same line is read in source: each starts through `thread::Builder`, and the start hands its error to `not_started` in `crates/lyncast/src/daemon/serve.rs`. When the compositor goes later, the daemon stops as Quit does, prints `lyncast: the Wayland connection closed`, and exits 1 ([clipboard and paste](clipboard-and-paste.md#the-capture-thread-reads-one-representation-per-offer)).
 
 Without `XDG_RUNTIME_DIR`, the daemon and every client print `lyncast: XDG_RUNTIME_DIR is not set` and exit 1, as Wayland clients refuse to run without it. A socket path holds at most 107 bytes, so the tests put `XDG_RUNTIME_DIR` under `/tmp`, as `scripts/test-env.sh` does.
 
@@ -59,10 +59,10 @@ The exit code is part of the contract:
 
 An `activate` request carries a key, the chord or verb, the confirmation, and the query. The daemon does this:
 
-1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from evaluating the key's text again. If the state has no such row, the request fails, for example with `no app nope.desktop`, `no clip 9`, or `calc:10/0 has no answer`.
+1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from the key's text. If the state has no such row, the request fails, for example with `no app nope.desktop` or `no clip 9`.
 2. It takes the item from the subject's `Actions`: `on(chord)` for a chord, or `pick(verb)` for a verb. If `pick` finds nothing, the request fails with `<key> has no action <verb>`.
 3. If the item runs a command that confirms, and the request is not confirmed, the daemon replies with a confirmation request and runs nothing. Log Out, Reboot, and Power Off confirm. The CLI prints `lyncast: Reboot? Run again with --yes to confirm.` and exits 1.
-4. It runs the item. Copy items need the clipboard, which comes in plan step 6. Until then they fail with `not copied: no Wayland compositor`. Items that start a program go to the runner.
+4. It runs the item. Copy Answer evaluates the key's text again, once, and a text with no answer fails with `calc:10/0 has no answer`. Copy items need the compositor, so without `WAYLAND_DISPLAY` they fail with `not copied: no Wayland compositor`, and with it they go to the copier ([clipboard and paste](clipboard-and-paste.md#a-copy-waits-for-the-compositor-to-take-it)). Items that start a program go to the runner.
 5. On success it records a visit for `Launch`, `LaunchAction`, and every `Run` but Quit's, and replies with the line below. A success closes the summon, except Clipboard History's, which opens it. On failure nothing is recorded and the summon stays as it was.
 
 | Item | Success line |
@@ -70,12 +70,12 @@ An `activate` request carries a key, the chord or verb, the confirmation, and th
 | `Launch(app)` | `launched app:<id>` |
 | `LaunchAction(app, action)` | `launched app:<id> <action id>` |
 | `Run(command)` | `ran cmd:<id>` |
-| `CopyAnswer(query)` | `copied <answer>`, from plan step 6 |
-| `CopyClip(clip)` | `copied clip <id>`, from plan step 6 |
-| `CopyPath(app)` | `copied <path>`, from plan step 6 |
+| `CopyAnswer(query)` | `copied <answer>` |
+| `CopyClip(clip)` | `copied clip <id>` |
+| `CopyPath(app)` | `copied <path>` |
 | `Pin(clip)`, `Unpin(clip)`, `Delete(clip)` | `pinned clip <id>`, `unpinned clip <id>`, `deleted clip <id>` |
 
-Starting a program, Open Config, and Reload Apps run on a worker thread, and the daemon answers other requests while they run. Their reply comes when the work ends. If the worker thread cannot start, the request fails at once with `not run: <error>`, nothing is recorded, and Quit does not wait for it. Two Reload Apps can overlap, and their scans can end in either order. Each scan has a number in the order it started. A scan's apps replace the index only when that scan started after the one the index came from, so a scan that ends after a newer one changes nothing.
+Starting a program, Open Config, and Reload Apps run on a worker thread, and the daemon answers other requests while they run. Their reply comes when the work ends. A copy runs on the copier thread, one copy at a time, and its reply comes once the capture thread has seen the compositor take it or the copy has failed. If the worker thread cannot start, the request fails at once with `not run: <error>`, nothing is recorded, and Quit does not wait for it. Two Reload Apps can overlap, and their scans can end in either order. Each scan has a number in the order it started. A scan's apps replace the index only when that scan started after the one the index came from, so a scan that ends after a newer one changes nothing.
 
 The commands run like this:
 
@@ -221,7 +221,7 @@ A `session` block is a terminal transcript against one environment:
 
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`, whose values may hold `$TREE` and `$RUNTIME`, and `\x{HH}` for the byte `HH` as there. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, `RUNTIME`, and `LYNCAST`, the binary under test, in its environment, so a session can write, change, and read files, and run the binary many times. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
-- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
 - `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, and the one that writes the clips `clips`, as the `THREAD` constants in `crates/lyncast/src/daemon/store.rs` and `crates/lyncast/src/clip/db.rs` spell them. `main` names the daemon's main thread, which runs the owner loop, and whose ID is the process ID, because a thread that the daemon starts without a name takes the main thread's name too. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
@@ -420,9 +420,9 @@ stderr: For more information, try '--help'.
 exit: 2
 ```
 
-### Copies fail until the clipboard exists
+### Copies fail without a compositor
 
-A calculator key is evaluated again, and a clip key that names no clip fails.
+Only Copy Answer evaluates a calculator key again, so a key with no answer fails there, and with a verb that a calculator row lacks it fails as any row does. A clip key that names no clip fails.
 
 ```session
 $ lyncast daemon --headless
@@ -431,6 +431,9 @@ stderr: lyncast: not copied: no Wayland compositor
 exit: 1
 $ lyncast activate calc:10/0
 stderr: lyncast: calc:10/0 has no answer
+exit: 1
+$ lyncast activate calc:10/0 --verb pin
+stderr: lyncast: calc:10/0 has no action pin
 exit: 1
 $ lyncast activate app:firefox.desktop --verb copy-path
 stderr: lyncast: not copied: no Wayland compositor

@@ -8,6 +8,7 @@ mod ops;
 mod parse;
 mod quantity;
 
+use crate::clip::Delivery;
 use crate::fold::narrow;
 
 /// Everything an answer depends on besides the query text. Currency adds the rate snapshot.
@@ -60,6 +61,22 @@ impl Answer {
     /// in 40 characters or fewer.
     pub fn target_badge(&self) -> Option<&str> {
         self.target_badge.as_deref()
+    }
+
+    /// What a copy of the card hands over: the answer as [`Answer::copy`] spells it.
+    pub fn delivery(&self) -> Delivery {
+        Delivery::Answer(CalcAnswer(self.copy.clone()))
+    }
+}
+
+/// The text a copy of a card hands over. Only the calculator builds one, from its answer, so a
+/// delivery of an answer always holds what the card shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalcAnswer(String);
+
+impl CalcAnswer {
+    pub fn text(&self) -> &str {
+        &self.0
     }
 }
 

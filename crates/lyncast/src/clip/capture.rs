@@ -12,6 +12,7 @@ use wl_clipboard_rs::paste::{self, Seat};
 use wl_clipboard_rs::utils::PASSWORD_MANAGER_HINT_MIME_TYPE;
 use wl_clipboard_rs::watch::{CancelHandle, ClipboardEvent, ClipboardType, Watcher};
 
+use super::copy::{Copier, Marks};
 use super::db::Pending;
 use super::{Entry, GNOME_FILES, MAX_BYTES, OFFER_READ_DEADLINE, OWN, URI_LIST};
 
@@ -35,26 +36,28 @@ pub struct Capture {
 
 impl Capture {
     /// Connects to the compositor that `WAYLAND_DISPLAY` names and starts the capture thread,
-    /// which calls `seen` with each entry once it has its share of `pending`. Fails when the
-    /// compositor cannot be reached, offers no seat or neither data-control protocol, or the
-    /// thread cannot start.
+    /// which calls `seen` with each entry once it has its share of `pending`, and the copier,
+    /// which the capture thread tells of each marked offer. Fails when the compositor cannot be
+    /// reached, offers no seat or neither data-control protocol, or a thread cannot start.
     pub fn start(
         pending: Option<Pending>,
         mut seen: impl FnMut(Seen) + Send + 'static,
-    ) -> Result<Capture, String> {
+    ) -> Result<(Capture, Copier), String> {
         let mut watcher = Watcher::new(ClipboardType::Regular, Seat::Unspecified)
             .map_err(|error| error.to_string())?;
         let cancel = watcher.cancel_handle();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancelled);
+        let marks = Arc::new(Marks::default());
+        let copier = Copier::start(Arc::clone(&marks)).map_err(|error| error.to_string())?;
         thread::Builder::new()
             .name(THREAD.to_owned())
             .spawn(move || {
-                let ending = watch(&mut watcher, &stop, pending.as_ref(), &mut seen);
+                let ending = watch(&mut watcher, &stop, &marks, pending.as_ref(), &mut seen);
                 seen(ending);
             })
             .map_err(|error| error.to_string())?;
-        Ok(Capture { cancel, cancelled })
+        Ok((Capture { cancel, cancelled }, copier))
     }
 
     /// Stops the thread after the offer in hand.
@@ -67,6 +70,7 @@ impl Capture {
 fn watch(
     watcher: &mut Watcher,
     cancelled: &AtomicBool,
+    marks: &Marks,
     pending: Option<&Pending>,
     seen: &mut impl FnMut(Seen),
 ) -> Seen {
@@ -81,9 +85,11 @@ fn watch(
                 mut offer,
                 ..
             })) => {
-                let skipped = |mime: &String| {
-                    mime.starts_with(OWN) || mime == PASSWORD_MANAGER_HINT_MIME_TYPE
-                };
+                if let Some(marker) = mime_types.iter().find(|mime| mime.starts_with(OWN)) {
+                    marks.see(marker);
+                    continue;
+                }
+                let skipped = |mime: &String| mime == PASSWORD_MANAGER_HINT_MIME_TYPE;
                 if mime_types.iter().any(skipped) {
                     continue;
                 }

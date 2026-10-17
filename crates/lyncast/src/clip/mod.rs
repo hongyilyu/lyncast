@@ -1,10 +1,12 @@
 mod blob;
 mod capture;
+mod copy;
 mod db;
 mod load;
 mod schema;
 
 pub use capture::{Capture, Seen};
+pub use copy::{Copier, Payload};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -14,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lyncast_core::ClipId;
-use lyncast_core::clip::{self, PREVIEW_BYTES, Place, Retention, TextKind};
+use lyncast_core::clip::{self, Delivery, Handed, PREVIEW_BYTES, Place, Retention, TextKind};
 use lyncast_core::rank::Timestamp;
 
 use crate::files::Unsaved;
@@ -33,11 +35,17 @@ const MAX_BYTES: usize = 25 << 20;
 /// capture thread no longer.
 const OFFER_READ_DEADLINE: Duration = Duration::from_secs(2);
 
+const TEXT: &str = "text/plain;charset=utf-8";
+
 pub fn no_clip(id: ClipId) -> String {
     format!("no clip {}", id.0)
 }
 
 const WRITER_ENDED: &str = "the writer of the clips has ended";
+
+pub fn not_copied(why: impl fmt::Display) -> String {
+    format!("not copied: {why}")
+}
 
 /// Why no new row takes another id, after the last one used when it is known.
 fn no_id(after: Option<ClipId>) -> String {
@@ -91,9 +99,19 @@ impl Content {
     }
 }
 
+#[derive(Clone)]
 enum Body {
     Text(Arc<str>),
     Image(Arc<[u8]>),
+}
+
+impl Body {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Body::Text(text) => text.as_bytes(),
+            Body::Image(bytes) => bytes,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -341,6 +359,17 @@ impl Bodies {
     fn has_writer(&self) -> bool {
         matches!(self, Bodies::Disk(_))
     }
+
+    fn bytes(&self, id: ClipId) -> Result<copy::BytesAt, String> {
+        match self {
+            Bodies::Disk(writer) => Ok(copy::BytesAt::Stored(writer.reader(), id)),
+            Bodies::Memory(bodies) => match bodies.get(&id) {
+                Some(body) => Ok(copy::BytesAt::Held(body.clone())),
+                None => Err(no_clip(id)),
+            },
+            Bodies::Ended => Err(not_copied(WRITER_ENDED)),
+        }
+    }
 }
 
 impl Clips {
@@ -393,6 +422,28 @@ impl Clips {
             return;
         }
         self.insert(entry, now);
+    }
+
+    /// Records a write that a copy has seen the compositor take. A row of the history moves to the
+    /// front unless it is pinned, and text is recorded as a capture of it would be.
+    pub fn wrote(&mut self, delivery: &Delivery, now: Timestamp) {
+        match delivery.handed() {
+            Handed::Clip(id) => self.touch(id, now),
+            Handed::Text(text) => self.record(Entry::text(text, TEXT.to_owned()), now),
+        }
+    }
+
+    pub fn payload(&self, delivery: &Delivery) -> Result<Payload, String> {
+        let id = match delivery.handed() {
+            Handed::Clip(id) => id,
+            Handed::Text(text) => return Ok(Payload::text(text)),
+        };
+        let row = self.get(id).ok_or_else(|| no_clip(id))?;
+        Ok(Payload::new(
+            row.content,
+            row.mime.clone(),
+            self.bodies.bytes(id)?,
+        ))
     }
 
     /// What waits for the writer, which a capture takes its share of before the owner loop has
@@ -567,10 +618,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("line {}: no row holds {text}", block.line))
             };
             match line.split_once(' ') {
-                Some(("capture", text)) => clips.record(
-                    Entry::text(text, "text/plain;charset=utf-8".to_owned()),
-                    now,
-                ),
+                Some(("capture", text)) => clips.record(Entry::text(text, TEXT.to_owned()), now),
                 Some(("pin", text)) => clips.pin(held(&clips, text), now).unwrap(),
                 Some(("unpin", text)) => clips.unpin(held(&clips, text), now).unwrap(),
                 Some(("wait", wait)) => {

@@ -13,8 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::blob::{self, Hash};
 use super::load::{self, Loaded};
 use super::schema::SCHEMA;
-use super::{Body, Content, Meta, Seq, WRITER_ENDED, not_recorded};
-use crate::files::Unsaved;
+use super::{Body, Content, MAX_BYTES, Meta, Seq, WRITER_ENDED, no_clip, not_copied, not_recorded};
+use crate::files::{self, Unread, Unsaved};
 use crate::permit::{Permit, Permits};
 use crate::warning::warn;
 
@@ -28,6 +28,8 @@ const THREAD: &str = "clips";
 pub const MAX_PENDING: u64 = 64 << 20;
 
 pub const MAX_CHANGES: u64 = 100;
+
+const READ_WAIT: Duration = Duration::from_secs(5);
 
 pub enum Change {
     /// A new row. The history holds no other row of its kind and hash, so the writer replaces any
@@ -60,7 +62,14 @@ pub enum Change {
 }
 
 enum Command {
-    Change { change: Change, place: Permit },
+    Change {
+        change: Change,
+        place: Permit,
+    },
+    Read {
+        id: ClipId,
+        body: Sender<Result<Body, String>>,
+    },
     Close,
 }
 
@@ -98,6 +107,28 @@ impl Pending {
             not_recorded(Unsaved::new(&self.path, full));
         }
         share
+    }
+}
+
+pub struct Reader {
+    commands: Sender<Command>,
+}
+
+impl Reader {
+    /// What row `id` holds, or why it cannot be read, within [`READ_WAIT`].
+    pub fn read(&self, id: ClipId) -> Result<Body, String> {
+        let (body, read) = mpsc::channel();
+        self.commands
+            .send(Command::Read { id, body })
+            .map_err(|_| not_copied(WRITER_ENDED))?;
+        match read.recv_timeout(READ_WAIT) {
+            Ok(body) => body,
+            Err(RecvTimeoutError::Timeout) => Err(not_copied(format_args!(
+                "the writer of the clips did not answer within {} s",
+                READ_WAIT.as_secs()
+            ))),
+            Err(RecvTimeoutError::Disconnected) => Err(not_copied(WRITER_ENDED)),
+        }
     }
 }
 
@@ -180,6 +211,12 @@ impl Writer {
     pub fn close(&self) {
         let _ = self.commands.send(Command::Close);
     }
+
+    pub fn reader(&self) -> Reader {
+        Reader {
+            commands: self.commands.clone(),
+        }
+    }
 }
 
 /// Applies each command in order, and gives whether [`Writer::close`] ended it.
@@ -197,6 +234,9 @@ fn write(
             Command::Close => {
                 unreserved.retry(connection, &mut table);
                 return true;
+            }
+            Command::Read { id, body } => {
+                let _ = body.send(read(connection, &blobs, id));
             }
             Command::Change { change, place } => {
                 let inserted = match &change {
@@ -421,6 +461,35 @@ fn remove_unnamed_blobs(
         }
     }
     removed
+}
+
+/// The text is read only when octet_length, which reads none of it, finds it within the cap.
+fn read(connection: &Connection, blobs: &Path, id: ClipId) -> Result<Body, String> {
+    let row: Option<(Content, Option<String>, Option<i64>, Hash)> = connection
+        .query_row(
+            "SELECT kind, CASE WHEN octet_length(body) <= ?2 THEN body END, octet_length(body),
+                hash FROM clips WHERE id = ?1",
+            params![id.0, MAX_BYTES as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(not_copied)?;
+    let failed = |reason: &str| format!("clip {}: {reason}", id.0);
+    match row {
+        None => Err(no_clip(id)),
+        Some((Content::Image, _, _, hash)) => {
+            match files::read_regular(&blob::path(blobs, hash), MAX_BYTES as u64) {
+                Ok(bytes) => Ok(Body::Image(bytes.into())),
+                Err(Unread::Io(error)) if error.kind() == ErrorKind::NotFound => {
+                    Err(failed("blob missing"))
+                }
+                Err(unread) => Err(failed(&format!("blob: {unread}"))),
+            }
+        }
+        Some((_, Some(text), _, _)) => Ok(Body::Text(text.into())),
+        Some((_, None, Some(_), _)) => Err(failed(&files::over(MAX_BYTES as u64))),
+        Some((_, None, None, _)) => Err(failed("no text")),
+    }
 }
 
 #[cfg(test)]
