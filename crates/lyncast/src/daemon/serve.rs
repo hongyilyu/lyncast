@@ -20,7 +20,8 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 use super::runner::Runner;
 use super::store::Store;
 use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
-use crate::apps::{self, Vars};
+use crate::apps;
+use crate::vars::Vars;
 use crate::wire::{self, Reply, Request};
 
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
