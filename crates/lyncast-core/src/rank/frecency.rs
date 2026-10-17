@@ -1,9 +1,10 @@
 //! Learned ranking: a decaying frecency per entry and its last three distinct search terms.
-//! The clock is always an argument. Step 5's daemon owns one `Visits` and persists it.
+//! The clock is always an argument. The daemon owns one `Visits` and persists it.
 
 use std::collections::HashMap;
 use std::f64::consts::LN_2;
 
+use super::MAX_QUERY_BYTES;
 use super::score::Query;
 use crate::Key;
 
@@ -33,9 +34,38 @@ pub struct Visit {
 }
 
 impl Visit {
+    /// A visit as the daemon stored it, with the terms most recent first. Each stored term goes
+    /// through the rule a visit follows, oldest first, so a file edited by hand keeps the rule
+    /// that [`Visit::terms`] promises.
+    pub fn restore<'t>(
+        anchor: Timestamp,
+        last_opened: Timestamp,
+        terms: impl IntoIterator<Item = &'t str, IntoIter: DoubleEndedIterator>,
+    ) -> Visit {
+        let mut visit = Visit {
+            anchor,
+            last_opened,
+            terms: Vec::new(),
+        };
+        for term in terms.into_iter().rev() {
+            visit.remember(term);
+        }
+        visit
+    }
+
+    /// When the score falls back to 1.
+    pub fn anchor(&self) -> Timestamp {
+        self.anchor
+    }
+
+    /// The last pick.
+    pub fn last_opened(&self) -> Timestamp {
+        self.last_opened
+    }
+
     /// The frecency score at `now`, at least 1.
     pub fn score(&self, now: Timestamp) -> f64 {
-        let lead = (self.anchor.0 - now.0) as f64;
+        let lead = self.anchor.0.saturating_sub(now.0) as f64;
         (LAMBDA * lead).exp().max(1.0)
     }
 
@@ -48,24 +78,38 @@ impl Visit {
     /// was opened in the last 17 days.
     pub(crate) fn learned(&self, now: Timestamp) -> Learned<'_> {
         let warm = self.anchor > now;
-        let recent = now.0 - self.last_opened.0 <= STEER_FOR;
+        let recent = now.0.saturating_sub(self.last_opened.0) <= STEER_FOR;
         Learned {
             frecency: Frecency(warm.then_some(self.anchor)),
             terms: if warm && recent { &self.terms } else { &[] },
         }
     }
 
-    /// One pick: the score rises by 100, and a non-empty query moves to the front of the terms.
+    /// One pick: the score rises by 100, and the query becomes the newest term. An anchor more
+    /// than 10,240 days ahead, which a clock set back can leave, scores infinity. The pick counts
+    /// that as the largest `f64`, so the new anchor is 10,240 days after `now`, and the entry
+    /// stays warm for about 28 years.
     fn visit(&mut self, query: &str, now: Timestamp) {
-        let lead = (self.score(now) + 100.0).ln() / LAMBDA;
-        self.anchor = Timestamp(now.0 + lead.round() as i64);
+        let lead = (self.score(now).min(f64::MAX) + 100.0).ln() / LAMBDA;
+        self.anchor = Timestamp(now.0.saturating_add(lead.round() as i64));
         self.last_opened = now;
-        if let Some(query) = Query::new(query) {
-            let term = query.text();
-            self.terms.retain(|seen| &**seen != term);
-            self.terms.insert(0, term.into());
-            self.terms.truncate(TERMS);
+        self.remember(query);
+    }
+
+    /// Moves the query's fold to the front of the terms, once, and keeps three. An empty fold
+    /// is no term, and neither is one over 1,024 bytes. The cap bounds the stored fold at the
+    /// number of bytes that ranking reads of a raw query, so the stored visits stay small.
+    fn remember(&mut self, query: &str) {
+        let Some(query) = Query::new(query) else {
+            return;
+        };
+        let term = query.text();
+        if term.len() > MAX_QUERY_BYTES {
+            return;
         }
+        self.terms.retain(|seen| &**seen != term);
+        self.terms.insert(0, term.into());
+        self.terms.truncate(TERMS);
     }
 }
 
@@ -91,7 +135,13 @@ impl Visits {
         self.0.get(key)
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &Visit)> {
+    /// Sets the visit of `key`, as the daemon loads it.
+    pub fn insert(&mut self, key: Key, visit: Visit) {
+        self.0.insert(key, visit);
+    }
+
+    /// Every visit, in no order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &Visit)> {
         self.0.iter()
     }
 }

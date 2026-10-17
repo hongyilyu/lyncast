@@ -6,12 +6,13 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use lyncast_core::AppId;
 use lyncast_core::desktop::{self, App, Session, Verdict};
+
+use crate::files;
 
 /// The environment the daemon reads at start, which the scan reads all of but
 /// `XDG_CONFIG_HOME`. An empty variable counts as unset, except `PATH`. A value that is not
@@ -88,7 +89,7 @@ pub fn scan(vars: &Vars) -> Vec<App> {
             if !decided.insert(file.id.clone()) {
                 continue;
             }
-            let Some(bytes) = read_entry(&file.path) else {
+            let Ok(bytes) = files::read_regular(Path::new(&file.path), MAX_ENTRY_BYTES) else {
                 continue;
             };
             // GLib loads a file with a bad byte and fails only that key, so one stray byte in
@@ -109,22 +110,6 @@ pub fn scan(vars: &Vars) -> Vec<App> {
 
 /// The most bytes the scan reads from one desktop file. Real ones hold a few kilobytes.
 const MAX_ENTRY_BYTES: u64 = 1 << 20;
-
-/// The file's bytes, when it is a regular file after symlinks and holds at most
-/// [`MAX_ENTRY_BYTES`]. A link to a device such as `/dev/zero` is not read, and a FIFO is not
-/// opened.
-fn read_entry(path: &str) -> Option<Vec<u8>> {
-    if !fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(MAX_ENTRY_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= MAX_ENTRY_BYTES).then_some(bytes)
-}
 
 /// `$XDG_DATA_HOME/applications` (default `$HOME/.local/share`), then each `$XDG_DATA_DIRS`
 /// entry's `applications` (default `/usr/local/share:/usr/share`). Relative paths and paths

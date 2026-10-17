@@ -99,7 +99,8 @@ fn limit_exempt() -> bool {
     no_threads(&mut timeout).status().unwrap().success()
 }
 
-/// A daemon that cannot start a thread exits 1 with one `lyncast: ` line. Under an
+/// A daemon that cannot start a thread exits 1 with one `lyncast: ` line. Without a data home
+/// the accept thread is the first to start, and with one the writer of the visits is. Under an
 /// `RLIMIT_NPROC` of 0 no thread starts, unless the kernel exempts the user, as it exempts root,
 /// and then the test says it skipped.
 #[test]
@@ -112,15 +113,20 @@ fn a_daemon_that_cannot_start_a_thread_exits_1() {
         );
         return;
     }
-    let runtime = Runtime::new();
-    let mut command = daemon(&runtime);
-    no_threads(&mut command);
-    let mut daemon = Daemon::spawn(command, &runtime);
-    let code = poll(|| daemon.exited()).and_then(|status| status.code());
-    let stderr = fs::read_to_string(runtime.path().join("daemon.stderr")).unwrap();
-    assert_eq!(code, Some(1), "{stderr:?}");
-    assert!(
-        stderr.starts_with("lyncast: ") && stderr.lines().count() == 1,
-        "{stderr:?}"
-    );
+    for data_home in [false, true] {
+        let runtime = Runtime::new();
+        let mut command = daemon(&runtime);
+        if data_home {
+            command.env("XDG_DATA_HOME", runtime.path().join("data"));
+        }
+        no_threads(&mut command);
+        let mut daemon = Daemon::spawn(command, &runtime);
+        let code = poll(|| daemon.exited()).and_then(|status| status.code());
+        let stderr = fs::read_to_string(runtime.path().join("daemon.stderr")).unwrap();
+        assert_eq!(code, Some(1), "data home {data_home}: {stderr:?}");
+        assert!(
+            stderr.starts_with("lyncast: ") && stderr.lines().count() == 1,
+            "data home {data_home}: {stderr:?}"
+        );
+    }
 }

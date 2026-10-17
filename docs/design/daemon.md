@@ -120,7 +120,7 @@ The card row's key is `calc:<raw query>`, its kind is `calculator`, and its titl
 
 ## Visits persist in ranking.json
 
-The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
+The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. A write that fails removes its temporary file, because no later daemon has its name. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
 
 The file is one JSON object. Each member is a key with its visit, in key order:
 
@@ -130,12 +130,12 @@ The file is one JSON object. Each member is a key with its visit, in key order:
 
 `anchor` and `last_opened` are milliseconds since the Unix epoch, from 1970 to the end of 9999. `terms` holds the last three distinct search terms in their fold, most recent first, and a term over 1,024 bytes is not kept. On load the daemon folds each stored term again, drops empty, long, and repeated terms, and keeps the first three, so a file edited by hand still follows that rule. A member whose key no longer parses is dropped.
 
-The daemon reads only a regular file of at most 64 MiB, after symlinks. It checks the path first and never opens a FIFO or a device, because opening a device can change it, as opening a serial port resets the board on it. Then it opens the file without waiting for a FIFO's writer and checks the file it opened, so a FIFO swapped in after the first check cannot block it. A real file holds a few kilobytes. No entry at all is a fresh install, but a symlink to nothing is a file that cannot be read.
+The daemon reads only a regular file of at most 64 MiB, after symlinks. It checks the path first and never opens a FIFO or a device, because opening a device can change it, as opening a serial port resets the board on it. Then it opens the file without waiting for a FIFO's writer and checks the file it opened, so a FIFO swapped in after the first check cannot block it. A session cannot swap the file while a daemon starts, so `a_fifo_swapped_in_for_ranking_json_never_blocks_a_start` in `crates/lyncast/tests/daemon.rs` keeps swapping a link to a file for a link to a FIFO while 40 daemons start, and expects each to bind. A real file holds a few kilobytes. No entry at all is a fresh install, but a symlink to nothing is a file that cannot be read.
 
 The daemon keeps a bad file for the user and never writes over it:
 
-- If the file cannot be read, is not JSON of this shape, or holds a time outside that range, the daemon prints `lyncast: <path>: <error>; moved it to ranking.json.bad` on stderr, renames it, and starts with no visits.
-- If `ranking.json.bad` is already there, the daemon does not move the new bad file over it. It prints `lyncast: <path>: <error>; not moved to ranking.json.bad: it already exists; the visits stay in memory`. If the rename fails, the line names the rename's error after `not moved to ranking.json.bad: `. Either way the daemon starts with no visits and writes no file until it exits.
+- If the file cannot be read, is not JSON of this shape, or holds a time outside that range, the daemon prints `lyncast: <path>: <error>; moved it to ranking.json.bad` on stderr, moves it, and starts with no visits. The move is one rename that fails rather than replace a `ranking.json.bad` that is already there (`renameat2` with `RENAME_NOREPLACE`), so even a daemon with another runtime directory and the same data home can neither replace a kept bad file nor lose a file that another daemon has just written. On a filesystem that cannot rename that way, the move fails.
+- If `ranking.json.bad` is already there, the daemon does not move the new bad file over it. It prints `lyncast: <path>: <error>; not moved to ranking.json.bad: it already exists; the visits stay in memory`. If the move fails, the line names its error after `not moved to ranking.json.bad: `. Either way the daemon starts with no visits and writes no file until it exits.
 
 The daemon never writes a file it would not read, so a copy over 64 MiB fails with `not saved: over 64 MiB`, and the file stays as it was. A write that fails prints `lyncast: <path>: not saved: <error>`, and the next visit writes the file again.
 
@@ -143,7 +143,7 @@ The daemon never writes a file it would not read, so a copy over 64 MiB fails wi
 
 A client connects, writes one request as compact JSON and a newline, and reads one reply line. Then both sides close. A connection holds no state, so the palette and many CLI clients can talk to the daemon at once. Keys travel as their strings and are parsed at the socket, and verbs and chords use the spellings of `query --json`.
 
-A request line holds at most 1 MiB, with its newline. A line with no newline in its first 1 MiB gets `failed` with `bad request: no newline in the first 1 MiB`, and the daemon runs none of it, even when the bytes before the cut are a whole request. A request that does not parse gets a `failed` reply that names the error. Either way the daemon keeps serving.
+A request line holds at most 1 MiB, with its newline. A line with no newline in its first 1 MiB gets `failed` with `bad request: no newline in the first 1 MiB`, and the daemon runs none of it, even when the bytes before the cut are a whole request. A request that does not parse gets a `failed` reply that names the error. Either way the daemon keeps serving. The daemon closes a connection without a reply when 5 s pass with no byte of its request, and it stops writing a reply when 5 s pass with no room in the socket to write it. These limits apply to each read and write, so a client that sends slowly is still served.
 
 Requests:
 
@@ -210,7 +210,7 @@ Exec=8x8
 
 A `session` block is a terminal transcript against one environment:
 
-- A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files.
+- A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - `$ lyncast daemon ...` with no expected lines after it starts the daemon in the background, with `--record $RUNTIME/runs` added and its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
 
@@ -475,6 +475,250 @@ $ wc -c < config/lyncast/config.toml
 0
 ```
 
+### Visits rank Suggestions and survive a restart
+
+An activation records a visit, so Firefox leads Suggestions. Quit removes the socket, writes `ranking.json`, and keeps the lock file, and a new daemon loads the visits. The times in the file come from the clock, so `sed` masks their digits. `f` finds Firefox alone, because an `f` inside a word, as in Power Off and Open Config, scores 2, below the 2.5 that a one-letter query needs ([ranking](ranking.md#frizbee-scores-with-tinycasts-points)).
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate app:firefox.desktop --query Fir
+launched app:firefox.desktop
+record: ["firefox"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast status
+stderr: lyncast: no daemon is listening on $RUNTIME/lyncast.sock
+exit: 1
+$ ls $RUNTIME
+daemon.stderr
+daemon.stdout
+lyncast.lock
+runs
+$ sed -E 's/[0-9]+/N/g' data/lyncast/ranking.json
+{"app:firefox.desktop":{"anchor":N,"last_opened":N,"terms":["fir"]}}
+$ lyncast daemon --headless
+$ lyncast query "" --json
+{"key":"app:firefox.desktop","index":0,"kind":"app","section":"suggestions","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+{"key":"cmd:clipboard-history","index":1,"kind":"command","section":"suggestions","title":"Clipboard History","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"app:8x8.desktop","index":2,"kind":"app","section":"suggestions","title":"8x8","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+{"key":"cmd:lock-screen","index":3,"kind":"command","section":"commands","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:log-out","index":4,"kind":"command","section":"commands","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:open-config","index":5,"kind":"command","section":"commands","title":"Open Config","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:power-off","index":6,"kind":"command","section":"commands","title":"Power Off","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:quit","index":7,"kind":"command","section":"commands","title":"Quit lyncast","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reboot","index":8,"kind":"command","section":"commands","title":"Reboot","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":9,"kind":"command","section":"commands","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:suspend","index":10,"kind":"command","section":"commands","title":"Suspend","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast query f --json
+{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+```
+
+### Stored visits load as the rules say
+
+A member whose key no longer parses is dropped, and the stored terms are folded again, deduplicated, and cut to three. Log Out's anchor is in 2255, so its visit is warm and Log Out leads `lo`. The next write puts the five members in key order, not the order they were stored in, and keeps Log Out's times as they were stored. With five members, a write in another order is unlikely to match by chance.
+
+```session
+$ mkdir -p data/lyncast
+$ echo '{"cmd:suspend":{"anchor":1,"last_opened":1,"terms":[]},"cmd:frobnicate":{"anchor":1,"last_opened":1,"terms":[]},"cmd:reboot":{"anchor":1,"last_opened":1,"terms":[]},"cmd:power-off":{"anchor":1,"last_opened":1,"terms":[]},"cmd:log-out":{"anchor":9000000000000,"last_opened":1760000000000,"terms":["Out","OUT","","log","x","y"]}}' > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast query lo --json
+{"key":"cmd:log-out","index":0,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:lock-screen","index":1,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+$ grep -o '"cmd:[a-z-]*":' data/lyncast/ranking.json
+"cmd:lock-screen":
+"cmd:log-out":
+"cmd:power-off":
+"cmd:reboot":
+"cmd:suspend":
+$ grep -o '"cmd:log-out":{[^}]*}' data/lyncast/ranking.json
+"cmd:log-out":{"anchor":9000000000000,"last_opened":1760000000000,"terms":["out","log","x"]}
+```
+
+An anchor more than 10,240 days ahead, which a clock set back can leave, scores infinity, and the daemon loads it as stored. The entry's next visit sets the anchor 10,240 days from now, about 28 years, as [ranking](ranking.md#frecency-halves-every-10-days) says, so the entry leads Suggestions for about that long. The shell line prints how far ahead the stored anchor is.
+
+```session
+$ mkdir -p data/lyncast
+$ echo '{"cmd:reboot":{"anchor":5000000000000,"last_opened":1760000000000,"terms":[]}}' > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:reboot --yes
+ran cmd:reboot
+record: ["systemctl","reboot"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ anchor=$(grep -o '"anchor":[0-9]*' data/lyncast/ranking.json | cut -d : -f 2); echo $(( (anchor / 1000 - $(date +%s)) / 86400 / 365 )) years ahead
+28 years ahead
+```
+
+### A bad ranking.json is kept, never written over
+
+A file that is not JSON moves to `ranking.json.bad`, and the daemon starts with the fresh install's list. The next visit writes a new file.
+
+```session
+$ mkdir -p data/lyncast
+$ echo not json > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: expected ident at line 1 column 2; moved it to ranking.json.bad
+$ cat data/lyncast/ranking.json.bad
+not json
+$ lyncast query lo --json
+{"key":"cmd:lock-screen","index":0,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:log-out","index":1,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast activate cmd:lock-screen --query Lock
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sed -E 's/[0-9]+/N/g' data/lyncast/ranking.json
+{"cmd:lock-screen":{"anchor":N,"last_opened":N,"terms":["lock"]}}
+```
+
+A time outside 1970 to 9999 fails the file the same way, at either end, and the two ends themselves load.
+
+```session
+$ mkdir -p data/lyncast
+$ echo '{"cmd:reboot":{"anchor":253402300799999,"last_opened":0,"terms":[]}}' > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ echo '{"cmd:reboot":{"anchor":253402300800000,"last_opened":0,"terms":[]}}' > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/ranking.json.bad
+$ echo '{"cmd:reboot":{"anchor":1,"last_opened":-9223372036854775808,"terms":[]}}' > data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: 253402300800000 is not a time from 1970 to 9999 at line 1 column 39; moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: -9223372036854775808 is not a time from 1970 to 9999 at line 1 column 60; moved it to ranking.json.bad
+```
+
+A file that cannot be read fails it too: a symlink to itself, a symlink to nothing, a FIFO, a symlink to a device, a sparse file of 1 TiB, over the cap, and a directory, which only a rename can move. Each daemon here moves one aside, and the shell line after it removes the bad file for the next. The daemon never opens the FIFO, so a program that waits to write to it, under a second name, still waits when `timeout` stops it after 2 s, and `timeout` exits 124.
+
+```session
+$ mkdir -p data/lyncast
+$ ln -s ranking.json data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ readlink data/lyncast/ranking.json.bad
+ranking.json
+$ rm data/lyncast/ranking.json.bad && ln -s missing.json data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ readlink data/lyncast/ranking.json.bad
+missing.json
+$ rm data/lyncast/ranking.json.bad && mkfifo fifo && ln fifo data/lyncast/ranking.json
+$ (timeout 2 sh -c ': > fifo'; echo $? > fifo.writer) > /dev/null 2>&1 & sleep 0.5
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ until [ -s fifo.writer ]; do sleep 0.1; done; cat fifo.writer
+124
+$ rm data/lyncast/ranking.json.bad && ln -s /dev/zero data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/ranking.json.bad && truncate -s 1T data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/ranking.json.bad && mkdir data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+ranking.json.bad
+$ test -d data/lyncast/ranking.json.bad && echo directory
+directory
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: Too many levels of symbolic links (os error 40); moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: No such file or directory (os error 2); moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: not a regular file; moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: not a regular file; moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: over 64 MiB; moved it to ranking.json.bad
+lyncast: $TREE/data/lyncast/ranking.json: not a regular file; moved it to ranking.json.bad
+```
+
+When `ranking.json.bad` is already there, the new bad file stays where it is, and the visits stay in memory. Log Out's visit still ranks it first, and the daemon writes over neither file.
+
+```session
+$ mkdir -p data/lyncast
+$ echo kept > data/lyncast/ranking.json.bad
+$ ln -s ranking.json data/lyncast/ranking.json
+$ lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: Too many levels of symbolic links (os error 40); not moved to ranking.json.bad: it already exists; the visits stay in memory
+$ lyncast activate cmd:log-out --yes
+ran cmd:log-out
+record: ["niri","msg","action","quit","--skip-confirmation"]
+$ lyncast query lo --json
+{"key":"cmd:log-out","index":0,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:lock-screen","index":1,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ readlink data/lyncast/ranking.json
+ranking.json
+$ cat data/lyncast/ranking.json.bad
+kept
+```
+
+### A file of 64 MiB loads, and no larger one is written
+
+A file of exactly 64 MiB loads. This one holds Log Out's visit beside a member whose key is a long app ID. A visit would make the file larger, so the write fails, the file stays as it was, and the visits stay in memory. The test of Quit's deadline reuses this session's setup, which its `large-file` tag names.
+
+```session large-file
+$ mkdir -p data/lyncast
+$ { printf '{"app:'; head -c 67108730 /dev/zero | tr '\0' x; printf '.desktop":{"anchor":1,"last_opened":1,"terms":[]},"cmd:log-out":{"anchor":9000000000000,"last_opened":1760000000000,"terms":[]}}'; } > data/lyncast/ranking.json
+$ wc -c < data/lyncast/ranking.json
+67108864
+$ lyncast daemon --headless
+$ lyncast query lo --json
+{"key":"cmd:log-out","index":0,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:lock-screen","index":1,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: not saved: over 64 MiB
+$ wc -c < data/lyncast/ranking.json
+67108864
+```
+
+### A slow write holds up nothing but Quit
+
+Here the daemon's temporary file is a FIFO, so the write after Lock Screen waits until something reads it, and the daemon still answers. The shell line starts a reader a second later, while Quit waits for the write. A FIFO cannot be synced, so the write then fails, and its warning reaches stderr before Quit replies.
+
+```session
+$ mkdir -p data/lyncast
+$ lyncast daemon --headless
+$ mkfifo data/lyncast/ranking.json.$DAEMON.tmp
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast status
+closed
+$ (sleep 1; timeout 5 cat data/lyncast/ranking.json.$DAEMON.tmp) > /dev/null 2>&1 &
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: not saved: Invalid argument (os error 22)
+$ ls data/lyncast
+```
+
 ### One daemon owns the socket
 
 A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails.
@@ -595,5 +839,17 @@ Lock Screen waits in the runner while Quit removes the socket. A request on a co
 3< {"reply":"failed","reason":"the daemon is quitting"}
 record: ["loginctl","lock-session"]
 1< {"reply":"done","message":"ran cmd:lock-screen"}
+2< {"reply":"done","message":"ran cmd:quit"}
+```
+
+Quit takes no result after its 5 s. A `wire fifo` block runs no shell line, so it cannot write the 64 MiB file that makes each result take seconds to record. `quit_stops_taking_results_at_its_deadline` in `crates/lyncast/tests/daemon.rs` runs the setup lines of the session with that file, holds 64 of connection 1's Lock Screens in the runner, sends connection 2's Quit, and lets the 64 finish at once. Quit's reply has to come within 30 s. Each Lock Screen gets connection 1's reply or connection 3's, at least one gets connection 3's, and the daemon exits 0.
+
+A second `wire fifo` block sends Quit after Lock Screen's reply. That Quit finds no work in flight, so only the write of Lock Screen's visit holds it up, and the daemon exits within the same 2.5 s.
+
+```wire fifo
+1> {"request":"activate","key":"cmd:lock-screen","via":{"chord":"enter"},"confirmed":false,"query":""}
+record: ["loginctl","lock-session"]
+1< {"reply":"done","message":"ran cmd:lock-screen"}
+2> {"request":"activate","key":"cmd:quit","via":{"chord":"enter"},"confirmed":false,"query":""}
 2< {"reply":"done","message":"ran cmd:quit"}
 ```

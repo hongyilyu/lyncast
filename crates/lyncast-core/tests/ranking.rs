@@ -6,7 +6,7 @@ mod doc;
 use std::collections::BTreeSet;
 
 use lyncast_core::desktop::{self, Session, Verdict};
-use lyncast_core::rank::{Fit, Index, Timestamp, Visits, score};
+use lyncast_core::rank::{Fit, Index, Timestamp, Visit, Visits, score};
 use lyncast_core::{AppId, Command, Key, Section, fold};
 
 const DAY: i64 = 86_400_000;
@@ -282,15 +282,15 @@ fn offset(text: &str) -> i64 {
     }
 }
 
-/// Each line reads `visits <offsets> | at <offset> => <score>`, with the visits recorded on one
-/// entry with an empty query.
+/// Each line reads `[anchor <offset> | ]visits <offsets> | at <offset> => <score>`: the anchor
+/// stored before the visits, if any, and the visits recorded on one entry with an empty query.
 #[test]
 fn frecency_fixtures() {
     let blocks = doc::RANKING.blocks("frecency");
     assert_present(
         &blocks,
         "frecency",
-        &["visits 0 | at 66d", "visits 0, 10d |"],
+        &["visits 0 | at 66d", "visits 0, 10d |", "anchor 20000d |"],
     );
     let start = Timestamp(1_791_072_000_000);
     let at = |offset_text: &str| Timestamp(start.0 + offset(offset_text));
@@ -300,11 +300,21 @@ fn frecency_fixtures() {
         .flat_map(|block| &block.lines)
         .map(|line| {
             let (case, want) = split(line);
+            let (stored, case) = match case.strip_prefix("anchor ") {
+                Some(rest) => rest
+                    .split_once(" | ")
+                    .map(|(anchor, case)| (Some(at(anchor)), case))
+                    .unwrap_or_else(|| panic!("not a frecency line: {line:?}")),
+                None => (None, case),
+            };
             let (visits_at, read_at) = case
                 .strip_prefix("visits ")
                 .and_then(|case| case.split_once(" | at "))
                 .unwrap_or_else(|| panic!("not a frecency line: {line:?}"));
             let mut visits = Visits::default();
+            if let Some(anchor) = stored {
+                visits.insert(key.clone(), Visit::restore(anchor, start, []));
+            }
             for visit in visits_at.split(", ") {
                 visits.record(key.clone(), "", at(visit));
             }
@@ -315,14 +325,25 @@ fn frecency_fixtures() {
     assert_all("frecency", results);
 }
 
-/// The double-quoted words of `text`, with `""` as the empty word.
-fn quoted(mut text: &str) -> Vec<&str> {
+/// The double-quoted words of `text`, with `""` as the empty word. A word followed by `*N`
+/// stands for N copies of it.
+fn quoted(mut text: &str) -> Vec<String> {
     let mut words = Vec::new();
     while let Some(rest) = text.strip_prefix('"') {
         let (word, after) = rest
             .split_once('"')
             .unwrap_or_else(|| panic!("an unclosed quote in {text:?}"));
-        words.push(word);
+        let (copies, after) = match after.strip_prefix('*') {
+            Some(count) => {
+                let digits = count
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(count.len());
+                let copies = count[..digits].parse().expect("a count after *");
+                (copies, &count[digits..])
+            }
+            None => (1, after),
+        };
+        words.push(word.repeat(copies));
         text = after.trim_start();
     }
     assert!(text.is_empty(), "not a quoted word: {text:?}");
@@ -330,11 +351,15 @@ fn quoted(mut text: &str) -> Vec<&str> {
 }
 
 /// Each line reads `"query" ... => term | term | term`: the queries recorded on one entry in
-/// order, then its terms, most recent first.
+/// order, then its terms, most recent first. A term in double quotes reads as a query does.
 #[test]
 fn terms_fixtures() {
     let blocks = doc::RANKING.blocks("terms");
-    assert_present(&blocks, "terms", &["\"Fire\" \"fire\""]);
+    assert_present(
+        &blocks,
+        "terms",
+        &["\"Fire\" \"fire\"", "\"web\" \"x\"*1024"],
+    );
     let key = Key::App(AppId("firefox.desktop".into()));
     let results = blocks
         .iter()
@@ -343,10 +368,20 @@ fn terms_fixtures() {
             let (queries, want) = split(line);
             let mut visits = Visits::default();
             for query in quoted(queries) {
-                visits.record(key.clone(), query, Timestamp(1_791_072_000_000));
+                visits.record(key.clone(), &query, Timestamp(1_791_072_000_000));
             }
             let got = visits.get(&key).expect("visited").terms().join(" | ");
-            (line.clone(), want.to_owned(), got)
+            let want: Vec<String> = want
+                .split(" | ")
+                .map(|term| {
+                    if term.starts_with('"') {
+                        quoted(term).concat()
+                    } else {
+                        term.to_owned()
+                    }
+                })
+                .collect();
+            (line.clone(), want.join(" | "), got)
         })
         .collect();
     assert_all("terms", results);
