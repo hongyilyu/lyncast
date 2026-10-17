@@ -1,6 +1,7 @@
-//! The lyncast binary. `lyncast daemon --headless` runs the daemon, which scans the desktop
-//! entries, owns the socket, and builds the root list in lyncast-core. The other subcommands
-//! are clients that send it one request each and print the reply (docs/design/daemon.md).
+//! The lyncast binary. `lyncast daemon` runs the daemon, which scans the desktop entries, owns
+//! the socket, builds the root list in lyncast-core, and opens the palette on each summon, or no
+//! palette with `--headless`. The other subcommands are clients that send it one request each
+//! and print the reply (docs/design/daemon.md).
 
 mod apps;
 mod client;
@@ -40,14 +41,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the daemon, which scans the apps and answers on $XDG_RUNTIME_DIR/lyncast.sock.
+    /// Run the daemon, which scans the apps, answers on $XDG_RUNTIME_DIR/lyncast.sock, and opens
+    /// the palette on each summon.
     Daemon {
-        /// Run without the palette. Required until the palette exists.
-        #[arg(long, required = true)]
+        /// Run without the palette, and without a compositor if need be.
+        #[arg(long)]
         headless: bool,
         /// Append each program the daemon would start to FILE, as a JSON array, and start none.
         #[arg(long, value_name = "FILE")]
         record: Option<PathBuf>,
+        /// Print the bench's PROBE lines on stdout.
+        #[arg(long, hide = true, conflicts_with = "headless")]
+        trace: bool,
     },
     /// Open the summon if it is closed, or close it, and print the new state.
     Toggle,
@@ -111,7 +116,16 @@ fn main() -> ExitCode {
         Err(error) => return clap_exit(&error),
     };
     let done = match cli.command {
-        Cmd::Daemon { record, .. } => return daemon::run(record),
+        Cmd::Daemon {
+            headless: true,
+            record,
+            ..
+        } => return daemon::run(|| daemon::run_headless(record)),
+        Cmd::Daemon {
+            headless: false,
+            record,
+            trace,
+        } => return daemon::run(|| palette::run(record, trace)),
         Cmd::Toggle => summon(&Request::Toggle),
         Cmd::Status => summon(&Request::Status),
         Cmd::Query { text, .. } => query(text),

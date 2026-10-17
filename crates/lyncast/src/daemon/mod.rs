@@ -8,7 +8,10 @@ mod runner;
 mod serve;
 mod store;
 
+pub(crate) use face::{Face, IsOpen};
+pub(crate) use owner::{Owner, Wait};
 pub use serve::run;
+pub(crate) use serve::{Bell, Rung, WAYLAND_CLOSED, Wake, run_headless, start};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -245,6 +248,12 @@ impl Daemon {
     /// The writer of the clips could not save the new row `id`, so the history drops it.
     pub fn unsaved(&mut self, id: ClipId) {
         self.clips.unsaved(id);
+    }
+
+    /// Begins Quit with no request, for a host whose event loop ended before a stop came.
+    pub fn quit_now(&mut self) {
+        self.quitting = true;
+        self.settle();
     }
 
     /// The capture thread has ended: Quit cancelled it, or the compositor went once the stop had

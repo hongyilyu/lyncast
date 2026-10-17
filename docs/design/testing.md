@@ -97,7 +97,7 @@ These are missing on the dev box:
 
 The copy cases from [notes/07](../research/notes/07-paste-seam-workflow.md) are fixtures in [clipboard-and-paste.md](clipboard-and-paste.md#the-fixtures) since plan step 6: own writes, promotion, a copied answer, the filters, an image read back as the same PNG, a missing blob, file entries, and an empty clipboard after the daemon stops. A copy replies only after the capture thread sees its own marked offer, so a read right after `copied clip 1` gets the entry ([notes/11](../research/notes/11-clipboard-prototype.md), measured). Each seed waits for its row, because back-to-back seeds can race the watcher.
 
-These cases need the GPUI daemon under anvil and come with plan step 7:
+Two cases need the GPUI daemon under anvil, and [palette.md's](palette.md#the-fixtures) `summon` blocks hold them:
 
 - **Close after copy.** After `lyncast toggle` and `lyncast activate clip:1`, a status query prints `closed`, the clipboard still holds the entry, and a second toggle opens one window. The case catches a nested close and a missing `QuitMode::Explicit`, which would quit and clear the selection.
 - **Close after launch.** Activating an app row closes the window. The reviewed Launch arm never closed it.

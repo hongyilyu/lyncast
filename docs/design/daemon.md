@@ -6,7 +6,7 @@ The palette and the CLI send the same requests. The CLI sends them over a Unix s
 
 ## Start the daemon with lyncast daemon
 
-`lyncast daemon --headless` runs the daemon without GPUI. It takes the socket's lock, scans the apps, loads the visits and the clips, starts the capture thread when it has `WAYLAND_DISPLAY`, binds the socket, and then answers requests until a `Quit` command or until the compositor goes. `--headless` is required until plan step 7 builds the palette, the same way `--json` is required for `query`.
+`lyncast daemon` runs the daemon with the palette, which opens a window on each summon and needs a Wayland compositor ([palette](palette.md)). Without `WAYLAND_DISPLAY` it prints `lyncast: not started: the palette needs a Wayland compositor; run lyncast daemon --headless without one` and exits 1 before it takes the lock. `lyncast daemon --headless` runs the daemon without GPUI. Either takes the socket's lock, scans the apps, loads the visits and the clips, starts the capture thread when it has `WAYLAND_DISPLAY`, binds the socket, and then answers requests until a `Quit` command or until the compositor goes.
 
 The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
@@ -102,7 +102,7 @@ Quit goes in this order:
 
 Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 7 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time, and finds `clips.sqlite3` locked.
 
-Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. `Owner` in `crates/lyncast/src/daemon/owner.rs` holds the daemon and these steps, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`. Every event reaches the daemon through it, so plan step 7's palette host follows the same steps by handing it its events.
+Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. `Owner` in `crates/lyncast/src/daemon/owner.rs` holds the daemon and these steps, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`. Every event reaches the daemon through it, so the headless host and the [palette](palette.md) host follow the same steps by handing it their events.
 
 ## The runner starts programs, and tests swap in a recorder
 
@@ -115,7 +115,7 @@ A Tier 1 test also runs the daemon with an empty environment plus the doc's vari
 
 ## The summon is open or closed
 
-The summon is `closed` or `open`. The host holds it, not the daemon: the daemon answers `toggle` and `status` without a state, and a success says what it does to the summon. One function, `apply` in `crates/lyncast/src/daemon/face.rs`, changes the summon as each answer goes out. `toggle` flips it, the Clipboard History command opens it, and every other successful activation closes it. A failed activation leaves it alone, so an open palette stays open to show the reason. The headless host's summon is only a state, and it opens no window. From plan step 7 an open summon is a real window, and closing the window closes the summon.
+The summon is `closed` or `open`. The host holds it, not the daemon: the daemon answers `toggle` and `status` without a state, and a success says what it does to the summon. One function, `apply` in `crates/lyncast/src/daemon/face.rs`, changes the summon as each answer goes to a socket client. `toggle` flips it, the Clipboard History command opens it, and every other successful activation closes it. A failed activation leaves it alone, so an open palette stays open to show the reason. The headless host's summon is only a state, and it opens no window. The [palette](palette.md#a-summon-opens-one-window) host's summon is a window, and closing the window closes the summon.
 
 ## The root list puts the calculator card first
 
@@ -226,7 +226,7 @@ A `session` block is a terminal transcript against one environment:
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
-- `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, and the one that writes the clips `clips`, as the `THREAD` constants in `crates/lyncast/src/daemon/store.rs` and `crates/lyncast/src/clip/db.rs` spell them. `main` names the daemon's main thread, which runs the owner loop, and whose ID is the process ID, because a thread that the daemon starts without a name takes the main thread's name too. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
+- `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, and the one that writes the clips `clips`, as the `THREAD` constants in `crates/lyncast/src/daemon/store.rs` and `crates/lyncast/src/clip/db.rs` spell them. `main` names the daemon's main thread, which runs the owner loop, and whose ID is the process ID, because a thread that the daemon starts without a name takes the main thread's name too. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` or `$ thaw-thread <n>ms` lets it go on that many seconds or milliseconds later and goes on to the next line at once.
 - `$ hold-connections <n>` opens n connections to the newest daemon, one at a time, that each send `{"request":"status"` and no newline. It returns once each has a thread of its own, one that the daemon did not have before the connection, waiting in `recvfrom` to read the rest. The test sends each a space every second, so the 5 s that the daemon waits for each byte never run out, until the block ends. A connection that the daemon answers instead is opened again, because the connection with which the test waited for the socket can still hold its place for a moment. `$ half-connection` opens one more such connection, which the test feeds too and closes only when the block ends. It prints the reply line that the daemon sends it, or nothing once a new thread of the daemon waits to read it. `$ close-connection` closes the newest connection of `hold-connections` and returns once the thread that read it has ended.
 - `$ deny-threads` gives the newest daemon an `RLIMIT_NPROC` of 0 from then on, as `no-threads` gives the next one, so each thread that it starts fails, and `$ allow-threads` gives it back the limit it had. A kernel that exempts the user skips the rest of the block, as with `no-threads`.
 
@@ -847,7 +847,7 @@ exit: 1
 
 ### One daemon owns the socket
 
-A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails. A daemon line without `--headless` is a usage error, and clap's usage line names the options the line gave, such as the `--record` given here, which the harness then does not add.
+A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails. Without a compositor, only `--headless` starts, and the palette's hidden `--trace` refuses it. clap's usage line names the options the line gave, such as the `--record` given here, which the harness then does not add.
 
 ```session
 $ lyncast toggle
@@ -878,9 +878,11 @@ exit: 1
 $ env -u XDG_RUNTIME_DIR lyncast daemon --headless
 stderr: lyncast: XDG_RUNTIME_DIR is not set
 exit: 1
-$ lyncast daemon --record runs
-stderr: error: the following required arguments were not provided:
-stderr:   --headless
+$ lyncast daemon
+stderr: lyncast: not started: the palette needs a Wayland compositor; run lyncast daemon --headless without one
+exit: 1
+$ lyncast daemon --headless --trace --record runs
+stderr: error: the argument '--headless' cannot be used with '--trace'
 stderr: 
 stderr: Usage: lyncast daemon --headless --record <FILE>
 stderr: 

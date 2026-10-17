@@ -15,10 +15,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures::StreamExt;
+use futures::channel::mpsc as wake;
+use futures::channel::oneshot;
 use lyncast_core::ClipId;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 
@@ -26,7 +31,7 @@ use super::face::Windowless;
 use super::owner::Owner;
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, QUITTING, Success, WriterKind};
+use super::{Answer, Daemon, Done, QUITTING, Success, WriterKind};
 use crate::apps;
 use crate::clip::{Capture, Clips, Copier, Seen};
 use crate::config;
@@ -59,8 +64,11 @@ const MAX_REQUEST: u64 = 1 << 20;
 /// the request, so a client that sends a byte at a time holds its thread for good.
 const MAX_CONNECTIONS: u64 = 128;
 
+/// Why a daemon whose compositor went exits 1.
+pub(crate) const WAYLAND_CLOSED: &str = "the Wayland connection closed";
+
 /// What the host reads.
-pub(super) enum Event {
+pub(crate) enum Event {
     Request(Request, ReplyTo),
     /// A worker thread's task or the copier's copy ended.
     Finished(Success, Result<Done, String>, ReplyTo),
@@ -70,21 +78,106 @@ pub(super) enum Event {
     Seen(Seen),
 }
 
-/// Where a request's reply goes: the connection thread that read it, which says when the reply
-/// is written.
-pub(super) struct ReplyTo {
+/// Where a request's answer goes.
+pub(crate) enum ReplyTo {
+    /// The connection thread that read the request, which writes the wire reply.
+    Socket(Socket),
+    /// The palette in this process, which reads the answer as it is.
+    Palette(oneshot::Sender<Answer>),
+}
+
+/// A connection thread's side of a request: where its reply goes, and how it says the reply is
+/// written.
+pub(crate) struct Socket {
     pub(super) reply: Sender<Reply>,
     pub(super) written: Receiver<()>,
 }
 
-/// Runs the daemon until a Quit command, or until it stops on an error, and gives its exit code.
-/// `record` swaps the runner for a recorder that writes to that file.
-pub fn run(record: Option<PathBuf>) -> ExitCode {
+/// The host's doorbell. Each producer rings it once it has queued an event, and a wake goes out
+/// only when none is pending since the host last took one. The headless host has none: it
+/// waits on its channel instead.
+#[derive(Clone)]
+pub(crate) struct Bell {
+    pending: Arc<AtomicBool>,
+    wake: wake::UnboundedSender<()>,
+}
+
+/// The host's side of the [`Bell`].
+pub(crate) struct Rung {
+    pending: Arc<AtomicBool>,
+    woken: wake::UnboundedReceiver<()>,
+}
+
+pub(crate) enum Wake {
+    Rang,
+    /// Every [`Bell`] is gone, so nothing rings again.
+    BellsGone,
+}
+
+impl Bell {
+    pub(crate) fn new() -> (Bell, Rung) {
+        let pending = Arc::new(AtomicBool::new(false));
+        let (wake, woken) = wake::unbounded();
+        let rung = Rung {
+            pending: Arc::clone(&pending),
+            woken,
+        };
+        (Bell { pending, wake }, rung)
+    }
+
+    /// Callable from any thread. The swap pairs with [`Rung::next`]'s, so a host that drains
+    /// after the wake sees the event queued before the ring.
+    fn ring(&self) {
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            let _ = self.wake.unbounded_send(());
+        }
+    }
+}
+
+impl Rung {
+    /// Waits for a ring and takes it, clearing the bell in the same poll, so a ring after this
+    /// one wakes the host again however often it drains in between.
+    pub(crate) async fn next(&mut self) -> Wake {
+        if self.woken.next().await.is_none() {
+            return Wake::BellsGone;
+        }
+        self.pending.swap(false, Ordering::AcqRel);
+        Wake::Rang
+    }
+}
+
+/// The sender every thread uses: the connection threads, the workers, the copier, the capture
+/// thread, and the writers. It rings the host's bell after each event.
+#[derive(Clone)]
+pub(crate) struct Events {
+    inbox: Sender<Event>,
+    bell: Option<Bell>,
+}
+
+impl Events {
+    /// Queues the event and rings. Once the host has ended, the event is dropped instead, with
+    /// no one to tell.
+    pub(crate) fn send_or_drop(&self, event: Event) {
+        if self.inbox.send(event).is_ok() {
+            self.ring();
+        }
+    }
+
+    pub(super) fn ring(&self) {
+        if let Some(bell) = &self.bell {
+            bell.ring();
+        }
+    }
+}
+
+/// Starts the warnings thread, then runs the daemon in `host`, [`run_headless`] or the palette's,
+/// until a Quit command or until it stops on an error, and gives its exit code.
+pub fn run(host: impl FnOnce() -> Result<(), String>) -> ExitCode {
     if let Err(error) = warning::start() {
         warning::write_alone(format_args!("{}", not_started(error)), ALONE_WRITE_WAIT);
         return ExitCode::FAILURE;
     }
-    match run_headless(record) {
+    match host() {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
             warning::last(format_args!("{reason}"));
@@ -98,11 +191,16 @@ pub fn run(record: Option<PathBuf>) -> ExitCode {
 /// gives, and gives the owner a host runs it with. The lock comes first: [`open_daemon`], which
 /// reads the user's files, borrows it, and [`Lock::bind`] takes it, so a second daemon fails
 /// before it scans or reads `ranking.json`, and only the lock holder removes a stale socket and
-/// binds.
-fn start(record: Option<PathBuf>) -> Result<Owner, String> {
+/// binds. `record` swaps the runner for a recorder that writes to that file. Each event rings
+/// `bell`, if the host has one.
+pub(crate) fn start(record: Option<PathBuf>, bell: Option<Bell>) -> Result<Owner, String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
-    let (events, inbox) = mpsc::channel();
+    let (inbox_sender, inbox) = mpsc::channel();
+    let events = Events {
+        inbox: inbox_sender,
+        bell,
+    };
     let (mut daemon, copier) = open_daemon(&lock, &events)?;
     warning::flush(Instant::now() + WARNINGS_BEFORE_BIND);
     let (claim, listener) = lock.bind(runtime.join(wire::SOCKET))?;
@@ -118,14 +216,14 @@ fn start(record: Option<PathBuf>) -> Result<Owner, String> {
 /// The daemon, from the environment and the user's files: `config.toml`, the desktop entries,
 /// `ranking.json`, and `clips.sqlite3`. Then the capture thread starts. Only the lock holder
 /// reads them, which `_held` proves.
-fn open_daemon(_held: &Lock, events: &Sender<Event>) -> Result<(Daemon, Option<Copier>), String> {
+fn open_daemon(_held: &Lock, events: &Events) -> Result<(Daemon, Option<Copier>), String> {
     let vars = Vars::read().map_err(not_started)?;
     let config = config::read(vars.config_home().as_deref().map(Path::new));
     let index = Index::new(apps::scan(&vars));
     let ended = |writer: WriterKind| {
         let events = events.clone();
         move || {
-            let _ = events.send(Event::WriterEnded(writer));
+            events.send_or_drop(Event::WriterEnded(writer));
         }
     };
     let data_home = vars.data_home().map(PathBuf::from);
@@ -136,7 +234,7 @@ fn open_daemon(_held: &Lock, events: &Sender<Event>) -> Result<(Daemon, Option<C
     let unsaved = {
         let events = events.clone();
         move |id| {
-            let _ = events.send(Event::Unsaved(id));
+            events.send_or_drop(Event::Unsaved(id));
         }
     };
     let clips = Clips::open(
@@ -150,7 +248,7 @@ fn open_daemon(_held: &Lock, events: &Sender<Event>) -> Result<(Daemon, Option<C
         Some(_) => {
             let events = events.clone();
             let seen = move |seen| {
-                let _ = events.send(Event::Seen(seen));
+                events.send_or_drop(Event::Seen(seen));
             };
             let (capture, copier) = Capture::start(clips.pending(), seen).map_err(not_started)?;
             (Some(capture), Some(copier))
@@ -164,8 +262,8 @@ fn open_daemon(_held: &Lock, events: &Sender<Event>) -> Result<(Daemon, Option<C
 /// The headless host. It serves until a Quit command or until the compositor goes, and then
 /// stops in the order docs/design/daemon.md gives: no new connections, the work in flight, the
 /// last writes, the reply. The daemon keeps answering while it stops.
-fn run_headless(record: Option<PathBuf>) -> Result<(), String> {
-    start(record)?.serve_blocking(&mut Windowless(Summon::Closed))
+pub(crate) fn run_headless(record: Option<PathBuf>) -> Result<(), String> {
+    start(record, None)?.serve_blocking(&mut Windowless(Summon::Closed))
 }
 
 /// The reason the daemon gives when `WAYLAND_SOCKET` is set, when a thread it needs cannot start,
@@ -175,7 +273,7 @@ fn not_started(error: impl fmt::Display) -> String {
 }
 
 /// The `flock` on the lock file, which only [`lock`] takes.
-struct Lock(File);
+pub(super) struct Lock(pub(super) File);
 
 impl Lock {
     /// Removes a socket that a daemon left when it died, then binds a new one. Only the lock
@@ -193,7 +291,7 @@ impl Lock {
 
 /// The lock and the socket path, which Quit gives up.
 pub(super) struct Claim {
-    lock: Lock,
+    pub(super) lock: Lock,
     pub(super) socket: PathBuf,
 }
 
@@ -234,7 +332,7 @@ fn lock(path: &Path) -> Result<Lock, String> {
     }
 }
 
-fn accept(listener: &UnixListener, events: &Sender<Event>) {
+fn accept(listener: &UnixListener, events: &Events) {
     let places = Permits::new(MAX_CONNECTIONS);
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
@@ -295,7 +393,7 @@ fn turn_away(stream: &UnixStream, reason: &str) {
 
 /// Reads one request line, hands it to the host, and writes the reply line. A line that
 /// does not parse gets a `failed` reply here, and the daemon keeps serving.
-fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
+fn connection(stream: UnixStream, events: &Events) -> io::Result<()> {
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
     let mut line = Vec::new();
@@ -304,18 +402,14 @@ fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
     let reply = match parse(&line) {
         Ok(request) => {
             let (reply, reply_rx) = mpsc::channel();
-            let reply_to = ReplyTo {
+            let reply_to = ReplyTo::Socket(Socket {
                 reply,
                 written: written_rx,
-            };
-            // Either fails only once the host has ended at a Quit. A failed send hands the
-            // event back, and its reply sender would keep the wait open, so `ok` drops it first.
-            let asked = events.send(Event::Request(request, reply_to)).ok();
-            asked
-                .and_then(|()| reply_rx.recv().ok())
-                .unwrap_or_else(|| Reply::Failed {
-                    reason: QUITTING.to_owned(),
-                })
+            });
+            events.send_or_drop(Event::Request(request, reply_to));
+            reply_rx.recv().unwrap_or_else(|_| Reply::Failed {
+                reason: QUITTING.to_owned(),
+            })
         }
         Err(reason) => Reply::Failed { reason },
     };
@@ -341,7 +435,7 @@ fn parse(line: &[u8]) -> Result<Request, String> {
 }
 
 /// The one clock read per event. A clock before 1970 reads as the epoch.
-pub(super) fn now() -> Timestamp {
+pub(crate) fn now() -> Timestamp {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

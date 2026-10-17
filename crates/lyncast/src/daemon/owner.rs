@@ -1,19 +1,21 @@
 //! The owner of the daemon, which every host runs it with. It holds the [`Daemon`], the inbox,
 //! and the claim, hands the daemon every event, and owns Quit's order. No [`Daemon`] method
-//! blocks, and only the host waits, on its channel.
+//! blocks, and only the host waits: the headless host on the channel, the palette's on its bell.
 
 use std::fs;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use super::face::{Face, apply};
+use futures::channel::oneshot;
+
+use super::face::{Face, IsOpen, Windowless, apply};
 use super::runner::Runner;
-use super::serve::{Claim, Event, ReplyTo, now, spawn_with};
+use super::serve::{Claim, Event, Events, ReplyTo, Socket, WAYLAND_CLOSED, now, spawn_with};
 use super::{Answer, Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, quitting};
 use crate::clip::{Copier, Payload, Seen};
 use crate::view;
 use crate::warning;
-use crate::wire::Reply;
+use crate::wire::{Reply, Request, Summon};
 
 /// Quit's wait for its warnings to reach stderr before it replies.
 const WARNINGS_BEFORE_REPLY: Duration = Duration::from_secs(1);
@@ -28,12 +30,12 @@ const REPLIES_BEFORE_EXIT: Duration = Duration::from_secs(1);
 struct Unwritten(Vec<Receiver<()>>);
 
 impl Unwritten {
-    fn send(&mut self, reply_to: ReplyTo, reply: Reply) {
+    fn send(&mut self, socket: Socket, reply: Reply) {
         self.0
             .retain(|written| written.try_recv() == Err(TryRecvError::Empty));
         // The send fails only when the connection's thread is gone, with no one to tell.
-        if reply_to.reply.send(reply).is_ok() {
-            self.0.push(reply_to.written);
+        if socket.reply.send(reply).is_ok() {
+            self.0.push(socket.written);
         }
     }
 
@@ -45,8 +47,15 @@ impl Unwritten {
     }
 
     fn deliver(&mut self, reply_to: ReplyTo, answer: Answer, face: &mut dyn Face) {
-        let summon = apply(face, &answer);
-        self.send(reply_to, view::reply(answer, summon));
+        match reply_to {
+            ReplyTo::Socket(socket) => {
+                let summon = apply(face, &answer);
+                self.send(socket, view::reply(answer, summon));
+            }
+            ReplyTo::Palette(answer_to) => {
+                let _ = answer_to.send(answer);
+            }
+        }
     }
 
     /// Answers an event that is still queued once Quit stops waiting, without handing it to the
@@ -63,13 +72,13 @@ impl Unwritten {
 /// gone. It is the one owner of the dispatch and of Quit's order, for every host. Each event
 /// reaches the daemon through it, and it begins the stop when an event asks for one, so no host
 /// chooses between serving and stopping.
-pub(super) struct Owner {
+pub(crate) struct Owner {
     daemon: Daemon,
     inbox: Receiver<Event>,
     claim: Claim,
     phase: Phase,
-    /// A sender for the worker threads and the copier's results.
-    events: Sender<Event>,
+    /// A sender for the worker threads and the copier's results, and the host's bell.
+    events: Events,
     runner: Runner,
     copier: Option<Copier>,
     unwritten: Unwritten,
@@ -110,7 +119,7 @@ fn time_left(deadline: Instant) -> Option<Duration> {
 }
 
 /// What a host waits for, once the owner has handed the daemon what it may take now.
-enum Wait {
+pub(crate) enum Wait {
     /// The daemon serves: the next event, however long it takes.
     Forever,
     /// The stop has begun: the next event, for this long at most.
@@ -121,14 +130,14 @@ enum Wait {
 
 /// Proof that the stop's wait is over, which [`Owner::finish_blocking`] takes, so no host
 /// finishes a stop that has not begun or is still waiting.
-struct WaitOver(());
+pub(crate) struct WaitOver(());
 
 impl Owner {
     pub(super) fn new(
         daemon: Daemon,
         inbox: Receiver<Event>,
         claim: Claim,
-        events: Sender<Event>,
+        events: Events,
         runner: Runner,
         copier: Option<Copier>,
     ) -> Owner {
@@ -144,11 +153,50 @@ impl Owner {
         }
     }
 
+    /// The palette's own request, which skips the inbox. Its answer is in the receiver at once
+    /// unless the request starts a job, and then it comes when the job ends. A Quit begins the
+    /// stop here and rings the bell, so the owner task starts its wait, and the Quit's answer
+    /// comes once the stop has finished.
+    pub(crate) fn ask(
+        &mut self,
+        face: &mut dyn Face,
+        request: Request,
+    ) -> oneshot::Receiver<Answer> {
+        let (answer_to, answer) = oneshot::channel();
+        let event = Event::Request(request, ReplyTo::Palette(answer_to));
+        if let Some(stop) = self.hand(face, event) {
+            self.stop(stop, face);
+            self.events.ring();
+        }
+        answer
+    }
+
+    /// Hands the daemon each queued event it may take now, without blocking, and gives what the
+    /// host waits for next. Once the stop has begun, the time is checked before each event.
+    pub(crate) fn take_queued(&mut self, face: &mut dyn Face) -> Wait {
+        loop {
+            let wait = self.wait();
+            if let Wait::Over(_) = wait {
+                return wait;
+            }
+            let Ok(event) = self.inbox.try_recv() else {
+                return wait;
+            };
+            if let Some(stop) = self.hand(face, event) {
+                self.stop(stop, face);
+            }
+        }
+    }
+
     /// Ends the stop. Each event still queued fails, the lock goes only if the daemon has
     /// stopped, the warnings get up to [`WARNINGS_BEFORE_REPLY`] to reach stderr before Quit's
     /// answer goes out, and the replies get up to [`REPLIES_BEFORE_EXIT`] to be written, so it
     /// blocks for 2 s at most.
-    fn finish_blocking(mut self, _: WaitOver, face: &mut dyn Face) -> Result<(), String> {
+    pub(crate) fn finish_blocking(
+        mut self,
+        _: WaitOver,
+        face: &mut dyn Face,
+    ) -> Result<(), String> {
         for event in self.inbox.try_iter() {
             self.unwritten.refuse(event, face);
         }
@@ -169,10 +217,33 @@ impl Owner {
                 unwritten.deliver(reply_to, answer, face);
                 Ok(())
             }
-            Stop::Closed => Err("the Wayland connection closed".to_owned()),
+            Stop::Closed => Err(WAYLAND_CLOSED.to_owned()),
         };
         unwritten.wait(Instant::now() + REPLIES_BEFORE_EXIT);
         stopped
+    }
+
+    /// Stops a daemon whose host's loop ended before its stop finished, as the palette's does
+    /// once the compositor goes, blocking on the inbox as the headless host does. A stop that has
+    /// begun goes on. While the daemon still serves, it takes events for up to Quit's 5 s, for the
+    /// capture thread to see the compositor go, and begins that stop itself if none comes. The
+    /// windows went with the loop, so the summon is closed. It gives nothing, because the
+    /// compositor's end is the exit even when the stop answers a Quit.
+    pub(crate) fn stop_blocking(mut self) {
+        let mut face = Windowless(Summon::Closed);
+        let deadline = Instant::now() + QUIT_WAIT;
+        while let Phase::Serving = self.phase {
+            let event = time_left(deadline).and_then(|wait| self.inbox.recv_timeout(wait).ok());
+            let Some(event) = event else {
+                self.daemon.quit_now();
+                self.stop(Stop::Closed, &mut face);
+                break;
+            };
+            if let Some(stop) = self.hand(&mut face, event) {
+                self.stop(stop, &mut face);
+            }
+        }
+        let _ = self.serve_blocking(&mut face);
     }
 
     /// A host on a std thread: each event as it comes, blocking on the inbox, the stop's wait,
@@ -188,7 +259,7 @@ impl Owner {
                 Wait::Over(over) => break over,
             };
             if let Some(stop) = self.hand(face, event) {
-                self.stop(stop);
+                self.stop(stop, face);
             }
         };
         self.finish_blocking(over, face)
@@ -266,9 +337,13 @@ impl Owner {
         }
     }
 
-    /// Begins the stop: the socket goes, so no new client connects, and Quit's 5 s start.
-    fn stop(&mut self, stop: Stop) {
+    /// Begins the stop: the socket goes, so no new client connects, the summon closes, and
+    /// Quit's 5 s start.
+    fn stop(&mut self, stop: Stop, face: &mut dyn Face) {
         let _ = fs::remove_file(&self.claim.socket);
+        if let Some(open) = IsOpen::of(face) {
+            face.close(open);
+        }
         self.phase = Phase::Stopping(Stopping {
             stop,
             deadline: Instant::now() + QUIT_WAIT,
@@ -293,7 +368,7 @@ impl Owner {
         let events = self.events.clone();
         copier.copy(payload, move |copied| {
             let done = copied.map(|()| Done::Copied);
-            let _ = events.send(Event::Finished(success, done, reply_to));
+            events.send_or_drop(Event::Finished(success, done, reply_to));
         });
     }
 
@@ -304,7 +379,7 @@ impl Owner {
             (task, success, reply_to),
             move |(task, success, reply_to)| {
                 let done = task.run(&runner);
-                let _ = events.send(Event::Finished(success, done, reply_to));
+                events.send_or_drop(Event::Finished(success, done, reply_to));
             },
         );
         if let Err(((_, success, reply_to), error)) = started {

@@ -154,10 +154,10 @@ Ctrl+K opens a small, searchable menu for the selected row. The menu lists the r
 A summon goes through these steps:
 
 1. A niri bind runs `lyncast toggle`, which sends `Request::Toggle`.
-2. If no summon is open, the daemon opens a new layer-shell window. If one is open, the toggle closes it.
+2. If no summon is open, the daemon's host opens a new layer-shell window. If one is open, the toggle closes it ([palette](palette.md#a-summon-opens-one-window)).
 3. Each keystroke runs the input box and redraws the rows.
 4. The activating keys, or a pick in the Actions menu, send `Request::Activate { key, via, confirmed, query }`. The daemon rebuilds the row's `Subject` from the key and current state, takes the item for the chord or the picked verb from its `Actions`, and runs it. If the action fails, the window stays open.
-5. After a successful action, the daemon schedules the close with `cx.defer`. A close from inside the window's own handler fails in GPUI (`src/app.rs:2215`), because GPUI takes a window out of its slot while it updates ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source).
+5. After a CLI client's successful action, the host schedules the close with `cx.defer`, so it runs outside every entity update. `remove_window` only marks the window (`src/window.rs:2384`), so a window's own handler can close it too. What fails is `update_window` on a window that is already being updated, because GPUI takes a window out of its slot while it updates (`src/app.rs:2201-2215`, read in source). [notes/07](../research/notes/07-paste-seam-workflow.md) read that failure as a failed close from inside the window's handler.
 6. The palette closes when the activating keys are released. Once paste exists, a held Shift or Alt would otherwise merge with the injected Ctrl+V.
 7. `on_window_closed` clears the summon. The hook also sees a close that niri starts when an output goes away, so the toggle state follows the real window (notes/07, read in source).
 
