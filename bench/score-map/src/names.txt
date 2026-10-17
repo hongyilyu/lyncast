@@ -1,0 +1,225 @@
+Firefox
+Firefox Web Browser
+Google Chrome
+Chromium
+Visual Studio Code
+Code - OSS
+Thunderbird
+LibreOffice Writer
+LibreOffice Calc
+LibreOffice Impress
+LibreOffice Draw
+LibreOffice Base
+LibreOffice Math
+LibreOffice
+GNU Image Manipulation Program
+Inkscape
+Blender
+Krita
+Darktable
+RawTherapee
+Shotwell
+digiKam
+Kdenlive
+OBS Studio
+VLC media player
+mpv Media Player
+Celluloid
+Rhythmbox
+Lollypop
+Spotify
+Audacity
+Ardour
+LMMS
+Steam
+Lutris
+Heroic Games Launcher
+0 A.D.
+SuperTuxKart
+Minecraft Launcher
+Discord
+Slack
+Signal
+Telegram Desktop
+Element
+Zoom
+Microsoft Teams
+Skype
+Files
+Nautilus
+Dolphin
+Thunar
+Nemo
+PCManFM
+Terminal
+GNOME Terminal
+Konsole
+Alacritty
+kitty
+foot
+WezTerm
+XTerm
+Tilix
+Text Editor
+gedit
+Kate
+KWrite
+Emacs
+Emacs (Client)
+GNU Emacs
+Vim
+GVim
+Neovim
+Sublime Text
+Zed
+Helix
+IntelliJ IDEA Community Edition
+PyCharm Community
+CLion
+Android Studio
+Eclipse
+Qt Creator
+GNOME Builder
+DBeaver
+pgAdmin 4
+Postman
+Insomnia
+GitHub Desktop
+GitKraken
+Meld
+Kompare
+Docker Desktop
+VirtualBox
+Virtual Machine Manager
+GNOME Boxes
+Remmina
+TigerVNC Viewer
+KeePassXC
+Bitwarden
+1Password
+Seahorse
+Passwords and Keys
+Settings
+System Settings
+GNOME Tweaks
+Extension Manager
+Software
+Discover
+Software Update
+Disks
+GParted
+Disk Usage Analyzer
+Filelight
+System Monitor
+htop
+Task Manager
+Calculator
+KCalc
+Qalculate!
+Calendar
+Contacts
+Clocks
+Weather
+Maps
+Photos
+Image Viewer
+Eye of GNOME
+Gwenview
+Document Viewer
+Evince
+Okular
+Zathura
+Foliate
+Calibre
+Archive Manager
+Ark
+File Roller
+Xarchiver
+PeaZip
+Screenshot
+Spectacle
+Flameshot
+Kooha
+Peek
+Cheese
+Webcam
+Sound Recorder
+Pavucontrol
+PulseAudio Volume Control
+EasyEffects
+Helvum
+qpwgraph
+Bluetooth Manager
+Blueman
+Network Connections
+Advanced Network Configuration
+Wireshark
+Transmission
+qBittorrent
+Deluge
+FileZilla
+Nextcloud Desktop
+Syncthing
+Dropbox
+Mail
+Geary
+Evolution
+Kontact
+KMail
+Notes
+Joplin
+Obsidian
+Logseq
+Zotero
+Xournal++
+Rnote
+Okteta
+GHex
+Font Viewer
+Fonts
+Character Map
+Characters
+Gucharmap
+Dconf Editor
+Logs
+Help
+Tour
+Yelp
+About
+Color Picker
+Gpick
+Gnome Color Manager
+Print Settings
+Printers
+Scanner
+Document Scanner
+Simple Scan
+Startup Applications
+Power Statistics
+Timeshift
+BleachBit
+Brave Web Browser
+Microsoft Edge
+Vivaldi
+Opera
+Epiphany
+Web
+LibreWolf
+Tor Browser
+Waydroid
+Kodi
+Plex
+Jellyfin Media Player
+Picard
+Strawberry
+Elisa
+Amberol
+Clipboard History
+Open Config
+Reload Apps
+Quit lyncast
+Lock Screen
+Suspend
+Log Out
+Reboot
+Power Off

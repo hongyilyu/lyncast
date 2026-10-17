@@ -1,0 +1,14 @@
+# Its own workspace, so `cargo test` never builds it. It measured how frizbee's
+# scores map onto TinyCast's points (docs/research/notes/10). Rerun it with
+# `cargo run --release --manifest-path bench/score-map/Cargo.toml --target-dir target/bench-score-map`.
+[package]
+name = "score-map"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[dependencies]
+frizbee = "=0.13.0"
