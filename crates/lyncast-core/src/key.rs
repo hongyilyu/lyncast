@@ -39,8 +39,20 @@ pub enum KeyError {
     BadClipId,
 }
 
+impl fmt::Display for KeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            KeyError::UnknownKind => "unknown kind",
+            KeyError::Empty => "nothing after the colon",
+            KeyError::UnknownCommand => "unknown command",
+            KeyError::BadClipId => "bad clip id",
+        })
+    }
+}
+
 impl Kind {
-    const ALL: [Kind; 4] = [Kind::App, Kind::Command, Kind::Clip, Kind::Calculator];
+    /// Every kind, in declaration order.
+    pub const ALL: [Kind; 4] = [Kind::App, Kind::Command, Kind::Clip, Kind::Calculator];
 
     fn prefix(self) -> &'static str {
         match self {

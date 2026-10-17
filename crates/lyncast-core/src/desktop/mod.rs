@@ -10,7 +10,7 @@ mod keyfile;
 pub use exec::{ExecContext, ExecError, tokenize};
 pub use keyfile::Unparseable;
 
-use crate::{AppId, DesktopAction};
+use crate::{ActionItem, AppId, DesktopAction, Subject};
 use keyfile::KeyFile;
 
 /// The session's locale and desktops, as the binary read them from the environment.
@@ -162,6 +162,32 @@ impl App {
     /// In `Actions=` order.
     pub fn actions(&self) -> &[AppAction] {
         &self.actions
+    }
+
+    /// The argv that one of this app's items starts: Exec for Open, and a Desktop Action's own
+    /// Exec for that action. Copy Path and the items of other rows start nothing.
+    pub fn argv_for(&self, item: &ActionItem) -> Option<&[String]> {
+        match item {
+            ActionItem::Launch(id) if *id == self.id => Some(&self.argv),
+            ActionItem::LaunchAction(id, action) if *id == self.id => self
+                .actions
+                .iter()
+                .find(|own| own.action.id == action.id)
+                .map(|own| own.argv.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// The facts the chord table reads: the ID and the Desktop Actions.
+    pub fn subject(&self) -> Subject {
+        Subject::App {
+            id: self.id.clone(),
+            actions: self
+                .actions
+                .iter()
+                .map(|action| action.action.clone())
+                .collect(),
+        }
     }
 }
 

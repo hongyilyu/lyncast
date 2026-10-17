@@ -9,11 +9,14 @@ mod view;
 mod wire;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use lyncast_core::{Chord, Key, Verb};
 
-use wire::{Reply, Request};
+use view::Spelled;
+use wire::{Reply, Request, Via};
 
 #[derive(Parser)]
 #[command(name = "lyncast", version, about = "A fast, small launcher for niri.")]
@@ -29,6 +32,9 @@ enum Cmd {
         /// Run without the palette. Required until the palette exists.
         #[arg(long, required = true)]
         headless: bool,
+        /// Append each program the daemon would start to FILE, as a JSON array, and start none.
+        #[arg(long, value_name = "FILE")]
+        record: Option<PathBuf>,
     },
     /// Open the summon if it is closed, or close it, and print the new state.
     Toggle,
@@ -49,6 +55,24 @@ enum Cmd {
         #[arg(long, action = clap::ArgAction::Help)]
         help: Option<bool>,
     },
+    /// Run one action of a row, and print what happened.
+    Activate {
+        /// The row's key, such as `app:firefox.desktop`, `cmd:reboot`, or `calc:-5+3`.
+        #[arg(value_parser = Key::read)]
+        key: Key,
+        /// The keys pressed: `enter` or `ctrl-enter`. Without `--verb`, Enter.
+        #[arg(long, value_parser = Chord::read, conflicts_with = "verb")]
+        chord: Option<Chord>,
+        /// An item of the row's Actions menu, spelled as `query --json` spells its verb.
+        #[arg(long, value_parser = Verb::read)]
+        verb: Option<Verb>,
+        /// Confirm a command that asks first, such as Reboot.
+        #[arg(long)]
+        yes: bool,
+        /// The search text the row was found with, which frecency keeps as a search term.
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        query: String,
+    },
 }
 
 /// Exits 0 on success, 1 when the request fails or stdout cannot be written, and 2 on a usage
@@ -59,10 +83,22 @@ fn main() -> ExitCode {
         Err(error) => return clap_exit(&error),
     };
     let done = match cli.command {
-        Cmd::Daemon { .. } => daemon::run(),
+        Cmd::Daemon { record, .. } => daemon::run(record),
         Cmd::Toggle => summon(&Request::Toggle),
         Cmd::Status => summon(&Request::Status),
         Cmd::Query { text, .. } => query(text),
+        Cmd::Activate {
+            key,
+            chord,
+            verb,
+            yes,
+            query,
+        } => activate(Request::Activate {
+            key,
+            via: verb.map_or(Via::Chord(chord.unwrap_or(Chord::Enter)), Via::Menu),
+            confirmed: yes,
+            query,
+        }),
     };
     match done {
         Ok(()) => ExitCode::SUCCESS,
@@ -95,6 +131,15 @@ fn summon(request: &Request) -> Result<(), String> {
 fn query(text: String) -> Result<(), String> {
     match client::send(&Request::Query { text })? {
         Reply::Rows { rows } => print(|out| view::write_rows(out, &rows)),
+        reply => Err(client::refusal(reply)),
+    }
+}
+
+/// Prints the success line. A command that asks first prints its question as the failure.
+fn activate(request: Request) -> Result<(), String> {
+    match client::send(&request)? {
+        Reply::Done { message } => print(|out| writeln!(out, "{message}")),
+        Reply::Confirm { title } => Err(format!("{title}? Run again with --yes to confirm.")),
         reply => Err(client::refusal(reply)),
     }
 }

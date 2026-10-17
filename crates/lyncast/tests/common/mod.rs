@@ -9,7 +9,7 @@ pub mod doc;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -80,14 +80,16 @@ pub fn materialize(blocks: &[doc::Block], tree: &Path) {
         );
         let path = tree.join(relative);
         fs::create_dir_all(path.parent().expect("a path under the tree")).unwrap();
-        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
-        // SAFETY: `c_path` is a NUL-terminated string that lives through the call.
-        assert_eq!(
-            unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) },
-            0,
-            "{c_path:?}"
-        );
+        mkfifo(&path, 0o644);
     }
+}
+
+/// Makes a FIFO at `path` with `mode`.
+pub fn mkfifo(path: &Path, mode: libc::mode_t) {
+    let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_path` is a NUL-terminated string that lives through the call.
+    let made = unsafe { libc::mkfifo(c_path.as_ptr(), mode) };
+    assert_eq!(made, 0, "mkfifo {path:?}: {}", io::Error::last_os_error());
 }
 
 /// The text's bytes, with each exact `\x{HH}` written as the byte `HH`, so a desktop file can
@@ -176,9 +178,9 @@ impl CommandLine {
     }
 }
 
-/// A `$ [env -u NAME ...] [NAME=value ...] lyncast ...` line. A value may hold `$TREE` and
-/// `\x{HH}`, and `""` is an empty argument.
-pub fn command_line(command: &str, tree: &Path) -> CommandLine {
+/// A `$ [env -u NAME ...] [NAME=value ...] lyncast ...` line, or `None` for a line that runs
+/// another program. A value may hold `$TREE` and `\x{HH}`, and `""` is an empty argument.
+pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
     let mut words: &[&str] = &command
         .strip_prefix("$ ")
         .unwrap_or_else(|| panic!("a command line starts with `$ `: {command:?}"))
@@ -192,16 +194,14 @@ pub fn command_line(command: &str, tree: &Path) -> CommandLine {
             words = rest;
         }
     }
-    let program = words
-        .iter()
-        .position(|&word| word == "lyncast")
-        .unwrap_or_else(|| panic!("a command line runs lyncast: {command:?}"));
+    let program = words.iter().position(|word| !word.contains('='))?;
+    if words[program] != "lyncast" {
+        return None;
+    }
     let vars = words[..program]
         .iter()
         .map(|word| {
-            let (name, value) = word
-                .split_once('=')
-                .unwrap_or_else(|| panic!("not NAME=value before lyncast: {command:?}"));
+            let (name, value) = word.split_once('=').expect("a word with =");
             let value = OsString::from_vec(raw_bytes(&substitute(value, &[("$TREE", tree)])));
             (name.to_owned(), value)
         })
@@ -217,7 +217,7 @@ pub fn command_line(command: &str, tree: &Path) -> CommandLine {
             arg.to_owned()
         })
         .collect();
-    CommandLine { unset, vars, args }
+    Some(CommandLine { unset, vars, args })
 }
 
 /// Calls `ready` every millisecond until it gives a value, for up to 10 s, so a test that waits
@@ -279,6 +279,11 @@ impl Runtime {
     pub fn socket(&self) -> PathBuf {
         self.0.join("lyncast.sock")
     }
+
+    /// The file that [`Daemon::spawn`] gives each daemon to record to.
+    pub fn runs(&self) -> PathBuf {
+        self.0.join("runs")
+    }
 }
 
 impl Drop for Runtime {
@@ -315,7 +320,8 @@ pub fn ask(runtime: &Runtime, args: &[&str]) -> (String, String, Option<i32>) {
 pub struct Daemon(Child);
 
 impl Daemon {
-    /// Starts `command`, a `lyncast daemon`, in the background, with its stdout and stderr
+    /// Starts `command`, a `lyncast daemon`, in the background with `--record` and
+    /// [`Runtime::runs`], so no test daemon starts a real program. Its stdout and stderr are
     /// appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
     pub fn spawn(mut command: Command, runtime: &Runtime) -> Daemon {
         let log = |name: &str| {
@@ -326,6 +332,8 @@ impl Daemon {
                 .unwrap()
         };
         command
+            .arg("--record")
+            .arg(runtime.runs())
             .stdin(Stdio::null())
             .stdout(log("daemon.stdout"))
             .stderr(log("daemon.stderr"));
@@ -356,6 +364,15 @@ impl Daemon {
     /// How the daemon exited, or `None` while it runs.
     pub fn exited(&mut self) -> Option<ExitStatus> {
         self.0.try_wait().unwrap()
+    }
+
+    /// Waits, as [`poll`] does, for the daemon to exit by itself, and gives its exit code.
+    pub fn exit(mut self) -> Option<i32> {
+        poll(|| self.exited()).and_then(|status| status.code())
+    }
+
+    pub fn id(&self) -> u32 {
+        self.0.id()
     }
 }
 

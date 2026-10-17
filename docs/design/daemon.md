@@ -210,9 +210,9 @@ Exec=8x8
 
 A `session` block is a terminal transcript against one environment:
 
-- A line that starts with `$ ` is a command. Words split as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and a command may set variables before `lyncast`.
-- `$ lyncast daemon ...` with no expected lines after it starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
-- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+- A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files.
+- `$ lyncast daemon ...` with no expected lines after it starts the daemon in the background, with `--record $RUNTIME/runs` added and its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
+- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
 
 At the end of a block the test stops any daemon still running.
 
@@ -274,9 +274,210 @@ $ lyncast query 123456789012345+0.5 --json
 {"key":"calc:123456789012345+0.5","index":0,"kind":"calculator","section":"answer","title":"123,456,789,012,345.5","card":{"expression":"123,456,789,012,345 + 0.5","source_badge":"Sum","display":"123,456,789,012,345.5","copy":"123456789012345.5","target_badge":null},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
 ```
 
+### Commands that confirm ask first
+
+Without `--yes`, Reboot, Power Off, and Log Out ask and run nothing. With it, the recorder gets the argv.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:reboot
+stderr: lyncast: Reboot? Run again with --yes to confirm.
+exit: 1
+$ lyncast activate cmd:reboot --yes
+ran cmd:reboot
+record: ["systemctl","reboot"]
+$ lyncast activate cmd:power-off
+stderr: lyncast: Power Off? Run again with --yes to confirm.
+exit: 1
+$ lyncast activate cmd:log-out
+stderr: lyncast: Log Out? Run again with --yes to confirm.
+exit: 1
+$ lyncast activate cmd:log-out --yes
+ran cmd:log-out
+record: ["niri","msg","action","quit","--skip-confirmation"]
+```
+
+Commands that do not confirm run at once, and Ctrl+Enter runs the default too.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:suspend --chord ctrl-enter
+ran cmd:suspend
+record: ["systemctl","suspend"]
+```
+
+### Open Config creates the file once
+
+Open Config creates an empty `config.toml` and opens it. A second run keeps what the file holds.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:open-config
+ran cmd:open-config
+record: ["xdg-open","$TREE/config/lyncast/config.toml"]
+$ wc -c config/lyncast/config.toml
+0 config/lyncast/config.toml
+$ echo 'theme = "dark"' > config/lyncast/config.toml
+$ lyncast activate cmd:open-config
+ran cmd:open-config
+record: ["xdg-open","$TREE/config/lyncast/config.toml"]
+$ cat config/lyncast/config.toml
+theme = "dark"
+```
+
+Without `HOME`, and with a relative `XDG_CONFIG_HOME`, the daemon has no config home, so Open Config fails and runs nothing.
+
+```session
+$ env -u HOME XDG_CONFIG_HOME=config lyncast daemon --headless
+$ lyncast activate cmd:open-config
+stderr: lyncast: not run: XDG_CONFIG_HOME and HOME are not set
+exit: 1
+```
+
+### Reload Apps scans again
+
+A new desktop file shows only after Reload Apps. The scan uses the environment the daemon read at start, so the client's `XDG_DATA_DIRS` changes nothing. A session cannot hold one scan back to end it after a newer one, so a unit test in `crates/lyncast/src/daemon/mod.rs` ends two scans out of order itself, with the first `desktop` block above as the newer scan's one app.
+
+```session
+$ lyncast daemon --headless
+$ printf '[Desktop Entry]\nType=Application\nName=Nightly\nExec=firefox\n' > share/applications/nightly.desktop
+$ lyncast query nightly --json
+$ XDG_DATA_DIRS=$TREE/nowhere lyncast activate cmd:reload-apps
+ran cmd:reload-apps
+$ lyncast query nightly --json
+{"key":"app:nightly.desktop","index":0,"kind":"app","section":"results","title":"Nightly","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+```
+
+### Apps launch through the runner
+
+Enter launches the app's Exec, and a verb picks a Desktop Action. A verb the row does not offer fails. A session runs one command at a time, so `launches_at_once_record_whole_lines` in `crates/lyncast/tests/daemon.rs` starts two launches at once itself. Each has an argument of 18,000 bytes, more than a FIFO takes in one write, and the test checks that the recorder holds each argv on a line of its own. `--chord` and `--verb` read only the spellings that `query --json` prints, so `Enter`, `ctrl+enter`, the label `open`, `launch-action` and `launch-action:`, which name no action, and the empty text are usage errors.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate app:firefox.desktop
+launched app:firefox.desktop
+record: ["firefox"]
+$ lyncast activate app:firefox.desktop --verb launch-action:new-window
+launched app:firefox.desktop new-window
+record: ["firefox","--new-window"]
+$ lyncast activate app:firefox.desktop --verb pin
+stderr: lyncast: app:firefox.desktop has no action pin
+exit: 1
+$ lyncast activate app:nope.desktop
+stderr: lyncast: no app nope.desktop
+exit: 1
+$ lyncast activate app:firefox.desktop --chord Enter
+stderr: error: invalid value 'Enter' for '--chord <CHORD>': unknown chord
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --chord ctrl+enter
+stderr: error: invalid value 'ctrl+enter' for '--chord <CHORD>': unknown chord
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --chord ""
+stderr: error: invalid value '' for '--chord <CHORD>': unknown chord
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --verb open
+stderr: error: invalid value 'open' for '--verb <VERB>': unknown verb
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --verb launch-action
+stderr: error: invalid value 'launch-action' for '--verb <VERB>': unknown verb
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --verb launch-action:
+stderr: error: invalid value 'launch-action:' for '--verb <VERB>': unknown verb
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:firefox.desktop --verb ""
+stderr: error: invalid value '' for '--verb <VERB>': unknown verb
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+```
+
+### Copies fail until the clipboard exists
+
+A calculator key is evaluated again. A clip key names no clip until plan step 6.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate calc:2+3*4
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast activate calc:10/0
+stderr: lyncast: calc:10/0 has no answer
+exit: 1
+$ lyncast activate app:firefox.desktop --verb copy-path
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast activate clip:9
+stderr: lyncast: no clip 9
+exit: 1
+```
+
+### A successful activation closes the summon
+
+A failure leaves it open, and Clipboard History opens it.
+
+```session
+$ lyncast daemon --headless
+$ lyncast toggle
+open
+$ lyncast activate calc:2+3
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast status
+open
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast status
+closed
+$ lyncast activate cmd:clipboard-history
+ran cmd:clipboard-history
+$ lyncast status
+open
+```
+
+### A program that fails to start leaves the visits and the summon alone
+
+Here `$RUNTIME/runs` is a directory, so the recorder fails, as the real runner fails until plan step 8. The summon stays open, and Log Out gets no visit, so it still follows Lock Screen for `lo`, where a visit would put it first. Open Config creates `config.toml` before the runner opens it, so a failed Open Config still leaves the file.
+
+```session
+$ mkdir $RUNTIME/runs
+$ lyncast daemon --headless
+$ lyncast toggle
+open
+$ lyncast activate cmd:log-out --yes
+stderr: lyncast: not run: $RUNTIME/runs: Is a directory (os error 21)
+exit: 1
+$ lyncast status
+open
+$ lyncast query lo --json
+{"key":"cmd:lock-screen","index":0,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:log-out","index":1,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+$ lyncast activate cmd:open-config
+stderr: lyncast: not run: $RUNTIME/runs: Is a directory (os error 21)
+exit: 1
+$ wc -c < config/lyncast/config.toml
+0
+```
+
 ### One daemon owns the socket
 
-A second daemon finds the lock taken. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails.
+A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails.
 
 ```session
 $ lyncast toggle
@@ -288,6 +489,15 @@ exit: 1
 $ lyncast query fire --json
 stderr: lyncast: no daemon is listening on $RUNTIME/lyncast.sock
 exit: 1
+$ mkfifo $RUNTIME/lyncast.lock
+$ lyncast daemon --headless
+stderr: lyncast: $RUNTIME/lyncast.lock: No such device or address (os error 6)
+exit: 1
+$ rm $RUNTIME/lyncast.lock && ln -s /dev/null $RUNTIME/lyncast.lock
+$ lyncast daemon --headless
+stderr: lyncast: $RUNTIME/lyncast.lock: not a regular file
+exit: 1
+$ rm $RUNTIME/lyncast.lock
 $ lyncast daemon --headless
 $ lyncast daemon --headless
 stderr: lyncast: a daemon is already running
@@ -306,11 +516,33 @@ stderr: Usage: lyncast daemon --headless
 stderr: 
 stderr: For more information, try '--help'.
 exit: 2
+$ lyncast activate cmd:reboot --chord enter --verb run
+stderr: error: the argument '--chord <CHORD>' cannot be used with '--verb <VERB>'
+stderr: 
+stderr: Usage: lyncast activate --chord <CHORD> <KEY>
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate cmd:nope
+stderr: error: invalid value 'cmd:nope' for '<KEY>': unknown command
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate foo:bar
+stderr: error: invalid value 'foo:bar' for '<KEY>': unknown kind
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+$ lyncast activate app:
+stderr: error: invalid value 'app:' for '<KEY>': nothing after the colon
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
 ```
 
 ### The socket speaks one JSON line each way
 
-A `wire` block sends each `>` line, with a newline, to a daemon started as a session starts one, each on a connection of its own. It expects the `<` line after it as the reply.
+A `wire` block sends each `>` line, with a newline, to a daemon started as a session starts one, each on a connection of its own. It expects the `<` line after it as the reply, and `record:` lines after that, as in a session.
 
 ```wire
 > {"request":"status"}
@@ -319,14 +551,27 @@ A `wire` block sends each `>` line, with a newline, to a daemon started as a ses
 < {"reply":"summon","state":"open"}
 > {"request":"query","text":"fire"}
 < {"reply":"rows","rows":[{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}]}
+> {"request":"activate","key":"cmd:reboot","via":{"chord":"enter"},"confirmed":false,"query":""}
+< {"reply":"confirm","title":"Reboot"}
+> {"request":"activate","key":"cmd:reboot","via":{"verb":"run"},"confirmed":true,"query":"reb"}
+< {"reply":"done","message":"ran cmd:reboot"}
+record: ["systemctl","reboot"]
+> {"request":"activate","key":"clip:x","via":{"chord":"enter"},"confirmed":false,"query":""}
+< {"reply":"failed","reason":"bad request: bad clip id in clip:x"}
+> {"request":"activate","key":"cmd:reboot","via":{"chord":"Enter"},"confirmed":true,"query":""}
+< {"reply":"failed","reason":"bad request: unknown chord in Enter"}
+> {"request":"activate","key":"cmd:reboot","via":{"verb":"open"},"confirmed":true,"query":""}
+< {"reply":"failed","reason":"bad request: unknown verb in open"}
 > not json
 < {"reply":"failed","reason":"bad request: expected ident at line 1 column 2"}
 ```
 
-A `wire unterminated` block sends each `>` line twice, each time on a new connection. The first time it has no newline, and the test closes its half of the connection after it. The second time it is padded with spaces to 1 MiB, and `not json` and a newline follow. Both get the `<` reply. A toggle that ran would have replied with the summon state.
+A `wire unterminated` block sends each `>` line twice, each time on a new connection. The first time it has no newline, and the test closes its half of the connection after it. The second time it is padded with spaces to 1 MiB, and `not json` and a newline follow. Both get the `<` reply, and neither records anything. A toggle that ran would have replied with the summon state, and a Reboot that ran would have recorded its argv.
 
 ```wire unterminated
 > {"request":"toggle"}
+< {"reply":"failed","reason":"bad request: no newline in the first 1 MiB"}
+> {"request":"activate","key":"cmd:reboot","via":{"verb":"run"},"confirmed":true,"query":""}
 < {"reply":"failed","reason":"bad request: no newline in the first 1 MiB"}
 ```
 
@@ -335,4 +580,20 @@ A `wire full` block pads each `>` line with spaces to 1 MiB with its newline, th
 ```wire full
 > {"request":"status"}
 < {"reply":"summon","state":"closed"}
+```
+
+### Quit finishes the work in flight
+
+A `wire fifo` block makes `$RUNTIME/runs` a FIFO and fills it before the daemon starts, so a program the daemon starts waits in the runner until the test reads the FIFO. A number before `>` or `<` names a connection, and the test opens every one before the first line. After each `>` line the test waits until the request takes effect: a reply comes, the daemon holds the recorder open once more, or the socket is gone. At a `record:` line it checks that no connection still waiting for its `<` line has a reply, and then reads the line from the FIFO, which lets that program finish. After the last line it expects the daemon to exit 0 within 2.5 s of the last `record:` line. That is half of Quit's 5 s, so a Quit that waits out its 5 s fails the block.
+
+Lock Screen waits in the runner while Quit removes the socket. A request on a connection opened before Quit fails, and Quit replies only after Lock Screen's reply.
+
+```wire fifo
+1> {"request":"activate","key":"cmd:lock-screen","via":{"chord":"enter"},"confirmed":false,"query":""}
+2> {"request":"activate","key":"cmd:quit","via":{"chord":"enter"},"confirmed":false,"query":""}
+3> {"request":"status"}
+3< {"reply":"failed","reason":"the daemon is quitting"}
+record: ["loginctl","lock-session"]
+1< {"reply":"done","message":"ran cmd:lock-screen"}
+2< {"reply":"done","message":"ran cmd:quit"}
 ```
