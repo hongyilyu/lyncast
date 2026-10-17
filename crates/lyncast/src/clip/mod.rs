@@ -193,6 +193,7 @@ impl Entry {
     }
 }
 
+#[derive(Clone)]
 pub struct Row {
     pub id: ClipId,
     pub content: Content,

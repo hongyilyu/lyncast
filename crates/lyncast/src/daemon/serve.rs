@@ -25,12 +25,16 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, WriterKind, quitting};
+use super::{
+    Answer, Daemon, Done, Handled, Job, QUIT_WAIT, QUITTING, Success, Task, Work, WriterKind,
+    quitting,
+};
 use crate::apps;
 use crate::clip::{Capture, Clips, Copier, Payload, Seen};
 use crate::config;
 use crate::permit::Permits;
 use crate::vars::Vars;
+use crate::view;
 use crate::warning;
 use crate::wire::{self, Reply, Request};
 
@@ -77,7 +81,7 @@ enum Event {
 }
 
 enum Stop {
-    Quit(Reply, ReplyTo),
+    Quit(Answer, ReplyTo),
     Closed,
 }
 
@@ -281,9 +285,9 @@ fn serve(
         mem::forget(claim.lock);
     }
     let stopped = match stop {
-        Stop::Quit(reply, reply_to) => {
+        Stop::Quit(answer, reply_to) => {
             warning::flush(Instant::now() + WARNINGS_BEFORE_REPLY);
-            host.unwritten.send(reply_to, reply);
+            host.deliver(reply_to, answer);
             Ok(())
         }
         Stop::Closed => Err("the Wayland connection closed".to_owned()),
@@ -302,12 +306,13 @@ struct Host {
 }
 
 impl Host {
-    /// Hands one event to the daemon while it serves, and sends the reply it gives, or starts the
-    /// job it hands back. Gives back the reply to a Quit, which waits, or the compositor's end.
+    /// Hands one event to the daemon while it serves, and sends the answer it gives, or starts
+    /// the job it hands back. Gives back the answer to a Quit, which waits, or the compositor's
+    /// end.
     fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<Stop> {
         match event {
             Event::Request(request, reply_to) => match daemon.handle(request, now()) {
-                Handled::Quit(reply) => return Some(Stop::Quit(reply, reply_to)),
+                Handled::Quit(answer) => return Some(Stop::Quit(answer, reply_to)),
                 handled => self.answer(daemon, handled, reply_to),
             },
             Event::Seen(Seen::Closed) => {
@@ -331,21 +336,21 @@ impl Host {
             Event::Seen(Seen::Entry(entry)) => daemon.captured(entry, now()),
             Event::Seen(Seen::Ended | Seen::Closed) => daemon.capture_ended(),
             Event::Finished(success, done, reply_to) => {
-                self.unwritten
-                    .send(reply_to, daemon.finish(success, done, now()));
+                let answer = daemon.finish(success, done, now());
+                self.deliver(reply_to, answer);
             }
             Event::WriterEnded(writer) => daemon.writer_ended(writer),
             Event::Unsaved(id) => daemon.unsaved(id),
         }
     }
 
-    /// Sends the reply that a request came to, or starts its job. A Quit gets the reply of any
+    /// Sends the answer that a request came to, or starts its job. A Quit gets the answer of any
     /// request once the stop has begun, because [`Host::dispatch`] takes the Quit that begins it.
     fn answer(&mut self, daemon: &mut Daemon, handled: Handled, reply_to: ReplyTo) {
         match handled {
-            Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
+            Handled::Answer(answer) => self.deliver(reply_to, answer),
             Handled::Job(job) => self.start(daemon, job, reply_to),
-            Handled::Quit(_) => self.unwritten.send(reply_to, quitting()),
+            Handled::Quit(_) => self.deliver(reply_to, quitting()),
         }
     }
 
@@ -354,8 +359,12 @@ impl Host {
     /// quitting, even when its program started.
     fn refuse(&mut self, event: Event) {
         if let Event::Request(_, reply_to) | Event::Finished(_, _, reply_to) = event {
-            self.unwritten.send(reply_to, quitting());
+            self.deliver(reply_to, quitting());
         }
+    }
+
+    fn deliver(&mut self, reply_to: ReplyTo, answer: Answer) {
+        self.unwritten.send(reply_to, view::reply(answer));
     }
 
     /// Runs the job's task on a worker thread, or hands its copy to the copier, and its result
@@ -392,8 +401,8 @@ impl Host {
         );
         if let Err(((_, success, reply_to), error)) = started {
             let done = Err(format!("not run: {error}"));
-            let reply = daemon.finish(success, done, now());
-            self.unwritten.send(reply_to, reply);
+            let answer = daemon.finish(success, done, now());
+            self.deliver(reply_to, answer);
         }
     }
 }
@@ -477,7 +486,9 @@ fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
             let asked = events.send(Event::Request(request, reply_to)).ok();
             asked
                 .and_then(|()| reply_rx.recv().ok())
-                .unwrap_or_else(quitting)
+                .unwrap_or_else(|| Reply::Failed {
+                    reason: QUITTING.to_owned(),
+                })
         }
         Err(reason) => Reply::Failed { reason },
     };

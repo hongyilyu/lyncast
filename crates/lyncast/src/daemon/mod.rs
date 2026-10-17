@@ -14,23 +14,21 @@ use std::time::Duration;
 
 use lyncast_core::clip::{Delivery, Handed};
 use lyncast_core::rank::{Index, Timestamp, Visits};
-use lyncast_core::{ActionItem, ClipId, Command, Key, Subject, root};
+use lyncast_core::{ActionItem, ClipId, Command, Key, Row, Subject, root};
 
 use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
 use crate::vars::Vars;
-use crate::view::{self, Spelled};
-use crate::wire::{Reply, Request, Summon, Via};
+use crate::view::Spelled;
+use crate::wire::{Request, Summon, Via};
 use store::Store;
 
 /// The reason every request gets once Quit has begun.
 const QUITTING: &str = "the daemon is quitting";
 
-/// The reply to anything that arrives once Quit has begun.
-pub fn quitting() -> Reply {
-    Reply::Failed {
-        reason: QUITTING.to_owned(),
-    }
+/// The answer to anything that arrives once Quit has begun.
+pub fn quitting() -> Answer {
+    Answer::Failed(QUITTING.to_owned())
 }
 
 /// How long a host waits after Quit for the daemon to stop.
@@ -66,11 +64,29 @@ enum CaptureThread {
 
 /// What one request comes to.
 pub enum Handled {
-    Reply(Reply),
+    Answer(Answer),
     /// Work that waits, for the host. Its result goes to [`Daemon::finish`].
     Job(Job),
-    /// Quit has begun. The reply goes out once the daemon has [stopped](Daemon::stopped).
-    Quit(Reply),
+    /// Quit has begun. The answer goes out once the daemon has [stopped](Daemon::stopped).
+    Quit(Answer),
+}
+
+/// The daemon's answer to a request, in the daemon's own types. Only `view::reply` spells one
+/// as a wire reply.
+pub enum Answer {
+    /// The summon state, for Toggle and Status.
+    Summon(Summon),
+    /// The root list for a query, in `Section` order. The calculator card's row carries its
+    /// `calc::Answer`.
+    Rows(Vec<Row>),
+    /// The clipboard history in screen order.
+    Clips(Vec<clip::Row>),
+    /// The success line, such as `ran cmd:reboot`.
+    Done { message: String },
+    /// The command asks first. Nothing ran.
+    Confirm(Command),
+    /// The reason, without the `lyncast: ` prefix.
+    Failed(String),
 }
 
 /// An activation's work that waits, and what the activation does once the work succeeds.
@@ -155,23 +171,21 @@ impl Daemon {
     /// every request fails with [`QUITTING`].
     pub fn handle(&mut self, request: Request, now: Timestamp) -> Handled {
         if self.quitting {
-            return Handled::Reply(quitting());
+            return Handled::Answer(quitting());
         }
-        let reply = match request {
+        let answer = match request {
             Request::Toggle => {
                 self.summon = match self.summon {
                     Summon::Closed => Summon::Open,
                     Summon::Open => Summon::Closed,
                 };
-                Reply::Summon { state: self.summon }
+                Answer::Summon(self.summon)
             }
-            Request::Status => Reply::Summon { state: self.summon },
-            Request::Query { text } => Reply::Rows {
-                rows: view::rows(&root::rows(&self.index, &self.visits, &text, now)),
-            },
-            Request::Clips => Reply::Clips {
-                clips: view::clips(&self.clips.rows()),
-            },
+            Request::Status => Answer::Summon(self.summon),
+            Request::Query { text } => {
+                Answer::Rows(root::rows(&self.index, &self.visits, &text, now))
+            }
+            Request::Clips => Answer::Clips(self.clips.rows().into_iter().cloned().collect()),
             Request::Activate {
                 key,
                 via,
@@ -185,19 +199,19 @@ impl Daemon {
                 return handled;
             }
         };
-        Handled::Reply(reply)
+        Handled::Answer(answer)
     }
 
-    /// The reply to a job's result. A failure records nothing and leaves the summon as it was.
+    /// The answer to a job's result. A failure records nothing and leaves the summon as it was.
     /// A scan older than the one the index came from changes nothing.
     pub fn finish(
         &mut self,
         success: Success,
         done: Result<Done, String>,
         now: Timestamp,
-    ) -> Reply {
+    ) -> Answer {
         self.jobs -= 1;
-        let reply = match done {
+        let answer = match done {
             Ok(done) => {
                 if let Done::Scanned { number, index } = done
                     && number > self.indexed
@@ -207,10 +221,10 @@ impl Daemon {
                 }
                 self.succeed(success, Summon::Closed, now)
             }
-            Err(reason) => Reply::Failed { reason },
+            Err(reason) => Answer::Failed(reason),
         };
         self.settle();
-        reply
+        answer
     }
 
     /// Records what the clipboard offered. The capture thread keeps running while Quit waits
@@ -283,7 +297,7 @@ impl Daemon {
         query: String,
         now: Timestamp,
     ) -> Handled {
-        let failed = |reason: String| Handled::Reply(Reply::Failed { reason });
+        let failed = |reason: String| Handled::Answer(Answer::Failed(reason));
         let actions = match self.rebuild(&key) {
             Ok(subject) => subject.actions(),
             Err(reason) => return failed(reason),
@@ -299,8 +313,7 @@ impl Daemon {
             && command.confirms()
             && !confirmed
         {
-            let title = command.title().to_owned();
-            return Handled::Reply(Reply::Confirm { title });
+            return Handled::Answer(Answer::Confirm(*command));
         }
         let success = |message: String| Success {
             record: Record::Visit {
@@ -355,13 +368,13 @@ impl Daemon {
         let spawn = |argv: &[&str]| Task::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
         let task = match command {
             Command::ClipboardHistory => {
-                return Handled::Reply(self.succeed(success, Summon::Open, now));
+                return Handled::Answer(self.succeed(success, Summon::Open, now));
             }
             // Quit records no visit, so it never leads Suggestions.
             Command::Quit => {
                 self.quitting = true;
                 self.settle();
-                return Handled::Quit(Reply::Done {
+                return Handled::Quit(Answer::Done {
                     message: success.message,
                 });
             }
@@ -369,7 +382,7 @@ impl Daemon {
                 Some(dir) => Task::OpenConfig(config::path(Path::new(&dir))),
                 None => {
                     let reason = "not run: XDG_CONFIG_HOME and HOME are not set".to_owned();
-                    return Handled::Reply(Reply::Failed { reason });
+                    return Handled::Answer(Answer::Failed(reason));
                 }
             },
             Command::ReloadApps => {
@@ -414,7 +427,7 @@ impl Daemon {
     }
 
     fn copy(&self, delivery: Delivery) -> Handled {
-        let failed = |reason: String| Handled::Reply(Reply::Failed { reason });
+        let failed = |reason: String| Handled::Answer(Answer::Failed(reason));
         if !matches!(self.capture, CaptureThread::Running(_)) {
             return failed(clip::not_copied("no Wayland compositor"));
         }
@@ -436,18 +449,18 @@ impl Daemon {
     }
 
     fn changed(&mut self, changed: Result<(), String>, message: String) -> Handled {
-        Handled::Reply(match changed {
+        Handled::Answer(match changed {
             Ok(()) => {
                 self.summon = Summon::Closed;
-                Reply::Done { message }
+                Answer::Done { message }
             }
-            Err(reason) => Reply::Failed { reason },
+            Err(reason) => Answer::Failed(reason),
         })
     }
 
     /// Records the visit and hands the visits to the writer, or records the write a copy made,
     /// then sets the summon and gives the success line.
-    fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Reply {
+    fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Answer {
         match success.record {
             Record::Visit { key, query } => {
                 self.visits.record(key, &query, now);
@@ -458,7 +471,7 @@ impl Daemon {
             Record::Write(delivery) => self.clips.wrote(&delivery, now),
         }
         self.summon = summon;
-        Reply::Done {
+        Answer::Done {
             message: success.message,
         }
     }
@@ -473,7 +486,7 @@ mod tests {
     use lyncast_core::{AppId, Chord};
 
     use super::*;
-    use crate::doc;
+    use crate::{doc, view};
 
     /// Reload Apps, and the number and the success of the scan it hands out.
     fn reload(daemon: &mut Daemon) -> (u64, Success) {
@@ -498,7 +511,7 @@ mod tests {
             text: text.to_owned(),
         };
         match daemon.handle(request, Timestamp(0)) {
-            Handled::Reply(reply) => serde_json::to_string(&reply).unwrap(),
+            Handled::Answer(answer) => serde_json::to_string(&view::reply(answer)).unwrap(),
             _ => panic!("a query is answered at once"),
         }
     }
