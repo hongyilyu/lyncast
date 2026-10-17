@@ -26,7 +26,8 @@ use crate::wire::{self, Reply, Request};
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
 const LOCK: &str = "lyncast.lock";
 
-/// How long a connection may take to send its request or to read its reply.
+/// How long each read of a request and each write of a reply may wait, so a client that sends
+/// or reads slowly is still served.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long Quit waits for the replies to be written before the process exits.
