@@ -16,6 +16,7 @@ use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -359,8 +360,8 @@ fn every_session_and_wire_block_runs_as_the_doc_says() {
     let (sessions, wires) = (of("session"), of("wire"));
     assert_eq!(
         (sessions.len(), wires.len()),
-        (22, 5),
-        "daemon.md holds 22 session blocks and 5 wire blocks, so a lost block fails"
+        (23, 5),
+        "daemon.md holds 23 session blocks and 5 wire blocks, so a lost block fails"
     );
     // A failed block keeps its tree, which a doc edit can leave under a line that no block has
     // any more, so the trees of the last run go first.
@@ -556,6 +557,22 @@ fn quit_stops_taking_results_at_its_deadline() {
     assert!(refused > 0, "a result still queued after the 5 s fails");
     assert_eq!(daemon.exit(), Some(0));
     world.passed();
+}
+
+/// A thread takes its name only once it runs, so `named_thread` waits for the name.
+#[test]
+fn a_thread_is_found_by_a_name_that_it_takes_late() {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let late = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        // SAFETY: PR_SET_NAME reads the NUL-terminated name, which lives through the call.
+        unsafe { libc::prctl(libc::PR_SET_NAME, c"late".as_ptr()) };
+        let _ = stopped.recv();
+    });
+    let found = common::named_thread(std::process::id(), "late");
+    drop(stop);
+    late.join().unwrap();
+    assert!(found.is_ok(), "{found:?}");
 }
 
 /// How many daemons start while ranking.json is swapped. A daemon whose open waited on a FIFO

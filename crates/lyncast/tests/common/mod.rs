@@ -12,8 +12,10 @@ use std::io::{self, ErrorKind};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -169,12 +171,23 @@ impl CommandLine {
             .env_clear()
             .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null());
+        umask(&mut command);
         // env(1) unsets before it sets, so `env -u PATH PATH=` runs with an empty `PATH`.
         for name in &self.unset {
             command.env_remove(name);
         }
         command.envs(self.vars.iter().map(|(name, value)| (name, value)));
         command
+    }
+}
+
+fn umask(command: &mut Command) {
+    // SAFETY: umask is async-signal-safe, and the closure touches nothing else.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o022);
+            Ok(())
+        });
     }
 }
 
@@ -312,6 +325,7 @@ pub fn lyncast<S: AsRef<OsStr>>(runtime: &Runtime, args: impl IntoIterator<Item 
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(Stdio::null());
+    umask(&mut command);
     command
 }
 
@@ -343,6 +357,7 @@ impl Daemon {
                 .unwrap()
         };
         runtime.record(&mut command);
+        umask(&mut command);
         command
             .stdin(Stdio::null())
             .stdout(log("daemon.stdout"))
@@ -393,6 +408,103 @@ impl Drop for Daemon {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// Only the thread that seized a thread may let it go, so a thread of the test holds it: it lets
+/// it go when told, or reaps it once it has died with the daemon, since a daemon whose held thread
+/// is not reaped cannot be waited for.
+pub struct Frozen {
+    thaw: Option<Sender<Duration>>,
+    holder: Option<thread::JoinHandle<()>>,
+}
+
+impl Frozen {
+    pub fn new(pid: u32, name: &str) -> Result<Frozen, String> {
+        let tid = named_thread(pid, name)?;
+        let (held, holding) = mpsc::channel();
+        let (thaw, thawed) = mpsc::channel();
+        let holder = thread::spawn(move || hold(tid, &held, &thawed));
+        holding
+            .recv()
+            .unwrap_or_else(|_| Err("the holder ended".to_owned()))?;
+        Ok(Frozen {
+            thaw: Some(thaw),
+            holder: Some(holder),
+        })
+    }
+
+    pub fn thaw(&self, after: Duration) {
+        if let Some(thaw) = &self.thaw {
+            let _ = thaw.send(after);
+        }
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        drop(self.thaw.take());
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
+}
+
+/// The thread of process `pid` that is named `name`.
+/// A thread takes its name only once it runs, after the call that started it has returned, so the
+/// lookup waits for the name as [`poll`] does.
+pub fn named_thread(pid: u32, name: &str) -> Result<libc::pid_t, String> {
+    let tasks = format!("/proc/{pid}/task");
+    poll(|| match fs::read_dir(&tasks) {
+        Err(error) => Some(Err(format!("{tasks}: {error}"))),
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let comm = fs::read_to_string(entry.path().join("comm")).ok()?;
+                (comm.trim_end() == name).then(|| entry.file_name().to_str()?.parse().ok())?
+            })
+            .next()
+            .map(Ok),
+    })
+    .unwrap_or_else(|| Err(format!("no thread of process {pid} is named {name}")))
+}
+
+fn hold(tid: libc::pid_t, held: &Sender<Result<(), String>>, thawed: &Receiver<Duration>) {
+    // SAFETY: each ptrace and waitpid call takes the thread ID and plain values, and waitpid
+    // writes only `status`, which lives through the call.
+    let stopped = unsafe {
+        let mut status = 0;
+        libc::ptrace(libc::PTRACE_SEIZE, tid, 0, 0) == 0
+            && libc::ptrace(libc::PTRACE_INTERRUPT, tid, 0, 0) == 0
+            && libc::waitpid(tid, &mut status, libc::__WALL) == tid
+    };
+    if !stopped {
+        let _ = held.send(Err(format!(
+            "ptrace of thread {tid}: {}",
+            io::Error::last_os_error()
+        )));
+        return;
+    }
+    let _ = held.send(Ok(()));
+    let mut until = None;
+    loop {
+        let mut status = 0;
+        // SAFETY: as above.
+        if unsafe { libc::waitpid(tid, &mut status, libc::WNOHANG | libc::__WALL) } == tid
+            && (libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
+        {
+            return;
+        }
+        if until.is_some_and(|until| Instant::now() >= until) {
+            break;
+        }
+        match thawed.recv_timeout(Duration::from_millis(10)) {
+            Ok(after) => until = Some(Instant::now() + after),
+            Err(RecvTimeoutError::Disconnected) => until = until.or(Some(Instant::now())),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    // SAFETY: as above.
+    unsafe { libc::ptrace(libc::PTRACE_DETACH, tid, 0, 0) };
 }
 
 /// One block's tree, runtime directory, and environment.
@@ -454,6 +566,7 @@ impl World {
                 .env("TREE", &self.tree)
                 .env("RUNTIME", self.runtime.path())
                 .current_dir(&self.tree);
+            umask(&mut command);
             return (command, None);
         };
         let mut command = lyncast.command(&lyncast.args, &self.env);
@@ -495,11 +608,47 @@ impl Printed {
     }
 }
 
+fn hold_line(line: &str, newest: Option<&Daemon>, frozen: &mut Vec<Frozen>) -> Option<Ran> {
+    let failed = |why: String| (Vec::new(), format!("{why}\n").into_bytes(), Some(1));
+    let done = (Vec::new(), Vec::new(), Some(0));
+    let words: Vec<&str> = line.strip_prefix("$ ")?.split(' ').collect();
+    Some(match words.as_slice() {
+        ["freeze-thread", name] => match newest.map(|daemon| Frozen::new(daemon.id(), name)) {
+            Some(Ok(held)) => {
+                frozen.push(held);
+                done
+            }
+            Some(Err(why)) => failed(why),
+            None => failed("no daemon to freeze".to_owned()),
+        },
+        ["thaw-thread", after @ ..] => {
+            let after = match after {
+                [] => Duration::ZERO,
+                [seconds] => seconds
+                    .strip_suffix('s')
+                    .and_then(|seconds| seconds.parse().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| panic!("not thaw-thread <n>s: {line}")),
+                _ => panic!("not thaw-thread [<n>s]: {line}"),
+            };
+            match frozen.last() {
+                Some(held) => {
+                    held.thaw(after);
+                    done
+                }
+                None => failed("no thread is frozen".to_owned()),
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Runs one session block and gives what failed.
 pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
     let mut failures = Vec::new();
     // Kept to the end of the block, which kills any still running.
     let mut daemons: Vec<Daemon> = Vec::new();
+    let mut frozen: Vec<Frozen> = Vec::new();
     let mut rest = block.lines.as_slice();
     while let [command, after @ ..] = rest {
         let number = block.line + 1 + block.lines.len() - rest.len();
@@ -512,29 +661,36 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
             .map(|line| world.substitute(line))
             .collect();
         rest = &after[printed..];
-        let (mut run, args) = world.command(command);
-        if args.is_none()
-            && let Some(newest) = daemons.last()
-        {
-            run.env("DAEMON", newest.id().to_string());
-        }
-        let daemon = args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
-        if daemon && want.is_empty() {
-            // Daemon::start adds --record itself.
-            match Daemon::start(run, &world.runtime) {
-                Ok(daemon) => daemons.push(daemon),
-                Err(error) => {
-                    failures.push(format!("line {number}: {command}\n  {error}"));
-                    break;
-                }
-            }
-            continue;
-        }
-        if daemon {
-            world.runtime.record(&mut run);
-        }
         let before = world.recorded().len();
-        let Some((stdout, stderr, code)) = run_bounded(run, &world.out) else {
+        let ran = match hold_line(command, daemons.last(), &mut frozen) {
+            Some(ran) => Some(ran),
+            None => {
+                let (mut run, args) = world.command(command);
+                if args.is_none()
+                    && let Some(newest) = daemons.last()
+                {
+                    run.env("DAEMON", newest.id().to_string());
+                }
+                let daemon =
+                    args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
+                if daemon && want.is_empty() {
+                    // Daemon::start adds --record itself.
+                    match Daemon::start(run, &world.runtime) {
+                        Ok(daemon) => daemons.push(daemon),
+                        Err(error) => {
+                            failures.push(format!("line {number}: {command}\n  {error}"));
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if daemon {
+                    world.runtime.record(&mut run);
+                }
+                run_bounded(run, &world.out)
+            }
+        };
+        let Some((stdout, stderr, code)) = ran else {
             failures.push(format!(
                 "line {number}: {command}\n  ran over the test's time budget"
             ));

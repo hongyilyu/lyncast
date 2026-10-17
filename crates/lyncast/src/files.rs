@@ -1,10 +1,11 @@
-//! Reads a file only when it is a regular file of at most a given size, after symlinks. The
-//! scan reads desktop entries this way, and the daemon reads `ranking.json`.
+//! Reads a file only when it is a regular file of at most a given size, after symlinks, and writes
+//! files and directories that only their owner can read.
 
 use std::fs::{self, File, Metadata};
-use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{self, ErrorKind, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
+use std::process;
 
 /// Why [`read_regular`] read nothing.
 pub enum Unread {
@@ -48,4 +49,55 @@ fn check(metadata: &Metadata, max: u64) -> Result<(), Unread> {
         return Err(Unread::TooLarge);
     }
     Ok(())
+}
+
+/// Creates `dir` and each parent it lacks with mode 0700, as the XDG Base Directory spec asks for
+/// a data home. A directory that is already there keeps its mode.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+/// Writes `bytes` to `path` through a temporary file beside it, `<file name>.<pid>.tmp`, which it
+/// syncs and renames over `path`, so a crash leaves the old file or the new one. Two daemons with
+/// their own runtime directories hold their own locks and can share a data home, so the name
+/// carries the process ID, and neither writes into the other's file. A write that fails removes
+/// the temporary file it created, because no later daemon has its name. The file gets mode 0600
+/// and a missing directory mode 0700, through [`create_private_dir`].
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path.parent().expect("a data file is in a directory");
+    create_private_dir(dir)?;
+    let mut name = path.file_name().expect("a data file has a name").to_owned();
+    name.push(format!(".{}.tmp", process::id()));
+    let temporary = dir.join(name);
+    let mut file = create_temporary(&temporary)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+fn create_temporary(path: &Path) -> io::Result<File> {
+    let create = || {
+        File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    let replace_leftover_of_this_pid = || {
+        fs::remove_file(path)?;
+        create()
+    };
+    match create() {
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => replace_leftover_of_this_pid(),
+        created => created,
+    }
 }
