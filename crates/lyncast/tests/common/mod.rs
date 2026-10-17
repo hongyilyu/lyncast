@@ -5,16 +5,22 @@
 
 #[path = "../../../lyncast-core/tests/doc/mod.rs"]
 pub mod doc;
+mod pipe;
+
+pub use pipe::fill;
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::mem;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::ptr;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -303,6 +309,14 @@ impl Runtime {
         self.0.join("runs")
     }
 
+    fn log(&self, name: &str) -> fs::File {
+        fs::File::options()
+            .create(true)
+            .append(true)
+            .open(self.path().join(name))
+            .unwrap()
+    }
+
     /// Adds `--record` and [`Runtime::runs`], so no test daemon starts a real program.
     pub fn record(&self, daemon: &mut Command) {
         if !daemon.get_args().any(|arg| arg == "--record") {
@@ -343,40 +357,66 @@ pub fn ask(runtime: &Runtime, args: &[&str]) -> (String, String, Option<i32>) {
 
 /// A daemon that a test started in the background. Dropping it kills it, so a test that fails
 /// leaves no daemon running.
-pub struct Daemon(Child);
+pub struct Daemon {
+    child: Child,
+    stderr: fs::File,
+    filler: usize,
+}
 
 impl Daemon {
     /// Starts `command`, a `lyncast daemon`, in the background with [`Runtime::record`]. Its
     /// stdout and stderr are appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
-    pub fn spawn(mut command: Command, runtime: &Runtime) -> Daemon {
-        let log = |name: &str| {
-            fs::File::options()
-                .create(true)
-                .append(true)
-                .open(runtime.path().join(name))
-                .unwrap()
-        };
+    pub fn spawn(command: Command, runtime: &Runtime) -> Daemon {
+        let stderr = runtime.log("daemon.stderr");
+        let mut from_here = fs::File::open(runtime.path().join("daemon.stderr")).unwrap();
+        from_here.seek(SeekFrom::End(0)).unwrap();
+        Daemon::spawn_with(command, runtime, Stdio::from(stderr), from_here, 0)
+    }
+
+    pub fn spawn_stalled(command: Command, runtime: &Runtime) -> Daemon {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let filler = fill(&mut writer, b'x');
+        let reader = fs::File::from(OwnedFd::from(reader));
+        Daemon::spawn_with(command, runtime, Stdio::from(writer), reader, filler)
+    }
+
+    /// `command` goes once the daemon runs, and with it the test's end of a stderr pipe, so the
+    /// pipe ends when the daemon exits.
+    fn spawn_with(
+        mut command: Command,
+        runtime: &Runtime,
+        stderr: Stdio,
+        from_here: fs::File,
+        filler: usize,
+    ) -> Daemon {
         runtime.record(&mut command);
         umask(&mut command);
         command
             .stdin(Stdio::null())
-            .stdout(log("daemon.stdout"))
-            .stderr(log("daemon.stderr"));
-        Daemon(command.spawn().expect("lyncast runs"))
+            .stdout(runtime.log("daemon.stdout"))
+            .stderr(stderr);
+        Daemon {
+            child: command.spawn().expect("lyncast runs"),
+            stderr: from_here,
+            filler,
+        }
     }
 
     /// Spawns `command` and waits, as [`poll`] does, until the socket accepts. Fails when the
     /// daemon exits first, or when the wait runs out.
     pub fn start(command: Command, runtime: &Runtime) -> Result<Daemon, String> {
-        let mut daemon = Daemon::spawn(command, runtime);
+        Daemon::spawn(command, runtime).serving(runtime)
+    }
+
+    pub fn serving(mut self, runtime: &Runtime) -> Result<Daemon, String> {
         let accepted = poll(|| {
             if UnixStream::connect(runtime.socket()).is_ok() {
                 return Some(Ok(()));
             }
-            daemon.exited().map(Err)
+            self.exited().map(Err)
         });
         match accepted {
-            Some(Ok(())) => Ok(daemon),
+            Some(Ok(())) => Ok(self),
             Some(Err(status)) => {
                 let stderr = runtime.path().join("daemon.stderr");
                 let printed = fs::read_to_string(stderr).unwrap_or_default();
@@ -390,7 +430,7 @@ impl Daemon {
 
     /// How the daemon exited, or `None` while it runs.
     pub fn exited(&mut self) -> Option<ExitStatus> {
-        self.0.try_wait().unwrap()
+        self.child.try_wait().unwrap()
     }
 
     /// Waits, as [`poll`] does, for the daemon to exit by itself, and gives its exit code.
@@ -398,16 +438,72 @@ impl Daemon {
         poll(|| self.exited()).and_then(|status| status.code())
     }
 
+    pub fn drain(&mut self) -> io::Result<()> {
+        let mut filler = vec![0; self.filler];
+        self.stderr.read_exact(&mut filler)?;
+        self.filler = 0;
+        Ok(())
+    }
+
+    /// Waits, as [`poll`] does, for the daemon to exit by itself, and gives what it wrote to
+    /// stderr and its exit code. A stderr that did not drain gives what the daemon wrote after
+    /// what filled it. `None` when it runs over.
+    pub fn finish(&mut self) -> Option<(Vec<u8>, Option<i32>)> {
+        let status = poll(|| self.exited())?;
+        self.drain().unwrap();
+        let mut stderr = Vec::new();
+        self.stderr.read_to_end(&mut stderr).unwrap();
+        Some((stderr, status.code()))
+    }
+
     pub fn id(&self) -> u32 {
-        self.0.id()
+        self.child.id()
     }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
+}
+
+/// Gives the process that `command` starts an `RLIMIT_NPROC` of 0, so it can start no thread and
+/// no process, unless the kernel exempts its user, as it exempts root. The kernel checks the limit
+/// at each thread or process that a process starts, and not at its exec. The process starts with
+/// SIGALRM blocked too, as a launcher that takes its signals through a signalfd leaves it, and std
+/// clears the signal mask before it runs the closure.
+pub fn no_threads(command: &mut Command) -> &mut Command {
+    // SAFETY: setrlimit, sigemptyset, sigaddset, and sigprocmask are async-signal-safe, and the
+    // closure touches only its own locals.
+    unsafe {
+        command.pre_exec(|| {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let mut alarm: libc::sigset_t = mem::zeroed();
+            libc::sigemptyset(&mut alarm);
+            libc::sigaddset(&mut alarm, libc::SIGALRM);
+            if libc::setrlimit(libc::RLIMIT_NPROC, &none) != 0
+                || libc::sigprocmask(libc::SIG_BLOCK, &alarm, ptr::null_mut()) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Whether a process under [`no_threads`] can still start one. `timeout` starts its command in a
+/// process of its own, and it fails at once when it cannot.
+pub fn limit_exempt() -> bool {
+    let mut timeout = Command::new("timeout");
+    timeout
+        .args(["10", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_threads(&mut timeout).status().unwrap().success()
 }
 
 /// Only the thread that seized a thread may let it go, so a thread of the test holds it: it lets
@@ -648,6 +744,8 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
     let mut failures = Vec::new();
     // Kept to the end of the block, which kills any still running.
     let mut daemons: Vec<Daemon> = Vec::new();
+    let mut stall = false;
+    let mut threadless = false;
     let mut frozen: Vec<Frozen> = Vec::new();
     let mut rest = block.lines.as_slice();
     while let [command, after @ ..] = rest {
@@ -662,33 +760,79 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
             .collect();
         rest = &after[printed..];
         let before = world.recorded().len();
-        let ran = match hold_line(command, daemons.last(), &mut frozen) {
-            Some(ran) => Some(ran),
-            None => {
-                let (mut run, args) = world.command(command);
-                if args.is_none()
-                    && let Some(newest) = daemons.last()
-                {
-                    run.env("DAEMON", newest.id().to_string());
-                }
-                let daemon =
-                    args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
-                if daemon && want.is_empty() {
-                    // Daemon::start adds --record itself.
-                    match Daemon::start(run, &world.runtime) {
-                        Ok(daemon) => daemons.push(daemon),
-                        Err(error) => {
-                            failures.push(format!("line {number}: {command}\n  {error}"));
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                if daemon {
-                    world.runtime.record(&mut run);
-                }
-                run_bounded(run, &world.out)
+        let ran = match command.as_str() {
+            "$ stall-stderr" => {
+                stall = true;
+                Some((Vec::new(), Vec::new(), Some(0)))
             }
+            "$ no-threads" => {
+                if limit_exempt() {
+                    // libtest hides what eprintln! prints in a test that passes, and the skip has
+                    // to show.
+                    let _ = writeln!(
+                        io::stderr(),
+                        "line {number}: the rest of the block skipped: RLIMIT_NPROC does not limit this user"
+                    );
+                    break;
+                }
+                threadless = true;
+                Some((Vec::new(), Vec::new(), Some(0)))
+            }
+            "$ drain-stderr" => Some(match daemons.last_mut().map(Daemon::drain) {
+                Some(Ok(())) => (Vec::new(), Vec::new(), Some(0)),
+                Some(Err(error)) => (Vec::new(), format!("{error}\n").into_bytes(), Some(1)),
+                None => (Vec::new(), b"no daemon to drain\n".to_vec(), Some(1)),
+            }),
+            "$ wait-exit" => {
+                let daemon = daemons.last_mut().expect("wait-exit follows a daemon");
+                daemon
+                    .finish()
+                    .map(|(stderr, code)| (Vec::new(), stderr, code))
+            }
+            _ => match hold_line(command, daemons.last(), &mut frozen) {
+                Some(ran) => Some(ran),
+                None => {
+                    let (mut run, args) = world.command(command);
+                    if args.is_none()
+                        && let Some(newest) = daemons.last()
+                    {
+                        run.env("DAEMON", newest.id().to_string());
+                    }
+                    let daemon =
+                        args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
+                    if daemon && threadless {
+                        threadless = false;
+                        no_threads(&mut run);
+                    }
+                    if daemon && want.is_empty() {
+                        let started = if stall {
+                            Daemon::spawn_stalled(run, &world.runtime)
+                        } else {
+                            Daemon::spawn(run, &world.runtime)
+                        };
+                        stall = false;
+                        match started.serving(&world.runtime) {
+                            Ok(daemon) => daemons.push(daemon),
+                            Err(error) => {
+                                failures.push(format!("line {number}: {command}\n  {error}"));
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    if daemon && stall {
+                        stall = false;
+                        Daemon::spawn_stalled(run, &world.runtime)
+                            .finish()
+                            .map(|(stderr, code)| (Vec::new(), stderr, code))
+                    } else {
+                        if daemon {
+                            world.runtime.record(&mut run);
+                        }
+                        run_bounded(run, &world.out)
+                    }
+                }
+            },
         };
         let Some((stdout, stderr, code)) = ran else {
             failures.push(format!(

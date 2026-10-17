@@ -11,6 +11,7 @@ use std::mem;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,6 +23,7 @@ use super::store::Store;
 use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
 use crate::apps;
 use crate::vars::Vars;
+use crate::warning;
 use crate::wire::{self, Reply, Request};
 
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
@@ -31,8 +33,22 @@ const LOCK: &str = "lyncast.lock";
 /// or reads slowly is still served.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long Quit waits for the replies to be written before the process exits.
-const QUIT_WRITE: Duration = Duration::from_secs(1);
+/// The start's wait for its warnings to reach stderr before it binds the socket, so a client that
+/// the socket answers finds them there.
+const WARNINGS_BEFORE_BIND: Duration = Duration::from_secs(1);
+
+/// Quit's wait for its warnings to reach stderr before it replies.
+const WARNINGS_BEFORE_REPLY: Duration = Duration::from_secs(1);
+
+/// Quit's wait for the replies to be written, after its own goes out, before the process exits,
+/// which would cut them off.
+const REPLIES_BEFORE_EXIT: Duration = Duration::from_secs(1);
+
+/// The wait of a daemon that stops on an error for its warnings and its last line before it exits.
+const LAST_LINE_BEFORE_EXIT: Duration = Duration::from_secs(1);
+
+/// The wait of the one write of a daemon whose warnings thread did not start.
+const ALONE_WRITE_WAIT: Duration = Duration::from_secs(1);
 
 /// The most bytes a request line may hold, with its newline.
 const MAX_REQUEST: u64 = 1 << 20;
@@ -76,10 +92,27 @@ impl Unwritten {
     }
 }
 
+/// Runs the daemon until a Quit command, or until it stops on an error, and gives its exit code.
+/// `record` swaps the runner for a recorder that writes to that file.
+pub fn run(record: Option<PathBuf>) -> ExitCode {
+    if let Err(error) = warning::start() {
+        warning::write_alone(format_args!("{}", not_started(error)), ALONE_WRITE_WAIT);
+        return ExitCode::FAILURE;
+    }
+    match start(record) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            warning::last(format_args!("{reason}"));
+            warning::flush(Instant::now() + LAST_LINE_BEFORE_EXIT);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Claims the socket and serves until a Quit command. The lock comes first, so a second daemon
 /// fails before it scans or reads `ranking.json`, and only the lock holder removes a stale
-/// socket and binds. `record` swaps the runner for a recorder that writes to that file.
-pub fn run(record: Option<PathBuf>) -> Result<(), String> {
+/// socket and binds.
+fn start(record: Option<PathBuf>) -> Result<(), String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
     let vars = Vars::read();
@@ -95,6 +128,7 @@ pub fn run(record: Option<PathBuf>) -> Result<(), String> {
     };
     let daemon = Daemon::new(vars, index, visits, store);
     let socket = runtime.join(wire::SOCKET);
+    warning::flush(Instant::now() + WARNINGS_BEFORE_BIND);
     let listener = bind(&socket)?;
     let host = Host {
         events,
@@ -197,8 +231,9 @@ fn serve(
     } else {
         mem::forget(claim.lock);
     }
+    warning::flush(Instant::now() + WARNINGS_BEFORE_REPLY);
     host.unwritten.send(reply_to, reply);
-    host.unwritten.wait(Instant::now() + QUIT_WRITE);
+    host.unwritten.wait(Instant::now() + REPLIES_BEFORE_EXIT);
     Ok(())
 }
 

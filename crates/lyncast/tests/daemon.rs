@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::doc::{self, Block};
-use common::{BUDGET, Daemon, World, mkfifo, poll, run_bounded, session};
+use common::{BUDGET, Daemon, World, fill, mkfifo, poll, run_bounded, session};
 
 /// Where each block's tree goes, named by the block's line.
 const TREES: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/daemon-trees");
@@ -268,21 +268,8 @@ fn full_fifo(path: &Path) -> File {
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
         .unwrap();
-    fill(&mut pipe);
+    fill(&mut pipe, FILLER);
     pipe
-}
-
-/// Writes [`FILLER`] to `pipe` until it is full.
-fn fill(pipe: &mut File) {
-    for chunk in [4096, 1] {
-        loop {
-            match pipe.write(&vec![FILLER; chunk]) {
-                Ok(_) => {}
-                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) => panic!("filling the FIFO: {error}"),
-            }
-        }
-    }
 }
 
 /// Reads `pipe` into `read`, as [`poll`] waits, until a whole line follows the filler, and gives
@@ -360,8 +347,8 @@ fn every_session_and_wire_block_runs_as_the_doc_says() {
     let (sessions, wires) = (of("session"), of("wire"));
     assert_eq!(
         (sessions.len(), wires.len()),
-        (23, 5),
-        "daemon.md holds 23 session blocks and 5 wire blocks, so a lost block fails"
+        (26, 5),
+        "daemon.md holds 26 session blocks and 5 wire blocks, so a lost block fails"
     );
     // A failed block keeps its tree, which a doc edit can leave under a line that no block has
     // any more, so the trees of the last run go first.
@@ -557,6 +544,36 @@ fn quit_stops_taking_results_at_its_deadline() {
     assert!(refused > 0, "a result still queued after the 5 s fails");
     assert_eq!(daemon.exit(), Some(0));
     world.passed();
+}
+
+const STALLED_RUNS: usize = 5;
+
+#[test]
+fn quit_replies_while_stderr_does_not_drain() {
+    let fixtures = doc::DAEMON.read(&doc::DAEMON.text()).unwrap();
+    let block = fixtures
+        .iter()
+        .find(|block| block.kind == "session" && block.args == ["stalled"])
+        .expect("daemon.md has the stalled session");
+    // SAFETY: sched_getcpu reads no memory, and the set lives through sched_setaffinity, whose
+    // pid 0 is this thread.
+    let pinned = unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(usize::try_from(libc::sched_getcpu()).unwrap(), &mut set);
+        libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set)
+    };
+    assert_eq!(
+        pinned,
+        0,
+        "sched_setaffinity: {}",
+        io::Error::last_os_error()
+    );
+    for run in 0..STALLED_RUNS {
+        let world = World::scratch(&fixtures, "daemon-stalled");
+        let failures = session(&world, block);
+        assert!(failures.is_empty(), "run {run}:\n{}", failures.join("\n"));
+        world.passed();
+    }
 }
 
 /// A thread takes its name only once it runs, so `named_thread` waits for the name.
