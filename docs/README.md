@@ -6,7 +6,7 @@ Start with the [decision log](decisions.md). It is the source of truth, and ever
 
 - [Architecture](design/architecture.md): the resident process, the pure core, the data shapes, the input box, a summon from toggle to close, and the CLI contract.
 - [Calculator](design/calculator.md): the engine that reads the root query, its pipeline and rules, and the fixtures.
-- [Daemon](design/daemon.md): starting the daemon, the socket and its wire format, the CLI commands and their output, activation, the runner and its recorder, and visits.
+- [Daemon](design/daemon.md): starting the daemon, the socket and its wire format, the CLI commands and their output, activation, the runner and its recorder, visits, and the fixtures.
 - [Clipboard and paste](design/clipboard-and-paste.md): capture, storage, delivery, the clipboard screen, and the paste seam.
 - [Ranking](design/ranking.md): the app index, desktop entries and the Exec tokenizer, the fold, frizbee's weights, the comparator, frecency, the empty list, `lyncast query`, and the fixtures.
 - [Testing](design/testing.md): the three test tiers on a headless box, the test environment, and the bench gate.

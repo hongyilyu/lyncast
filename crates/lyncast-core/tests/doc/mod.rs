@@ -1,6 +1,6 @@
 //! Reads the fixture blocks of a design doc, the only copy of its fixtures. lyncast-core's
 //! `tests/ranking.rs` and `tests/desktop.rs` read docs/design/ranking.md, as does the binary's
-//! `tests/query.rs`.
+//! `tests/query.rs`, and the binary's `tests/daemon.rs` reads docs/design/daemon.md.
 
 #![allow(dead_code)]
 
@@ -37,6 +37,12 @@ pub const RANKING: Doc = Doc {
         "cli",
     ],
     prose: &["", "rust", "sh", "text"],
+};
+
+pub const DAEMON: Doc = Doc {
+    file: "daemon.md",
+    kinds: &["env", "desktop", "executable", "session", "wire"],
+    prose: &["", "json"],
 };
 
 /// One fixture block.

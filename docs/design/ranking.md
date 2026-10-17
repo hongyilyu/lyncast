@@ -1394,7 +1394,7 @@ app %i => ["app"]
 
 ## lyncast query prints one JSON object per row
 
-Until step 5, `lyncast query <text> --json` scans the apps and ranks them in the same process, with no visits and the system clock. Step 5 moves the work behind the socket, and the expected output below becomes its regression check. `--json` is required until a plain view exists. The query may start with a hyphen.
+`lyncast query <text> --json` asks the daemon, which scans the apps with its own environment and ranks them ([daemon](daemon.md)). The expected output below is its regression check. `--json` is required until a plain view exists. The query may start with a hyphen.
 
 Each row is one compact JSON object on its own line, with its fields in this order:
 
@@ -1409,7 +1409,7 @@ Each row is one compact JSON object on its own line, with its fields in this ord
 
 Verbs are `launch`, `launch-action:<id>`, `copy-path`, `copy`, `pin`, `unpin`, `delete`, and `run`. Chords are `enter` and `ctrl-enter`. Both chords run the default item in the MVP. The binary owns these spellings, in `view.rs`, and serializes with `serde_json`. `lyncast-core` has no serde.
 
-The test writes each `desktop` and `executable` block below under a fresh directory, `$TREE`, in `CARGO_TARGET_TMPDIR`. It makes each `symlink` block a symlink to its target as written, and each `fifo` block a FIFO. An `executable` file gets mode 0755, and a `desktop` file keeps 0644, so `bin/firefox-aurora` has no execute bit. A `desktop` block may give `mode=` and an octal mode after its path. It runs the real binary with only the `env` block's variables, unset by any `env -u NAME` and then overridden by any `NAME=value` words before `lyncast` on the command line, and with `$TREE` as its working directory. It compares stdout byte for byte with each `cli` block, and it expects empty stderr and exit 0. A run over 10 s fails its block and ends the test, so a scan that blocks cannot hang it. The table lists every `desktop`, `executable`, `symlink`, and `fifo` block, and each `executable` is a program that some `desktop` block's `Exec` or `TryExec` names.
+The test writes each `desktop` and `executable` block below under a fresh directory, `$TREE`, in `CARGO_TARGET_TMPDIR`. It makes each `symlink` block a symlink to its target as written, and each `fifo` block a FIFO. An `executable` file gets mode 0755, and a `desktop` file keeps 0644, so `bin/firefox-aurora` has no execute bit. A `desktop` block may give `mode=` and an octal mode after its path. For each `cli` block it starts a daemon, `lyncast daemon --headless`, with only the `env` block's variables, unset by any `env -u NAME` and then overridden by any `NAME=value` words before `lyncast` on the command line, with `$TREE` as its working directory, and with a fresh `XDG_RUNTIME_DIR` under `/tmp`. The daemon scans in that environment. The test then runs the block's `lyncast query` against it and compares stdout byte for byte with the block, and it expects empty stderr and exit 0. A run over 10 s fails its block and ends the test, so a scan that blocks cannot hang it. The table lists every `desktop`, `executable`, `symlink`, and `fifo` block, and each `executable` is a program that some `desktop` block's `Exec` or `TryExec` names.
 
 ```env
 XDG_DATA_HOME=$TREE/home
