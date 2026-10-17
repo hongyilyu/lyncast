@@ -286,9 +286,18 @@ impl Runtime {
         self.0.join("lyncast.sock")
     }
 
-    /// The file that [`Daemon::spawn`] gives each daemon to record to.
+    /// The file that each test daemon records to.
     pub fn runs(&self) -> PathBuf {
         self.0.join("runs")
+    }
+
+    /// Adds `--record` and [`Runtime::runs`] to a `lyncast daemon` command that names no
+    /// `--record` of its own, so no test daemon starts a real program, even one that a test
+    /// expects to fail.
+    pub fn record(&self, daemon: &mut Command) {
+        if !daemon.get_args().any(|arg| arg == "--record") {
+            daemon.arg("--record").arg(self.runs());
+        }
     }
 }
 
@@ -326,9 +335,8 @@ pub fn ask(runtime: &Runtime, args: &[&str]) -> (String, String, Option<i32>) {
 pub struct Daemon(Child);
 
 impl Daemon {
-    /// Starts `command`, a `lyncast daemon`, in the background with `--record` and
-    /// [`Runtime::runs`], so no test daemon starts a real program. Its stdout and stderr are
-    /// appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
+    /// Starts `command`, a `lyncast daemon`, in the background with [`Runtime::record`]. Its
+    /// stdout and stderr are appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
     pub fn spawn(mut command: Command, runtime: &Runtime) -> Daemon {
         let log = |name: &str| {
             fs::File::options()
@@ -337,9 +345,8 @@ impl Daemon {
                 .open(runtime.path().join(name))
                 .unwrap()
         };
+        runtime.record(&mut command);
         command
-            .arg("--record")
-            .arg(runtime.runs())
             .stdin(Stdio::null())
             .stdout(log("daemon.stdout"))
             .stderr(log("daemon.stderr"));
@@ -515,6 +522,7 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
         }
         let daemon = args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
         if daemon && want.is_empty() {
+            // Daemon::start adds --record itself.
             match Daemon::start(run, &world.runtime) {
                 Ok(daemon) => daemons.push(daemon),
                 Err(error) => {
@@ -523,6 +531,9 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
                 }
             }
             continue;
+        }
+        if daemon {
+            world.runtime.record(&mut run);
         }
         let before = world.recorded().len();
         let Some((stdout, stderr, code)) = run_bounded(run, &world.out) else {
