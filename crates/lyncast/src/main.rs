@@ -6,6 +6,7 @@ mod apps;
 mod client;
 mod daemon;
 mod files;
+mod vars;
 mod view;
 mod wire;
 

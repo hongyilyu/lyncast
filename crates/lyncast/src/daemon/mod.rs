@@ -15,7 +15,7 @@ use std::time::Duration;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 use lyncast_core::{ActionItem, Command, Key, Subject, root};
 
-use crate::apps::Vars;
+use crate::vars::Vars;
 use crate::view::{self, Spelled};
 use crate::wire::{Reply, Request, Summon, Via};
 use store::Store;

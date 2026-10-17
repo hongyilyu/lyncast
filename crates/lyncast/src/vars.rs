@@ -1,0 +1,63 @@
+use std::env;
+use std::ffi::OsString;
+
+/// The environment the daemon reads at start. The app scan reads all of it but
+/// `XDG_CONFIG_HOME`. An empty variable counts as unset, except `PATH`. A value that is not
+/// UTF-8 counts as unset, except in `XDG_DATA_DIRS` and `PATH`, whose entries count one by one.
+/// `Vars::default()` is an environment with nothing set.
+#[derive(Default)]
+pub struct Vars {
+    /// The locale names to try, best first. `LANGUAGE` split on `:`, as GLib reads it, or else
+    /// the first non-empty of `LC_ALL`, `LC_MESSAGES`, and `LANG`.
+    pub locales: Vec<String>,
+    pub current_desktop: String,
+    pub data_home: Option<String>,
+    pub data_dirs: Option<OsString>,
+    pub config_home: Option<String>,
+    pub home: Option<String>,
+    /// As set, even when empty, because an empty `PATH` holds one empty entry and not the default.
+    pub path: Option<OsString>,
+}
+
+impl Vars {
+    pub fn read() -> Vars {
+        let var = |name: &str| env::var(name).ok().filter(|value| !value.is_empty());
+        let locales = match var("LANGUAGE") {
+            Some(list) => list.split(':').map(str::to_owned).collect(),
+            None => ["LC_ALL", "LC_MESSAGES", "LANG"]
+                .into_iter()
+                .find_map(var)
+                .into_iter()
+                .collect(),
+        };
+        Vars {
+            locales,
+            current_desktop: var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+            data_home: var("XDG_DATA_HOME"),
+            data_dirs: env::var_os("XDG_DATA_DIRS").filter(|value| !value.is_empty()),
+            config_home: var("XDG_CONFIG_HOME"),
+            home: var("HOME"),
+            path: env::var_os("PATH"),
+        }
+    }
+
+    /// An absolute `XDG_DATA_HOME`, else `$HOME/.local/share` for an absolute `HOME`, as the
+    /// XDG Base Directory spec asks.
+    pub fn data_home(&self) -> Option<String> {
+        self.base_dir(self.data_home.as_deref(), ".local/share")
+    }
+
+    /// An absolute `XDG_CONFIG_HOME`, else `$HOME/.config` for an absolute `HOME`.
+    pub fn config_home(&self) -> Option<String> {
+        self.base_dir(self.config_home.as_deref(), ".config")
+    }
+
+    fn base_dir(&self, dir: Option<&str>, under_home: &str) -> Option<String> {
+        let dir = dir.filter(|dir| dir.starts_with('/')).map(str::to_owned);
+        dir.or_else(|| {
+            let home = self.home.as_deref()?;
+            home.starts_with('/')
+                .then(|| format!("{}/{under_home}", home.trim_end_matches('/')))
+        })
+    }
+}
