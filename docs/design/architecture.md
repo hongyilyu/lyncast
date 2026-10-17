@@ -45,7 +45,8 @@ pub struct Row {
 	pub subject: Subject, // the key, kind, and actions all come from it
 	pub section: Section,
 	pub title: String,
-	// the palette derives the kind label from the kind; badges come with the card and clips
+	pub card: Option<calc::Answer>, // the calculator card's answer, on the Answer row only
+	// the palette derives the kind label from the kind; clip badges come with clips
 }
 
 pub enum Section { Answer, Results, Suggestions, Commands } // declaration order is the merge order
@@ -171,7 +172,7 @@ The CLI maps onto the requests:
 
 - `lyncast toggle` sends `Toggle`.
 - `lyncast status` sends `Status` and prints `open` or `closed`.
-- `lyncast query <text> --json` sends `Query` and prints one JSON object per row, with its key, index, kind, section, title, and actions ([ranking](ranking.md#lyncast-query-prints-one-json-object-per-row)). The query accepts a leading hyphen (`allow_hyphen_values`), because clap rejected `lyncast query -5+3`. A query that is an option's name, `--json` or `--help`, or `--` itself needs `lyncast query --json -- <text>` ([notes/08](../research/notes/08-calc-engine-workflow.md), measured).
+- `lyncast query <text> --json` sends `Query` and prints one JSON object per row, with its key, index, kind, section, title, and actions ([ranking](ranking.md#lyncast-query-prints-one-json-object-per-row)). The calculator card's row also has its `card`. The query accepts a leading hyphen (`allow_hyphen_values`), because clap rejected `lyncast query -5+3`. A query that is an option's name, `--json` or `--help`, or `--` itself needs `lyncast query --json -- <text>` ([notes/08](../research/notes/08-calc-engine-workflow.md), measured).
 - `lyncast activate <key>` runs a row's action, chosen with `--chord` or `--verb`. `--yes` confirms, and `--query` passes the search text. In the notes/07 design, `lyncast activate 'calc:2+3*4'` prints `copied 14`.
 
 The exit codes are part of the contract:

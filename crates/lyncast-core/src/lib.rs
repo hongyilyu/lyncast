@@ -9,6 +9,7 @@ pub mod desktop;
 mod fold;
 mod key;
 pub mod rank;
+pub mod root;
 
 pub use actions::{ActionItem, Actions, Chord, DesktopAction, Subject, Verb};
 pub use command::Command;
@@ -20,8 +21,11 @@ pub use key::{AppId, ClipId, Key, KeyError, Kind};
 pub struct Row {
     pub subject: Subject,
     pub section: Section,
-    /// An app's `Name` in the session locale, or a command's title.
+    /// An app's `Name` in the session locale, a command's title, or the calculator answer's
+    /// display.
     pub title: String,
+    /// The calculator card's answer, on the Answer row only.
+    pub card: Option<calc::Answer>,
 }
 
 /// The root list's sections. Declaration order is the merge order. A typed query

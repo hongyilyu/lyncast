@@ -248,8 +248,8 @@ fn every_session_and_wire_block_runs_as_the_doc_says() {
     let (sessions, wires) = (of("session"), of("wire"));
     assert_eq!(
         (sessions.len(), wires.len()),
-        (3, 3),
-        "daemon.md holds 3 session blocks and 3 wire blocks, so a lost block fails"
+        (4, 3),
+        "daemon.md holds 4 session blocks and 3 wire blocks, so a lost block fails"
     );
     // A failed block keeps its tree, which a doc edit can leave under a line that no block has
     // any more, so the trees of the last run go first.

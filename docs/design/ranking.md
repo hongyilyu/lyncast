@@ -1405,6 +1405,7 @@ Each row is one compact JSON object on its own line, with its fields in this ord
 | `kind` | `app`, `command`, `clip`, or `calculator` |
 | `section` | `answer`, `results`, `suggestions`, or `commands` |
 | `title` | the row's title |
+| `card` | only on the calculator's Answer row: the answer's `expression`, `source_badge`, `display`, `copy`, and `target_badge`, which is `null` when the answer has no words |
 | `actions` | the Actions menu in order, each with its `verb`, its `label`, and the `chords` that run it |
 
 Verbs are `launch`, `launch-action:<id>`, `copy-path`, `copy`, `pin`, `unpin`, `delete`, and `run`. Chords are `enter` and `ctrl-enter`. Both chords run the default item in the MVP. The binary owns these spellings, in `view.rs`, and serializes with `serde_json`. `lyncast-core` has no serde.
@@ -2092,10 +2093,11 @@ $ lyncast query check --json
 {"key":"app:sh-check.desktop","index":0,"kind":"app","section":"results","title":"Sh Check","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
 ```
 
-A query that starts with a hyphen is a query, not an option, unless it is an option's name or `--`. `-5+3` matches nothing in the tree. The calculator card joins the query in step 5, when the daemon builds rows.
+A query that starts with a hyphen is a query, not an option, unless it is an option's name or `--`. `-5+3` matches nothing in the tree, so the calculator's card is the only row.
 
 ```cli
 $ lyncast query -5+3 --json
+{"key":"calc:-5+3","index":0,"kind":"calculator","section":"answer","title":"-2","card":{"expression":"−5 + 3","source_badge":"Sum","display":"-2","copy":"-2","target_badge":"Minus Two"},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
 ```
 
 `-h` is a query too, and only the long `--help` prints help for `query`. The needle is `h`. htop's title starts with it and scores 4, and `History` is a word start in Clipboard History that scores 3.

@@ -5,6 +5,7 @@
 
 use std::io::{self, Write};
 
+use lyncast_core::calc::Answer;
 use lyncast_core::{Actions, Chord, Kind, Row, Section, Verb};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +18,20 @@ pub struct RowView {
     kind: String,
     section: String,
     title: String,
+    /// Only the calculator card's row has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card: Option<CardView>,
     actions: Vec<ActionView>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CardView {
+    expression: String,
+    source_badge: String,
+    display: String,
+    copy: String,
+    /// `null` when the answer has no words.
+    target_badge: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +54,7 @@ pub fn rows(rows: &[Row]) -> Vec<RowView> {
                 kind: kind_name(key.kind()).to_owned(),
                 section: section_name(row.section).to_owned(),
                 title: row.title.clone(),
+                card: row.card.as_ref().map(card_view),
                 actions: action_views(&row.subject.actions()),
             }
         })
@@ -53,6 +68,16 @@ pub fn write_rows(out: &mut impl Write, rows: &[RowView]) -> io::Result<()> {
         out.write_all(b"\n")?;
     }
     Ok(())
+}
+
+fn card_view(answer: &Answer) -> CardView {
+    CardView {
+        expression: answer.expression().to_owned(),
+        source_badge: answer.source_badge().to_owned(),
+        display: answer.display().to_owned(),
+        copy: answer.copy().to_owned(),
+        target_badge: answer.target_badge().map(str::to_owned),
+    }
 }
 
 /// The Actions menu in order, default first.

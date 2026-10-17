@@ -238,6 +238,7 @@ impl Index {
             subject: entry.subject(),
             section,
             title: entry.title().to_owned(),
+            card: None,
         }
     }
 
