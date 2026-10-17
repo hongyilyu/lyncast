@@ -1,12 +1,12 @@
 //! The socket and the threads around the daemon's state. An accept thread starts one thread per
 //! connection, for [`MAX_CONNECTIONS`] at most at once, which reads the request line, parses it,
 //! and passes it to the owner loop over a channel. The owner loop holds the [`Daemon`] and never
-//! touches a socket. Work that blocks runs on a worker thread, whose result comes back over the
-//! same channel. The capture thread hands over each entry there, and says there when it has ended,
-//! after Quit or because the compositor has gone. The writer of the clips hands over each new row
-//! it could not save, and each writer says there when it has ended. No [`Daemon`] method blocks,
-//! and only this headless host waits, on its channel. Plan step 7 makes the same calls from a GPUI
-//! task that reads an async channel.
+//! touches a socket. Work that blocks runs on a worker thread, or on the copier thread for a copy,
+//! and its result comes back over the same channel. The capture thread hands over each entry
+//! there, and says there when it has ended, after Quit or because the compositor has gone. The
+//! writer of the clips hands over each new row it could not save, and each writer says there when
+//! it has ended. No [`Daemon`] method blocks, and only this headless host waits, on its channel.
+//! Plan step 7 makes the same calls from a GPUI task that reads an async channel.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -25,9 +25,9 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, WriterKind, quitting};
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, WriterKind, quitting};
 use crate::apps;
-use crate::clip::{Capture, Clips, Seen};
+use crate::clip::{Capture, Clips, Copier, Payload, Seen};
 use crate::config;
 use crate::permit::Permits;
 use crate::vars::Vars;
@@ -68,7 +68,7 @@ const MAX_CONNECTIONS: u64 = 128;
 /// What the owner loop reads.
 enum Event {
     Request(Request, ReplyTo),
-    /// A worker thread's job ended.
+    /// A worker thread's task or the copier's copy ended.
     Finished(Success, Result<Done, String>, ReplyTo),
     /// A writer ended, after Quit.
     WriterEnded(WriterKind),
@@ -162,15 +162,16 @@ fn start(record: Option<PathBuf>) -> Result<(), String> {
         ended(WriterKind::Clips),
     )
     .map_err(not_started)?;
-    let capture = match vars.wayland_display {
+    let (capture, copier) = match vars.wayland_display {
         Some(_) => {
             let events = events.clone();
             let seen = move |seen| {
                 let _ = events.send(Event::Seen(seen));
             };
-            Some(Capture::start(clips.pending(), seen).map_err(not_started)?)
+            let (capture, copier) = Capture::start(clips.pending(), seen).map_err(not_started)?;
+            (Some(capture), Some(copier))
         }
-        None => None,
+        None => (None, None),
     };
     let daemon = Daemon::new(vars, index, visits, store, clips, capture);
     let socket = runtime.join(wire::SOCKET);
@@ -179,6 +180,7 @@ fn start(record: Option<PathBuf>) -> Result<(), String> {
     let host = Host {
         events,
         runner: record.map_or(Runner::Real, Runner::recorder),
+        copier,
         unwritten: Unwritten::default(),
     };
     serve(daemon, host, inbox, listener, Claim { lock, socket })
@@ -292,9 +294,10 @@ fn serve(
 
 /// What the owner loop holds beside the daemon.
 struct Host {
-    /// A sender for the worker threads.
+    /// A sender for the worker threads, the copier's results, and the accept thread.
     events: Sender<Event>,
     runner: Runner,
+    copier: Option<Copier>,
     unwritten: Unwritten,
 }
 
@@ -355,17 +358,41 @@ impl Host {
         }
     }
 
-    /// Runs the job on a worker thread, whose result comes back as an event. A job whose thread
-    /// cannot start finishes at once, failed.
+    /// Runs the job's task on a worker thread, or hands its copy to the copier, and its result
+    /// comes back as an event.
     fn start(&mut self, daemon: &mut Daemon, job: Job, reply_to: ReplyTo) {
-        let (events, runner) = (self.events.clone(), self.runner.clone());
-        let started = spawn_with((job, reply_to), move |(Job { work, success }, reply_to)| {
-            let done = work.run(&runner);
+        let Job { work, success } = job;
+        match work {
+            Work::Task(task) => self.run(daemon, task, success, reply_to),
+            Work::Copy(payload) => self.copy(payload, success, reply_to),
+        }
+    }
+
+    fn copy(&self, payload: Payload, success: Success, reply_to: ReplyTo) {
+        let copier = self
+            .copier
+            .as_ref()
+            .expect("the daemon hands out a copy only with a compositor");
+        let events = self.events.clone();
+        copier.copy(payload, move |copied| {
+            let done = copied.map(|()| Done::Copied);
             let _ = events.send(Event::Finished(success, done, reply_to));
         });
-        if let Err(((job, reply_to), error)) = started {
+    }
+
+    /// A task whose thread cannot start finishes at once, failed.
+    fn run(&mut self, daemon: &mut Daemon, task: Task, success: Success, reply_to: ReplyTo) {
+        let (events, runner) = (self.events.clone(), self.runner.clone());
+        let started = spawn_with(
+            (task, success, reply_to),
+            move |(task, success, reply_to)| {
+                let done = task.run(&runner);
+                let _ = events.send(Event::Finished(success, done, reply_to));
+            },
+        );
+        if let Err(((_, success, reply_to), error)) = started {
             let done = Err(format!("not run: {error}"));
-            let reply = daemon.finish(job.success, done, now());
+            let reply = daemon.finish(success, done, now());
             self.unwritten.send(reply_to, reply);
         }
     }

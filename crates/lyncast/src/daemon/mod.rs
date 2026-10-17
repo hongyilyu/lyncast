@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use lyncast_core::clip::{Delivery, Handed};
 use lyncast_core::rank::{Index, Timestamp, Visits};
 use lyncast_core::{ActionItem, ClipId, Command, Key, Subject, root};
 
-use crate::clip::{self, Capture, Clips, Entry};
+use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
 use crate::vars::Vars;
 use crate::view::{self, Spelled};
@@ -66,20 +67,26 @@ enum CaptureThread {
 /// What one request comes to.
 pub enum Handled {
     Reply(Reply),
-    /// Work that blocks, for a worker thread. Its result goes to [`Daemon::finish`].
+    /// Work that waits, for the host. Its result goes to [`Daemon::finish`].
     Job(Job),
     /// Quit has begun. The reply goes out once the daemon has [stopped](Daemon::stopped).
     Quit(Reply),
 }
 
-/// An activation's blocking work, and what the activation does once the work succeeds.
+/// An activation's work that waits, and what the activation does once the work succeeds.
 pub struct Job {
     pub work: Work,
     pub success: Success,
 }
 
-/// Work that blocks, so the owner loop hands it to a worker thread.
+/// Work that waits, so the owner loop hands it to the host.
 pub enum Work {
+    Task(Task),
+    Copy(Payload),
+}
+
+/// Work that blocks, for a worker thread.
+pub enum Task {
     /// Starts the argv through the runner.
     Spawn(Vec<String>),
     /// Creates the config file if it is missing, then opens it.
@@ -96,15 +103,23 @@ pub enum WriterKind {
 /// What finished work brings back.
 pub enum Done {
     Ran,
+    Copied,
     Scanned { number: u64, index: Index },
 }
 
 /// What a successful activation records and replies.
 pub struct Success {
-    key: Key,
-    /// The search text, which the visit keeps as a term.
-    query: String,
+    record: Record,
     message: String,
+}
+
+enum Record {
+    Visit {
+        key: Key,
+        /// The search text, which the visit keeps as a term.
+        query: String,
+    },
+    Write(Delivery),
 }
 
 impl Daemon {
@@ -288,8 +303,10 @@ impl Daemon {
             return Handled::Reply(Reply::Confirm { title });
         }
         let success = |message: String| Success {
-            key: key.clone(),
-            query: query.clone(),
+            record: Record::Visit {
+                key: key.clone(),
+                query: query.clone(),
+            },
             message,
         };
         let launch = |id, message: String| {
@@ -299,7 +316,7 @@ impl Daemon {
                 .and_then(|app| app.argv_for(item))
                 .expect("an app's row offers only its own Open and Desktop Actions");
             Handled::Job(Job {
-                work: Work::Spawn(argv.to_vec()),
+                work: Work::Task(Task::Spawn(argv.to_vec())),
                 success: success(message),
             })
         };
@@ -308,8 +325,14 @@ impl Daemon {
             ActionItem::LaunchAction(id, action) => {
                 launch(id, format!("launched {key} {}", action.id))
             }
-            ActionItem::CopyPath(_) | ActionItem::CopyAnswer(_) | ActionItem::CopyClip(_) => {
-                failed("not copied: no Wayland compositor".to_owned())
+            ActionItem::CopyClip(id) => self.copy(Delivery::Clip(*id)),
+            ActionItem::CopyAnswer(query) => match root::answer(query) {
+                Some(answer) => self.copy(answer.delivery()),
+                None => failed(format!("{key} has no answer")),
+            },
+            ActionItem::CopyPath(id) => {
+                let app = self.index.app(id).expect("an app's row is in the index");
+                self.copy(Delivery::Text(app.path().to_owned()))
             }
             ActionItem::Pin(id) => {
                 let changed = self.clips.pin(*id, now);
@@ -329,8 +352,8 @@ impl Daemon {
 
     /// What each command does, as the table in docs/design/daemon.md lists it.
     fn command(&mut self, command: Command, success: Success, now: Timestamp) -> Handled {
-        let spawn = |argv: &[&str]| Work::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
-        let work = match command {
+        let spawn = |argv: &[&str]| Task::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
+        let task = match command {
             Command::ClipboardHistory => {
                 return Handled::Reply(self.succeed(success, Summon::Open, now));
             }
@@ -343,7 +366,7 @@ impl Daemon {
                 });
             }
             Command::OpenConfig => match self.vars.config_home() {
-                Some(dir) => Work::OpenConfig(config::path(Path::new(&dir))),
+                Some(dir) => Task::OpenConfig(config::path(Path::new(&dir))),
                 None => {
                     let reason = "not run: XDG_CONFIG_HOME and HOME are not set".to_owned();
                     return Handled::Reply(Reply::Failed { reason });
@@ -351,7 +374,7 @@ impl Daemon {
             },
             Command::ReloadApps => {
                 self.scans += 1;
-                Work::Scan {
+                Task::Scan {
                     vars: Arc::clone(&self.vars),
                     number: self.scans,
                 }
@@ -362,12 +385,14 @@ impl Daemon {
             Command::Reboot => spawn(&["systemctl", "reboot"]),
             Command::PowerOff => spawn(&["systemctl", "poweroff"]),
         };
-        Handled::Job(Job { work, success })
+        Handled::Job(Job {
+            work: Work::Task(task),
+            success,
+        })
     }
 
     /// The subject of the row a key names, from current state: an app from the index, a command
-    /// from its key, a clip from the history, and a calculator row from the answer to the key's
-    /// text, as the root list finds it.
+    /// from its key, a clip from the history, and a calculator row from the key's text.
     fn rebuild(&self, key: &Key) -> Result<Subject, String> {
         match key {
             Key::App(id) => match self.index.app(id) {
@@ -382,13 +407,32 @@ impl Daemon {
                 }),
                 None => Err(clip::no_clip(*id)),
             },
-            Key::Calc(query) => match root::answer(query) {
-                Some(_) => Ok(Subject::Calc {
-                    query: query.clone(),
-                }),
-                None => Err(format!("{key} has no answer")),
-            },
+            Key::Calc(query) => Ok(Subject::Calc {
+                query: query.clone(),
+            }),
         }
+    }
+
+    fn copy(&self, delivery: Delivery) -> Handled {
+        let failed = |reason: String| Handled::Reply(Reply::Failed { reason });
+        if !matches!(self.capture, CaptureThread::Running(_)) {
+            return failed(clip::not_copied("no Wayland compositor"));
+        }
+        let payload = match self.clips.payload(&delivery) {
+            Ok(payload) => payload,
+            Err(reason) => return failed(reason),
+        };
+        let message = match delivery.handed() {
+            Handed::Clip(id) => format!("copied clip {}", id.0),
+            Handed::Text(text) => format!("copied {text}"),
+        };
+        Handled::Job(Job {
+            work: Work::Copy(payload),
+            success: Success {
+                record: Record::Write(delivery),
+                message,
+            },
+        })
     }
 
     fn changed(&mut self, changed: Result<(), String>, message: String) -> Handled {
@@ -401,14 +445,19 @@ impl Daemon {
         })
     }
 
-    /// Records the visit, sets the summon, hands the visits to the writer, and gives the success
-    /// line.
+    /// Records the visit and hands the visits to the writer, or records the write a copy made,
+    /// then sets the summon and gives the success line.
     fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Reply {
-        self.visits.record(success.key, &success.query, now);
-        self.summon = summon;
-        if let Some(store) = &self.store {
-            store.save(&self.visits);
+        match success.record {
+            Record::Visit { key, query } => {
+                self.visits.record(key, &query, now);
+                if let Some(store) = &self.store {
+                    store.save(&self.visits);
+                }
+            }
+            Record::Write(delivery) => self.clips.wrote(&delivery, now),
         }
+        self.summon = summon;
         Reply::Done {
             message: success.message,
         }
@@ -436,7 +485,7 @@ mod tests {
         };
         match daemon.handle(request, Timestamp(0)) {
             Handled::Job(Job {
-                work: Work::Scan { number, .. },
+                work: Work::Task(Task::Scan { number, .. }),
                 success,
             }) => (number, success),
             _ => panic!("Reload Apps hands out a scan"),

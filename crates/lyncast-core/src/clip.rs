@@ -1,12 +1,42 @@
-//! The rules of clipboard history that need no store: the kind a text shows as, a row's
-//! preview, the paths of the files a list of URIs names, when a row expires, and the order of the
-//! clipboard screen. The binary's `Clips` owns the rows and applies these rules to them.
-//! docs/design/clipboard-and-paste.md holds the fixtures.
+//! The rules of clipboard history that need no store: what a copy hands over, the kind a text
+//! shows as, a row's preview, the paths of the files a list of URIs names, when a row expires, and
+//! the order of the clipboard screen.
 
 use std::cmp::Reverse;
 use std::num::NonZeroU32;
 
+use crate::ClipId;
+use crate::calc::CalcAnswer;
 use crate::rank::Timestamp;
+
+/// What a copy hands over. Core says what, never how, so it carries no bytes and no types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// A row of the history, whose bytes the store holds.
+    Clip(ClipId),
+    /// A calculator answer.
+    Answer(CalcAnswer),
+    /// Text that no row holds yet, such as the path that Copy Path hands over.
+    Text(String),
+}
+
+/// What a delivery comes to for the store and the reply: a row of the history, or text, which an
+/// answer and a path both are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handed<'d> {
+    Clip(ClipId),
+    Text(&'d str),
+}
+
+impl Delivery {
+    pub fn handed(&self) -> Handed<'_> {
+        match self {
+            Delivery::Clip(id) => Handed::Clip(*id),
+            Delivery::Answer(answer) => Handed::Text(answer.text()),
+            Delivery::Text(text) => Handed::Text(text),
+        }
+    }
+}
 
 /// What a text row shows as. A link or an email is text, derived from the whole text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

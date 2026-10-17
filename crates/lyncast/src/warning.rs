@@ -257,16 +257,8 @@ mod tests {
     #[test]
     fn the_thread_writes_in_order_and_a_flush_waits_for_it() {
         assert_eq!(
-            written(10),
-            want(10, "2 warnings were dropped while stderr was full")
-        );
-    }
-
-    #[test]
-    fn one_dropped_warning_is_counted_as_one() {
-        assert_eq!(
-            written(9),
-            want(9, "1 warning was dropped while stderr was full")
+            written(11),
+            want(11, "3 warnings were dropped while stderr was full")
         );
     }
 
