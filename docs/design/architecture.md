@@ -86,7 +86,7 @@ impl Actions {
 	pub fn iter(&self) -> impl Iterator<Item = (Option<Chord>, &ActionItem)>; // menu order, default first
 }
 
-pub enum Delivery { Clip(ClipId), Answer(CalcAnswer) }
+pub enum Delivery { Clip(ClipId), Answer(CalcAnswer), Text(String) } // Text is a path that Copy Path hands over
 pub struct CalcAnswer(String); // only the calculator can build one
 
 pub enum Outcome { Card(Answer), Error(String), Silent } // calc::evaluate

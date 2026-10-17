@@ -16,9 +16,9 @@ The thread captures text, images, and files. Files arrive as `text/uri-list` or 
 
 The watcher lists each offer's MIME types, so each filter is a string compare (`src/watch.rs:193-198`, read in source).
 
-The first filter skips lyncast's own writes, which all carry `application/x-lyncast-own`. The marker holds the same bytes as the payload. A probe under Xvfb plus anvil read 12 copies of `image/png` with an empty marker through `MimeType::Any`, and 5 reads got the marker and 0 bytes (measured). `wl-clipboard-rs` keeps offered types in a `HashMap`, so a reader that takes the first type can pick the marker (`src/copy.rs:264`, read in source).
+The first filter skips lyncast's own writes, which all carry a type that starts with `application/x-lyncast-own`. Each copy offers `application/x-lyncast-own;copy=<pid>.<n>`, where `<pid>` is the daemon's process ID and `<n>` the copy's number, and the marker holds the same bytes as the payload. A probe under Xvfb plus anvil read 12 copies of `image/png` with an empty marker through `MimeType::Any`, and 5 reads got the marker and 0 bytes (measured). `wl-clipboard-rs` keeps offered types in a `HashMap`, so a reader that takes the first type can pick the marker (`src/copy.rs:264`, read in source).
 
-The second filter skips the password-manager hint `x-kde-passwordManagerHint` (`src/utils.rs:21`, read in source). The third skips any entry over 25 MB.
+The second filter skips the password-manager hint `x-kde-passwordManagerHint` (`src/utils.rs:21`, read in source). The third skips any entry over 25 MiB.
 
 ## The clipboard screen follows TinyCast's
 
@@ -33,25 +33,79 @@ Tab, or the Clipboard History command, opens the clipboard screen. Hongyi chose 
 
 The preview decodes one image at a time and drops it when the selection moves. That keeps image memory bounded by one preview, not by the history size. Vicinae reached 1.2 to 2.7 GB while scrolling images on niri, as reported in its issue #998 ([notes/01](../research/notes/01-landscape.md)).
 
-## Clips is the only owner of clip rows
+## The capture thread reads one representation per offer
 
-`Clips` keeps the history in `rusqlite`, with blobs in files named by hash. Core keeps no copy of the rows and ranks a borrowed slice, because a second copy went out of sync in review.
+The thread takes each offer the `Watcher` reports through the filters above, in order. An offer that carries the marker is lyncast's own write: the thread records nothing, and when the marker names this daemon's process, it tells the copier the copy's number, which is how a copy learns that the compositor took it. Another lyncast process numbers its copies from 1 too, so its marks confirm nothing here. An offer with the password hint is dropped. Every other offer gives one representation:
 
-## Delivery records each write before it returns
+1. Files, when the offer has `text/uri-list` or `x-special/gnome-copied-files` and the list names a local file. The thread reads `text/uri-list` first. It keeps each `file://` line whose host is empty or `localhost`, and drops the rest, such as comments, other schemes, and the `copy` or `cut` that starts a GNOME list. A list that names no local file, such as a link offered as `text/uri-list`, gives an image or text instead.
+2. Else an image: `image/png` when it is offered, else the first `image/*` type. An empty image is dropped.
+3. Else text, through wl-clipboard-rs's order of text types. Empty text and text that is not UTF-8 are dropped.
+
+A read stops after 25 MiB and one byte, and the reads of one offer stop after 2 s in all, however many reads the offer takes. Either way the entry is dropped. A 26 MiB offer stopped in 21 ms, and a stopped source's read returned at the 2 s deadline in 10 of 10 runs, after which the next copy was still captured ([the step 6 prototype](../research/notes/11-clipboard-prototype.md), measured).
+
+The thread runs only when the daemon has `WAYLAND_DISPLAY`. A daemon that cannot reach the compositor it names prints `lyncast: not started: <error>` and exits 1 before it binds the socket. When the `Watcher` returns an error later, the compositor has gone. The daemon then stops as Quit does, without a reply to send, prints `lyncast: the Wayland connection closed`, and exits 1. After anvil stopped, `next_event` failed within 29 ms and failed again at once on every later call, so a loop that retried would spin (measured).
+
+The thread reads, and it never writes or syncs, so only an offer's reads can hold it up, for 2 s at most. The `Watcher` takes in one go the offers that came while a read held the thread, and each of those holds it 2 s more. Once Quit has begun and no job is out, the daemon cancels the `Watcher`, and the thread ends after the offer it is reading and reads none of those that wait behind it. The writer of the clips ends after that, so every entry the thread handed over reaches it.
+
+## Clips keeps the rows in memory and in sqlite
+
+`Clips` is the only owner of clip rows, and core ranks a borrowed slice, because a second copy went out of sync in review. It holds every row in memory and loads them at start from `$XDG_DATA_HOME/lyncast/clips.sqlite3`. A row keeps its id, kind, type, size, times, pin, the SHA-256 of what it holds, and a preview: the first 1,024 bytes of its text or of its paths, cut at a character boundary. Whether a text is a link or an email comes from its whole text when it arrives. The database keeps the kind, the hash, and the preview beside the bytes, so a load reads no text, derives nothing again, and holds at most the previews in memory. The full text lives only in the database, and an image's bytes live in `$XDG_DATA_HOME/lyncast/blobs/<sha256 hex>`, one file per distinct image.
+
+The daemon never waits on the disk, as with `ranking.json`. One writer thread owns `clips.sqlite3` and `blobs/`, and each change to a row goes to it in order. A change that fails prints `lyncast: <path>: not saved: <error>`. A pin, an unpin, or a promotion that fails leaves the row as it is in memory, and a delete that fails leaves the row in the file for the next daemon. A new row that fails, its blob or its row, goes from the history too, and its warning ends with `; the clip was not recorded`, so the history never lists a row whose bytes are nowhere, and a later capture of the same bytes records it again. A new row brings its bytes. For an image, the writer writes the blob through a temporary file named with the process ID, and then the row, and a blob that fails to write keeps its row out of the database. A delete removes the row first and then the blob, once no saved row names it, so a crash between the two leaves a blob that no row names, never a row whose blob is gone. A copy reads a row's text or blob through the writer, so a row that the writer has not written yet reads too. The data directory and `blobs/` are created with mode 0700, and `clips.sqlite3` and each blob with mode 0600, because the history holds whatever the user copied, secrets among them. Without an absolute data home, the rows and what they hold live in memory only.
+
+New rows wait for the writer with their bytes. A new row whose bytes would bring what waits past 64 MiB is not recorded, and the daemon prints `lyncast: <path>: not saved: 64 MiB of clips wait for the disk; the clip was not recorded`, so a stalled disk cannot grow the daemon without bound.
+
+The writer thread opens and loads `clips.sqlite3`, and the start waits 5 s at most for it. The writer reads the file only when it is a regular file after symlinks, and creates it when there is none, so a FIFO or a device there fails at once. A file that is not a regular file, a symlink to nothing, a file that SQLite cannot read, and a file whose ids have run out each print `lyncast: <path>: <error>; the clips stay in memory`. The rows then live in memory only, and the daemon never writes the file. SQLite opens the file, and the journal beside it, by path after that check, and an open of a FIFO waits for good, so a load that has not ended in 5 s prints `lyncast: <path>: not loaded within 5 s; the clips stay in memory` too. Its thread writes nothing when it ends. The daemon holds SQLite's exclusive lock until its writer ends, so a second daemon with the same data home finds the database locked and keeps its rows in memory.
+
+The daemon gives each new row the next id itself, one above every id the database has used, so a reply can name the row before the database has it, and the id of a deleted row never comes back. Neither does the id of a new row that the file did not save: the next change that the file saves raises its count of used ids to that id. A database whose ids leave no next one is one the daemon cannot use, and once the ids run out in memory, a new row is not recorded and the daemon prints `lyncast: no clip id is left; the clip was not recorded`. A capture or a recorded write whose kind and bytes match a row promotes that row: it moves to the front and keeps its id. A pinned row stays where it is. The `Watcher`'s first event is the current selection, so without this every daemon start would add the clipboard again (measured, 23 of 23).
+
+The screen order is pins first, in the order they were pinned, then the rest by last use, newest first. A pin is a use. Every insert, promotion, and pin takes the next number in one sequence, so two in the same millisecond keep their order. Unpinning keeps the row's number, so the row goes back where its pin put it.
+
+Unpinned rows expire 90 days after their last use, and pins never expire. Unpinning starts a row's age again, so a row pinned for longer than that does not expire as soon as it is unpinned. `[clipboard] retention-days` in `$XDG_CONFIG_HOME/lyncast/config.toml` sets the days, and 0 keeps rows forever. The daemon prunes at start and after each insert. The daemon reads `config.toml` only when it is a regular file of at most 1 MiB after symlinks, so a FIFO there cannot hold up the start. A `config.toml` that cannot be read, does not parse, or gives `retention-days` a value that is not a whole number from 0 up prints `lyncast: <path>: <error>; using the defaults` and leaves the defaults. The daemon leaves every other key alone.
+
+## A copy waits for the compositor to take it
 
 `lyncast-core` says what to hand over, never how:
 
 ```rust
-pub enum Delivery { Clip(ClipId), Answer(CalcAnswer) }
+pub enum Delivery { Clip(ClipId), Answer(CalcAnswer), Text(String) }
 ```
 
-`Clip` names a stored row, so core carries no bytes. `Clips::deliver` sets the selection through `copy_multi`, then records the write in the same call. A `Clip` promotes its row. An `Answer` inserts one, since a copied answer goes into history ([lead default](../decisions.md#lead-defaults-hongyi-can-override)). So the marker means "already recorded". Letting the watcher record answers would race the next `clip list` (inferred). If the write fails, the palette stays open, shows the reason, and keeps the row.
+`Clip` names a stored row, so core carries no bytes. `Answer` is a calculator answer, which only the calculator can build, and `Text` is a path that Copy Path hands over. The daemon hands each copy to the host, which passes it to the copier thread, so the daemon never waits for it. `Capture::start` starts the copier with the capture thread, which reports each marked offer to it. The copier runs one copy at a time and numbers each one, and the daemon records copies in the order the compositor took them:
+
+1. The copier reads the row's bytes through the writer: its text from the database, or its blob. A blob that is gone fails the copy with `clip <id>: blob missing`, before anything is offered. A read that the writer has not answered within 5 s fails the copy with `not copied: the writer of the clips did not answer within 5 s`, so a stalled disk holds up each copy, and each copy behind it, 5 s at most.
+2. It prepares a source on a thread of its own, with the payload's types and the marker `application/x-lyncast-own;copy=<pid>.<n>`, which holds the same bytes. wl-clipboard-rs prepares it with a roundtrip to the compositor, and it sends the `set_selection` it queues only once it serves the source.
+3. If the source is ready within 500 ms, the copier lets the thread serve it. Otherwise the thread never serves it, so the selection never reaches the compositor, and the copy fails with `not copied: the compositor did not take the selection`. The thread still waits for the compositor with the payload, and until it ends, a new copy fails at once with `not copied: an earlier copy still waits for the compositor`, so a stalled compositor holds one payload and one thread, not one for each copy. A prepare that fails fails the copy with `not copied: <error>`.
+4. Once the source is served, the copy waits up to 2.5 s for the capture thread to report the marked offer with its number. That is the 2 s the capture thread gives an offer, the longest one offer can hold the report up, and a margin. Then the daemon records the write and replies. A `Clip` promotes its row. An `Answer` and a `Text` insert a text row, or promote one with the same text. A report that does not come in time fails the copy with `not copied: the clipboard watcher did not confirm the selection`, though the compositor may hold the selection. Either way nothing is recorded. A number from a copy that gave up goes by, and only this process's marks count, so neither a late report nor another process's mark confirms another copy.
+
+The wait is measured. Across processes under load, a read right after `copy_multi` returned the previous selection 173 times in 3,000, and 0 times in 6,000 after the wait. The wait took 0.3 ms at the median and 237 ms at most, and the first marked offer after a write was that write in 6,000 of 6,000 tries.
+
+A text row offers `text/plain;charset=utf-8`, which wl-clipboard-rs also offers as its other text types. An image offers its stored type. A file entry offers its paths as `text/plain;charset=utf-8`, and its list as `text/uri-list` and as `x-special/gnome-copied-files`. wl-clipboard-rs offers the types in no set order, so a reader that takes the first type may get any of them. It fills its other text types from the first text source it is given (`src/copy.rs:861-897`, read in source). The paths come first, so those types hold the paths, the marker holds them too, and a paste into a text field gets them.
+
+If the write fails, the palette stays open, shows the reason, and keeps the row.
+
+## lyncast clip list shows the history
+
+`lyncast clip list --json` prints one JSON object per row, in screen order:
+
+| Field | Value |
+|---|---|
+| `id` | the clip id |
+| `kind` | `text`, `link`, `email`, `image`, or `files` |
+| `pinned` | `true` or `false` |
+| `mime` | the stored type |
+| `bytes` | the stored size |
+| `preview` | the row's preview, or `null` for an image |
+
+`link` and `email` are text whose whole trimmed content is one `http://` or `https://` URL with no whitespace, or one address of the form `local@domain.tld`. They are derived from the whole text when the row arrives, and the database keeps the kind. `lyncast clip list` sends the `clips` request, and the daemon answers with `{"reply":"clips","clips":[...]}`, each clip as the table spells it. `lyncast activate clip:<id>` copies the row, and `--verb pin`, `--verb unpin`, and `--verb delete` change it. They print `copied clip <id>`, `pinned clip <id>`, `unpinned clip <id>`, and `deleted clip <id>`.
+
+Source is filled from plan step 8, which brings the niri IPC client. Until then it is empty.
 
 ## The daemon owns the selection and must stay alive
 
 smithay forwards each paste read to the client that set the selection. When that client destroys its source or exits, smithay clears the selection, and niri keeps no copy (read in source). A probe saw the selection empty when the copier exited (measured).
 
-The palette cannot own it, because GPUI's Wayland clipboard needs a focused window and an input serial (read in source). The resident daemon owns it through `copy_multi`, which serves from a thread (`src/copy.rs:1043-1058`, read in source). `--headless` does the same.
+The palette cannot own it, because GPUI's Wayland clipboard needs a focused window and an input serial (read in source). The resident daemon owns it through a source that wl-clipboard-rs prepares and that the daemon serves from a thread of its own (`src/copy.rs:555-585`, read in source). `--headless` does the same.
 
 So the GPUI app runs with `QuitMode::Explicit`, because by default GPUI on Linux quits with its last window ([process model](../decisions.md#process-model)).
 
@@ -136,9 +190,9 @@ These fixes live in the paste v1 spec, not yet in the decision log:
 - One file per backend held only on niri. `detect` walks ordered probes, and the claim shrinks to key injection.
 - Each paste swaps the seat keymap. The spec accepts that, with a fresh anvil per test.
 
-These four have no fix in the log or the spec. The planned tests in [testing.md](testing.md#planned-tier-2-cases-for-copy-and-close) cover the first and the third:
+Four had no fix in the log or the spec. Plan step 6 settled three on 2026-10-17 ([decision log](../decisions.md#clipboard-and-paste)):
 
-- No test covers Enter, close, and still serving. Both reviews ask for a Tier 2 case.
-- `deliver` returns before the compositor applies the selection. The review asks it to wait for its own `Changed` event.
-- Back-to-back seeding races the watcher. The fix waits for each row before the next seed.
-- A daemon restart empties the clipboard. The review suggests re-offering the newest row at startup.
+- No test covers Enter, close, and still serving. Both reviews ask for a Tier 2 case, which plan step 7 adds with the palette.
+- `deliver` returned before the compositor applied the selection. A copy now waits for its own marked offer, as [a copy waits for the compositor to take it](#a-copy-waits-for-the-compositor-to-take-it) says.
+- Back-to-back seeding races the watcher. A Tier 2 test waits for each seed's row before it seeds again.
+- A daemon restart empties the clipboard. The daemon does not offer the newest row again at start.
