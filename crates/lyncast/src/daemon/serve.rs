@@ -1,22 +1,24 @@
 //! The socket and the threads around the daemon's state. An accept thread starts one thread per
 //! connection, which reads the request line, parses it, and passes it to the owner loop over a
-//! channel. The owner loop holds the [`Daemon`] and never touches a socket. [`Daemon::handle`]
-//! never blocks, and only this headless host waits, on its channel. Plan step 7 makes the same
-//! calls from a GPUI task that reads an async channel.
+//! channel. The owner loop holds the [`Daemon`] and never touches a socket. Work that blocks runs
+//! on a worker thread, whose result comes back over the same channel. No [`Daemon`] method
+//! blocks, and only this headless host waits, on its channel. Plan step 7 makes the same calls
+//! from a GPUI task that reads an async channel.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::sync::mpsc::{self, Sender};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lyncast_core::rank::{Index, Timestamp};
 
-use super::Daemon;
-use crate::apps;
+use super::runner::Runner;
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, QUITTING, Success};
+use crate::apps::{self, Vars};
 use crate::wire::{self, Reply, Request};
 
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
@@ -25,28 +27,78 @@ const LOCK: &str = "lyncast.lock";
 /// How long a connection may take to send its request or to read its reply.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long Quit waits for the replies to be written before the process exits.
+const QUIT_WRITE: Duration = Duration::from_secs(1);
+
 /// The most bytes a request line may hold, with its newline.
 const MAX_REQUEST: u64 = 1 << 20;
 
 /// What the owner loop reads.
 enum Event {
-    /// A parsed request, and where its reply goes.
-    Request(Request, Sender<Reply>),
+    Request(Request, ReplyTo),
+    /// A worker thread's job ended.
+    Finished(Success, Result<Done, String>, ReplyTo),
 }
 
-/// Claims the socket and serves until the process ends. The lock comes first, so a second
-/// daemon fails before it scans, and only the lock holder removes a stale socket and binds.
-pub fn run() -> Result<(), String> {
+/// Where a request's reply goes: the connection thread that read it, which says when the reply
+/// is written.
+struct ReplyTo {
+    reply: Sender<Reply>,
+    written: Receiver<()>,
+}
+
+/// The replies that went to connection threads and may not be written yet. Quit waits for
+/// them, because the process exit would cut them off.
+#[derive(Default)]
+struct Unwritten(Vec<Receiver<()>>);
+
+impl Unwritten {
+    fn send(&mut self, reply_to: ReplyTo, reply: Reply) {
+        self.0
+            .retain(|written| written.try_recv() == Err(TryRecvError::Empty));
+        // The send fails only when the connection's thread is gone, with no one to tell.
+        if reply_to.reply.send(reply).is_ok() {
+            self.0.push(reply_to.written);
+        }
+    }
+
+    /// Waits until each reply is written, or its thread gives up, or `deadline` passes.
+    fn wait(self, deadline: Instant) {
+        for written in self.0 {
+            let _ = written.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+/// Claims the socket and serves until a Quit command. The lock comes first, so a second daemon
+/// fails before it scans, and only the lock holder removes a stale socket and binds. `record`
+/// swaps the runner for a recorder that writes to that file.
+pub fn run(record: Option<PathBuf>) -> Result<(), String> {
     let runtime = wire::runtime_dir()?;
-    let _lock = lock(&runtime.join(LOCK))?;
-    let daemon = Daemon::new(Index::new(apps::scan(&apps::Vars::read())));
-    let listener = bind(&runtime.join(wire::SOCKET))?;
-    serve(daemon, listener)
+    let lock = lock(&runtime.join(LOCK))?;
+    let vars = Vars::read();
+    let index = Index::new(apps::scan(&vars));
+    let (events, inbox) = mpsc::channel();
+    let daemon = Daemon::new(vars, index);
+    let socket = runtime.join(wire::SOCKET);
+    let listener = bind(&socket)?;
+    let host = Host {
+        events,
+        runner: record.map_or(Runner::Real, Runner::recorder),
+        unwritten: Unwritten::default(),
+    };
+    serve(daemon, host, inbox, listener, Claim { lock, socket })
 }
 
 /// The reason the daemon gives when a thread it needs cannot start.
 fn not_started(error: io::Error) -> String {
     format!("not started: {error}")
+}
+
+/// The lock and the socket path, which Quit gives up.
+struct Claim {
+    lock: File,
+    socket: PathBuf,
 }
 
 /// Takes an exclusive `flock` on `path`. The kernel releases it when the file closes, which
@@ -83,21 +135,111 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     UnixListener::bind(socket).map_err(failed)
 }
 
-/// The owner loop. It answers each event in turn, for as long as the accept thread runs.
-fn serve(mut daemon: Daemon, listener: UnixListener) -> Result<(), String> {
-    let (events, inbox) = mpsc::channel();
+/// The owner loop. It serves until a Quit command, and then stops in the order
+/// docs/design/daemon.md gives: no new connections, the work in flight, the reply. The daemon
+/// keeps answering while it stops.
+fn serve(
+    mut daemon: Daemon,
+    mut host: Host,
+    inbox: Receiver<Event>,
+    listener: UnixListener,
+    claim: Claim,
+) -> Result<(), String> {
+    let accepted = host.events.clone();
     thread::Builder::new()
-        .spawn(move || accept(&listener, &events))
+        .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
-    for event in inbox {
+    let (reply, reply_to) = loop {
+        let event = inbox.recv().expect("the host holds a sender");
+        if let Some(quit) = host.dispatch(&mut daemon, event) {
+            break quit;
+        }
+    };
+    let _ = fs::remove_file(&claim.socket);
+    let deadline = Instant::now() + QUIT_WAIT;
+    while !daemon.stopped() {
+        // A queued event comes back at once even when the wait is zero, so the deadline is
+        // checked before each one.
+        let wait = deadline.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            break;
+        }
+        let Ok(event) = inbox.recv_timeout(wait) else {
+            break;
+        };
+        // The daemon fails every request now, so no second Quit comes back.
+        host.dispatch(&mut daemon, event);
+    }
+    // The daemon takes no more events, so each one still queued fails.
+    for event in inbox.try_iter() {
+        host.refuse(event);
+    }
+    // The lock goes after the work in flight and before the reply, so a daemon started after
+    // the reply can take it.
+    drop(claim.lock);
+    host.unwritten.send(reply_to, reply);
+    host.unwritten.wait(Instant::now() + QUIT_WRITE);
+    Ok(())
+}
+
+/// What the owner loop holds beside the daemon.
+struct Host {
+    /// A sender for the worker threads.
+    events: Sender<Event>,
+    runner: Runner,
+    unwritten: Unwritten,
+}
+
+impl Host {
+    /// Hands one event to the daemon and sends the reply it gives, or starts the job it hands
+    /// back. Gives back the reply to a Quit, which waits.
+    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<(Reply, ReplyTo)> {
         match event {
-            Event::Request(request, reply_to) => {
-                // The send fails only when the connection's thread is gone, with no one to tell.
-                let _ = reply_to.send(daemon.handle(request, now()));
+            Event::Request(request, reply_to) => match daemon.handle(request, now()) {
+                Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
+                Handled::Job(job) => self.start(daemon, job, reply_to),
+                Handled::Quit(reply) => return Some((reply, reply_to)),
+            },
+            Event::Finished(success, done, reply_to) => {
+                self.unwritten
+                    .send(reply_to, daemon.finish(success, done, now()));
+            }
+        }
+        None
+    }
+
+    /// Answers an event that is still queued once Quit stops waiting, without handing it to the
+    /// daemon. A job's result is not taken either, so its client hears that the daemon is
+    /// quitting, even when its program started.
+    fn refuse(&mut self, event: Event) {
+        let (Event::Request(_, reply_to) | Event::Finished(_, _, reply_to)) = event;
+        let reason = QUITTING.to_owned();
+        self.unwritten.send(reply_to, Reply::Failed { reason });
+    }
+
+    /// Runs the job on a worker thread, whose result comes back as an event. A job whose thread
+    /// cannot start finishes at once, failed.
+    fn start(&mut self, daemon: &mut Daemon, job: Job, reply_to: ReplyTo) {
+        let (events, runner) = (self.events.clone(), self.runner.clone());
+        // The job goes to the thread once it runs, so a thread that cannot start leaves it here.
+        let (hand, handed) = mpsc::channel();
+        let started = thread::Builder::new().spawn(move || {
+            if let Ok((Job { work, success }, reply_to)) = handed.recv() {
+                let done = work.run(&runner);
+                let _ = events.send(Event::Finished(success, done, reply_to));
+            }
+        });
+        match started {
+            Ok(_) => {
+                let _ = hand.send((job, reply_to));
+            }
+            Err(error) => {
+                let done = Err(format!("not run: {error}"));
+                let reply = daemon.finish(job.success, done, now());
+                self.unwritten.send(reply_to, reply);
             }
         }
     }
-    Ok(())
 }
 
 fn accept(listener: &UnixListener, events: &Sender<Event>) {
@@ -120,23 +262,30 @@ fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
     stream.set_write_timeout(Some(TIMEOUT))?;
     let mut line = Vec::new();
     BufReader::new((&stream).take(MAX_REQUEST)).read_until(b'\n', &mut line)?;
+    let (written, written_rx) = mpsc::channel();
     let reply = match parse(&line) {
         Ok(request) => {
-            let (reply_to, reply) = mpsc::channel();
-            // Either fails only when the owner loop has ended and the process is exiting. A
-            // failed send hands the event back, and its reply sender would keep the wait open,
-            // so `ok` drops it first.
-            let asked = events.send(Event::Request(request, reply_to)).ok();
-            let Some(reply) = asked.and_then(|()| reply.recv().ok()) else {
-                return Ok(());
+            let (reply, reply_rx) = mpsc::channel();
+            let reply_to = ReplyTo {
+                reply,
+                written: written_rx,
             };
-            reply
+            // Either fails only once the owner loop has ended at a Quit. A failed send hands the
+            // event back, and its reply sender would keep the wait open, so `ok` drops it first.
+            let asked = events.send(Event::Request(request, reply_to)).ok();
+            asked
+                .and_then(|()| reply_rx.recv().ok())
+                .unwrap_or_else(|| Reply::Failed {
+                    reason: QUITTING.to_owned(),
+                })
         }
         Err(reason) => Reply::Failed { reason },
     };
     let mut out = serde_json::to_vec(&reply).expect("a reply serializes");
     out.push(b'\n');
-    (&stream).write_all(&out)
+    (&stream).write_all(&out)?;
+    let _ = written.send(());
+    Ok(())
 }
 
 /// The request on a line that `read_until` read. The line has no newline when the client

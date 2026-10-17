@@ -1,13 +1,15 @@
 //! The socket's wire, as docs/design/daemon.md spells it: one compact JSON request line from
-//! the client and one reply line from the daemon per connection.
+//! the client and one reply line from the daemon per connection. Keys, chords, and verbs travel
+//! as the strings `query --json` prints, and the socket parses them.
 
 use std::env;
 use std::fmt;
 use std::path::PathBuf;
 
+use lyncast_core::{Chord, Key, Verb};
 use serde::{Deserialize, Serialize};
 
-use crate::view::RowView;
+use crate::view::{RowView, Spelled};
 
 /// The socket's file name in `$XDG_RUNTIME_DIR`.
 pub const SOCKET: &str = "lyncast.sock";
@@ -22,6 +24,24 @@ pub enum Request {
     Query {
         text: String,
     },
+    /// Runs one item of the row that `key` names. `query` is the search text the row was found
+    /// with, which frecency keeps as a search term.
+    Activate {
+        #[serde(with = "spelled")]
+        key: Key,
+        via: Via,
+        confirmed: bool,
+        query: String,
+    },
+}
+
+/// How an activation picks its item: the keys pressed, or a verb from the Actions menu.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Via {
+    Chord(#[serde(with = "spelled")] Chord),
+    #[serde(rename = "verb")]
+    Menu(#[serde(with = "spelled")] Verb),
 }
 
 /// What the daemon answers.
@@ -33,6 +53,14 @@ pub enum Reply {
     },
     Rows {
         rows: Vec<RowView>,
+    },
+    /// The success line, such as `ran cmd:reboot`.
+    Done {
+        message: String,
+    },
+    /// The command asks first. Nothing ran.
+    Confirm {
+        title: String,
     },
     /// The reason, without the `lyncast: ` prefix.
     Failed {
@@ -64,4 +92,22 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .ok_or_else(|| "XDG_RUNTIME_DIR is not set".to_owned())
+}
+
+/// `#[serde(with)]` for a [`Spelled`] field. A spelling that reads as nothing fails the request
+/// with the reason and the text, as in `bad clip id in clip:x`.
+mod spelled {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Spelled;
+
+    pub fn serialize<T: Spelled, S: Serializer>(value: &T, out: S) -> Result<S::Ok, S::Error> {
+        out.serialize_str(&value.spelling())
+    }
+
+    pub fn deserialize<'de, T: Spelled, D: Deserializer<'de>>(input: D) -> Result<T, D::Error> {
+        let text = String::deserialize(input)?;
+        T::read(&text).map_err(|reason| D::Error::custom(format!("{reason} in {text}")))
+    }
 }

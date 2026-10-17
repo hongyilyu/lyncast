@@ -14,7 +14,7 @@ pub use frecency::{Timestamp, Visit, Visits};
 pub use score::{Fit, Scored, score};
 
 use crate::desktop::App;
-use crate::{Command, Key, Row, Section, Subject, fold};
+use crate::{AppId, Command, Key, Row, Section, Subject, fold};
 use frecency::Learned;
 use key::{Alpha, Hits, KindRank, Name, RankKey, Tiebreak};
 use score::{Query, field_end};
@@ -147,6 +147,14 @@ impl Index {
         }
     }
 
+    /// The app with this ID, which activation rebuilds its row from.
+    pub fn app(&self, id: &AppId) -> Option<&App> {
+        match self.entry(*self.by_key.get(&Key::App(id.clone()))?) {
+            Entry::App(app) => Some(app),
+            Entry::Command(_) => None,
+        }
+    }
+
     /// One frizbee pass over the haystacks, then one sort of the shown entries' keys. A needle
     /// longer than every haystack returns before frizbee builds its matcher, whose setup grows
     /// with the needle.
@@ -264,14 +272,7 @@ impl Entry {
 
     fn subject(&self) -> Subject {
         match self {
-            Entry::App(app) => Subject::App {
-                id: app.id().clone(),
-                actions: app
-                    .actions()
-                    .iter()
-                    .map(|action| action.action.clone())
-                    .collect(),
-            },
+            Entry::App(app) => app.subject(),
             Entry::Command(command) => Subject::Command(*command),
         }
     }

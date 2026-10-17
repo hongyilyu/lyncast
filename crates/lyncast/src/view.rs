@@ -1,13 +1,20 @@
 //! The JSON view that `lyncast query --json` prints: one compact object per row and line, with
 //! the fields in declaration order. The daemon sends the same objects in its `rows` reply, and
-//! the client prints them as they came. The wire spellings of kinds, sections, verbs, and chords
-//! live here, and serde stays out of lyncast-core.
+//! the client prints them as they came. The wire spellings of keys, kinds, sections, verbs, and
+//! chords live here, and serde stays out of lyncast-core.
 
 use std::io::{self, Write};
 
 use lyncast_core::calc::Answer;
-use lyncast_core::{Actions, Chord, Kind, Row, Section, Verb};
+use lyncast_core::{Actions, Chord, Key, KeyError, Kind, Row, Section, Verb};
 use serde::{Deserialize, Serialize};
+
+/// A value that the CLI and the wire spell as `query --json` prints it.
+pub trait Spelled: Sized {
+    fn spelling(&self) -> String;
+    /// The value `text` spells, or why it spells none.
+    fn read(text: &str) -> Result<Self, String>;
+}
 
 /// One row as `query --json` prints it.
 #[derive(Serialize, Deserialize)]
@@ -85,12 +92,12 @@ fn action_views(actions: &Actions) -> Vec<ActionView> {
     actions
         .iter()
         .map(|(_, item)| ActionView {
-            verb: verb_name(&item.verb()),
+            verb: item.verb().spelling(),
             label: item.label().to_owned(),
             chords: Chord::ALL
                 .into_iter()
                 .filter(|&chord| actions.on(chord) == item)
-                .map(|chord| chord_name(chord).to_owned())
+                .map(|chord| chord.spelling())
                 .collect(),
         })
         .collect()
@@ -114,22 +121,111 @@ fn section_name(section: Section) -> &'static str {
     }
 }
 
-fn verb_name(verb: &Verb) -> String {
-    match verb {
-        Verb::Launch => "launch".to_owned(),
-        Verb::LaunchAction(id) => format!("launch-action:{id}"),
-        Verb::CopyPath => "copy-path".to_owned(),
-        Verb::Copy => "copy".to_owned(),
-        Verb::Pin => "pin".to_owned(),
-        Verb::Unpin => "unpin".to_owned(),
-        Verb::Delete => "delete".to_owned(),
-        Verb::Run => "run".to_owned(),
+impl Spelled for Key {
+    fn spelling(&self) -> String {
+        self.to_string()
+    }
+
+    fn read(text: &str) -> Result<Key, String> {
+        text.parse().map_err(|error: KeyError| error.to_string())
     }
 }
 
-fn chord_name(chord: Chord) -> &'static str {
-    match chord {
-        Chord::Enter => "enter",
-        Chord::CtrlEnter => "ctrl-enter",
+impl Spelled for Verb {
+    fn spelling(&self) -> String {
+        match self {
+            Verb::Launch => "launch".to_owned(),
+            Verb::LaunchAction(id) => format!("launch-action:{id}"),
+            Verb::CopyPath => "copy-path".to_owned(),
+            Verb::Copy => "copy".to_owned(),
+            Verb::Pin => "pin".to_owned(),
+            Verb::Unpin => "unpin".to_owned(),
+            Verb::Delete => "delete".to_owned(),
+            Verb::Run => "run".to_owned(),
+        }
+    }
+
+    fn read(text: &str) -> Result<Verb, String> {
+        if let Some(id) = text
+            .strip_prefix("launch-action:")
+            .filter(|id| !id.is_empty())
+        {
+            return Ok(Verb::LaunchAction(id.to_owned()));
+        }
+        // Every verb without an argument.
+        let verbs = [
+            Verb::Launch,
+            Verb::CopyPath,
+            Verb::Copy,
+            Verb::Pin,
+            Verb::Unpin,
+            Verb::Delete,
+            Verb::Run,
+        ];
+        verbs
+            .into_iter()
+            .find(|verb| verb.spelling() == text)
+            .ok_or_else(|| "unknown verb".to_owned())
+    }
+}
+
+impl Spelled for Chord {
+    fn spelling(&self) -> String {
+        match self {
+            Chord::Enter => "enter",
+            Chord::CtrlEnter => "ctrl-enter",
+        }
+        .to_owned()
+    }
+
+    fn read(text: &str) -> Result<Chord, String> {
+        Chord::ALL
+            .into_iter()
+            .find(|chord| chord.spelling() == text)
+            .ok_or_else(|| "unknown chord".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lyncast_core::{AppId, ClipId, Command, DesktopAction, Subject};
+
+    use super::*;
+
+    /// `--chord`, `--verb`, and the wire read back every spelling that `query --json` prints,
+    /// for every item of a row of each kind. docs/design/daemon.md holds the spellings they
+    /// refuse.
+    #[test]
+    fn each_chord_and_verb_reads_back_from_its_spelling() {
+        // A new kind fails to compile here until it has subjects to check.
+        let subjects: Vec<Subject> = Kind::ALL
+            .into_iter()
+            .flat_map(|kind| match kind {
+                Kind::App => vec![Subject::App {
+                    id: AppId("firefox.desktop".to_owned()),
+                    actions: vec![DesktopAction {
+                        id: "new-window".to_owned(),
+                        name: "New Window".to_owned(),
+                    }],
+                }],
+                Kind::Command => Vec::from(Command::ALL.map(Subject::Command)),
+                Kind::Clip => Vec::from([false, true].map(|pinned| Subject::Clip {
+                    id: ClipId(1),
+                    pinned,
+                })),
+                Kind::Calculator => vec![Subject::Calc {
+                    query: "1+1".to_owned(),
+                }],
+            })
+            .collect();
+        for subject in &subjects {
+            for (_, item) in subject.actions().iter() {
+                let verb = item.verb();
+                assert_eq!(Verb::read(&verb.spelling()), Ok(verb), "{item:?}");
+            }
+        }
+        for chord in Chord::ALL {
+            assert_eq!(Chord::read(&chord.spelling()), Ok(chord));
+        }
     }
 }

@@ -57,6 +57,11 @@ impl Command {
         }
     }
 
+    /// Log Out, Reboot, and Power Off ask before they run.
+    pub fn confirms(self) -> bool {
+        matches!(self, Command::LogOut | Command::Reboot | Command::PowerOff)
+    }
+
     /// The id in a `cmd:` key.
     pub(crate) fn id(self) -> &'static str {
         match self {
