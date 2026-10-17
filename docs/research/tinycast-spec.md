@@ -128,10 +128,11 @@ The verdicts start from [notes/06](notes/06-tinycast-behaviour-spec.md#7-port-to
 | Panel and focus loss | Adapt | An Overlay layer-shell surface with exclusive keyboard focus. Focus loss cancels the summon. |
 | Escape steps, flat selection, landing row, one-line query, Ctrl+N and Ctrl+P, IME | Keep | |
 | Tab ring | Adapt | Tab or a registered prefix scopes the query ([input box](../decisions.md#input-box)). |
-| Root merge order | Adapt | Answer, then Apps, then Fallback. |
-| App index | Adapt | `.desktop` files through `freedesktop-desktop-entry`, launched through niri IPC `Action Spawn` ([stack](../decisions.md#stack)). |
-| Scorer | Adapt | `frizbee` matches, and TinyCast's ranking rules sit on top. |
-| Comparator, fold, frecency, aliases, favorites | Keep | |
+| Root merge order | Adapt | Answer, then Results, where apps and commands rank together. A Fallback section can come later, and the MVP has none ([input box](../decisions.md#input-box)). |
+| App index | Adapt | `.desktop` files through lyncast's own parser, launched through niri IPC `Action Spawn` ([app index and ranking](../decisions.md#app-index-and-ranking), [stack](../decisions.md#stack)). |
+| Scorer | Adapt | `frizbee` matches with TinyCast's points as its weights, and TinyCast's ranking rules sit on top ([ranking](../design/ranking.md)). |
+| Comparator, frecency, aliases, favorites | Keep | The MVP drops rules 1, 2, and 6 until aliases arrive. |
+| Fold | Adapt | TinyCast's width, format, diacritic, and case fold, through NFD and the canonical combining class. Half-width katakana, the full-width signs U+FFE0 to U+FFE6, ligatures, and `ß` are not folded ([ranking](../design/ranking.md#one-fold-runs-on-every-field-and-every-query)). |
 | Romanization, running dot, drag-out | Drop for MVP | |
 | Capture, marker, sensitive guard | Adapt | The `wl-clipboard-rs` `Watcher` skips `application/x-lyncast-own` and `x-kde-passwordManagerHint` ([clipboard and paste](../decisions.md#clipboard-and-paste)). |
 | Disabled apps | Defer | data-control does not expose the source app. |

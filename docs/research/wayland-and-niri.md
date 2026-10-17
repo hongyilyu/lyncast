@@ -70,7 +70,7 @@ The same holds for lyncast's own copies. If lyncast exits, smithay clears the se
 
 ## App launching goes through desktop entries and niri `Spawn`
 
-`freedesktop-desktop-entry` 0.8.3 (MPL-2.0) handles XDG directory scanning, locale, `NoDisplay`, `OnlyShowIn`, `NotShowIn`, `Terminal`, and actions. Its `Exec` parser splits on plain whitespace. Tested on `sh -c "echo a b"`, it returned `["sh","-c","\"echo","a","b\"",…]`. lyncast's own tokenizer must handle double quotes, escapes, `%f`, `%F`, `%u`, `%U`, `%i`, `%c`, and `%k`. [notes/03](notes/03-wayland-niri-integration.md)
+lyncast scans the XDG directories and parses desktop entries itself, with its own `Exec` tokenizer ([Stack](../decisions.md#stack), [ranking](../design/ranking.md#the-scan-reads-desktop-entries-the-way-the-spec-and-glib-do)). notes/03 proposed `freedesktop-desktop-entry` 0.8.3 (MPL-2.0) for the scan, and the crate was dropped on 2026-10-15. It returns `OnlyShowIn`, `NotShowIn`, and `TryExec` as values and acts on none of them, does not dedupe IDs, and reads `LANG` but not `LC_ALL` or `LC_MESSAGES`. Its `Exec` parser splits on plain whitespace. Tested on `sh -c "echo a b"`, it returned `["sh","-c","\"echo","a","b\"",…]` [notes/03](notes/03-wayland-niri-integration.md).
 
 `freedesktop-icons` 0.4.0 parses every `index.theme` on first use. Each later lookup probes files with `exists()` per directory and extension, and ignores `icon-theme.cache`. notes/03 suggests resolving icons for visible rows on a background thread, with a cache. The cost is unmeasured. [notes/03](notes/03-wayland-niri-integration.md)
 

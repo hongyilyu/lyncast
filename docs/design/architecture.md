@@ -44,7 +44,8 @@ pub struct ClipId(pub i64); // the sqlite rowid type
 pub struct Row {
 	pub subject: Subject, // the key, kind, and actions all come from it
 	pub section: Section,
-	// title, kind label, badges, and other display text
+	pub title: String,
+	// the palette derives the kind label from the kind; badges come with the card and clips
 }
 
 pub enum Section { Answer, Results, Suggestions, Commands } // declaration order is the merge order
@@ -119,7 +120,7 @@ The [input box](../decisions.md#input-box) works in two steps:
 1. An explicit scope routes the query to one feature. Tab is a scope, and so is a registered prefix.
 2. Without a scope, every root feature evaluates the query. Apps and built-in commands rank together in Results. A merge step orders the rows by the section table, Answer then Results, so the calculator card sits at index 0. A Fallback section (for example web search) can follow later. The MVP has no fallback rows.
 
-Fan-out costs under 0.1 ms per keystroke. The calculator takes 1.1 µs ([notes/08](../research/notes/08-calc-engine-workflow.md), measured), and `frizbee` takes 34 to 73 µs on 10k items ([notes/03](../research/notes/03-wayland-niri-integration.md), measured). zlaunch and look both work this way ([notes/09](../research/notes/09-input-box-prior-art.md), read in source).
+Fan-out stays under the 0.1 ms budget per keystroke on a 300-app desktop. The calculator takes 0.45 µs on its 26 shared inputs ([calculator](calculator.md#the-ports-cost-per-keystroke), measured). On 300 apps the worst bench query for ranking apps and commands, with frizbee and the comparator, took 71 µs, and 79 µs in the slowest of four bench runs ([ranking](ranking.md#the-worst-bench-keystroke-takes-71-µs-on-300-apps-and-254-µs-on-1000), measured). The budget breaks in three places. On 1,000 apps the worst query of every typed group takes 139 to 254 µs. When some field is as long as a pasted query, a paste of 109 characters took 228 µs in the worst of six runs, and one of 896 takes about 2.1 ms. The calculator's worst capped input takes 602 µs. zlaunch and look both work this way ([notes/09](../research/notes/09-input-box-prior-art.md), read in source).
 
 No step sniffs keywords to pick a feature. Each feature's own parser decides whether the query is its input. A rule like "contains x" fires on `firefox`, while the calculator parser keeps `xterm`, `7zip`, `0x`, and `12 x` silent.
 
@@ -134,7 +135,7 @@ The MVP registers no text prefixes. Tab is the only scope, and it opens the clip
 Before the first keystroke the palette shows two sections, as Raycast does ([decision log](../decisions.md#input-box)):
 
 - **Suggestions** holds the top 5 apps and commands by frecency. On a fresh install, with no usage yet, it shows Clipboard History and then the first apps alphabetically.
-- **Commands** lists every built-in command alphabetically.
+- **Commands** lists every built-in command that Suggestions does not hold, alphabetically.
 
 Each row shows its kind, Command or Application, on the right. The commands are Clipboard History, Open Config, Reload Apps, Quit lyncast, Lock Screen (`loginctl lock-session`), Suspend, Log Out (`niri msg action quit`), Reboot, and Power Off. Typing searches commands like apps, so `clip` finds Clipboard History.
 
@@ -168,7 +169,7 @@ Every palette action also exists as a CLI command over the same socket protocol.
 The CLI maps onto the requests:
 
 - `lyncast toggle` sends `Toggle`.
-- `lyncast query <text> --json` prints one JSON object per row, with its key, index, kind, section, and actions. The query accepts a leading hyphen (`allow_hyphen_values`), because clap rejected `lyncast query -5+3` ([notes/08](../research/notes/08-calc-engine-workflow.md), measured).
+- `lyncast query <text> --json` prints one JSON object per row, with its key, index, kind, section, title, and actions. Until step 5 it ranks in-process ([ranking](ranking.md#lyncast-query-prints-one-json-object-per-row)). The query accepts a leading hyphen (`allow_hyphen_values`), because clap rejected `lyncast query -5+3`. A query that is an option's name, `--json` or `--help`, or `--` itself needs `lyncast query --json -- <text>` ([notes/08](../research/notes/08-calc-engine-workflow.md), measured).
 - `lyncast activate <key>` runs a row's action. In the notes/07 design, `lyncast activate 'calc:2+3*4'` prints `copied 14`.
 
 The exit codes are part of the contract:
