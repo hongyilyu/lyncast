@@ -63,51 +63,51 @@ fn the_reader_rejects_fences_that_would_drop_a_block() {
         ))
     };
     assert_eq!(
-        doc::read("```rnak\nquery x\n```\n"),
+        doc::RANKING.read("```rnak\nquery x\n```\n"),
         Err(r#"line 1: "```rnak" is not a fixture kind"#.to_owned())
     );
     assert_eq!(
-        doc::read("~~~rnak\nquery x\n~~~\n"),
+        doc::RANKING.read("~~~rnak\nquery x\n~~~\n"),
         Err(r#"line 1: "~~~rnak" is not a fixture kind"#.to_owned())
     );
     assert_eq!(
-        doc::read("text\n  ```rank\n```\n"),
+        doc::RANKING.read("text\n  ```rank\n```\n"),
         unindented(2, "  ```rank")
     );
     assert_eq!(
-        doc::read("~~~fold\nx => x | x\n~~~\n"),
+        doc::RANKING.read("~~~fold\nx => x | x\n~~~\n"),
         unindented(1, "~~~fold")
     );
     assert_eq!(
-        doc::read("~~~~rank\nquery x\n~~~~\n"),
+        doc::RANKING.read("~~~~rank\nquery x\n~~~~\n"),
         unindented(1, "~~~~rank")
     );
     assert_eq!(
-        doc::read("````rank\nquery x\n````\n"),
+        doc::RANKING.read("````rank\nquery x\n````\n"),
         unindented(1, "````rank")
     );
     assert_eq!(
-        doc::read(" ````rank\nquery x\n ````\n"),
+        doc::RANKING.read(" ````rank\nquery x\n ````\n"),
         unindented(1, " ````rank")
     );
     assert_eq!(
-        doc::read("text\n\n    ```rank\n    query x\n"),
+        doc::RANKING.read("text\n\n    ```rank\n    query x\n"),
         unindented(3, "    ```rank")
     );
     assert_eq!(
-        doc::read("- ```rank rule=3\n  query x\n  ```\n"),
+        doc::RANKING.read("- ```rank rule=3\n  query x\n  ```\n"),
         unindented(1, "- ```rank rule=3")
     );
     assert_eq!(
-        doc::read("1. ```rank rule=3\n   query x\n"),
+        doc::RANKING.read("1. ```rank rule=3\n   query x\n"),
         unindented(1, "1. ```rank rule=3")
     );
     assert_eq!(
-        doc::read("> ```rank rule=3\n> query x\n> ```\n"),
+        doc::RANKING.read("> ```rank rule=3\n> query x\n> ```\n"),
         unindented(1, "> ```rank rule=3")
     );
     assert_eq!(
-        doc::read("```\nprose\n```\n```fold\nx => x | x\n"),
+        doc::RANKING.read("```\nprose\n```\n```fold\nx => x | x\n"),
         Err("line 4: the block never closes".to_owned())
     );
     let html = |line: &str| {
@@ -116,11 +116,11 @@ fn the_reader_rejects_fences_that_would_drop_a_block() {
         ))
     };
     assert_eq!(
-        doc::read("<!--\n```rank rule=3\nquery x\n```\n-->\n"),
+        doc::RANKING.read("<!--\n```rank rule=3\nquery x\n```\n-->\n"),
         html("<!--")
     );
     assert_eq!(
-        doc::read("   <div>\n```rank rule=3\nquery x\n```\n</div>\n"),
+        doc::RANKING.read("   <div>\n```rank rule=3\nquery x\n```\n</div>\n"),
         html("   <div>")
     );
     // CommonMark closes a list item's fence at its indented closer, so the bare ``` after it
@@ -131,14 +131,14 @@ fn the_reader_rejects_fences_that_would_drop_a_block() {
         ))
     };
     assert_eq!(
-        doc::read("- ```text\n  example\n  ```\n\n```\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("- ```text\n  example\n  ```\n\n```\n```rank rule=3\nquery x\n```\n"),
         container("- ```text")
     );
-    assert_eq!(doc::read("> ~~~\n> x\n> ~~~\n"), container("> ~~~"));
+    assert_eq!(doc::RANKING.read("> ~~~\n> x\n> ~~~\n"), container("> ~~~"));
     // CommonMark ends a line at a lone CR, and `str::lines` does not, so the rank fence would
     // hide inside the first line.
     assert_eq!(
-        doc::read("Example:\r```rank rule=3\rquery x\r```\n"),
+        doc::RANKING.read("Example:\r```rank rule=3\rquery x\r```\n"),
         Err("line 1: a carriage return, which CommonMark reads as a line ending".to_owned())
     );
 }
@@ -146,14 +146,14 @@ fn the_reader_rejects_fences_that_would_drop_a_block() {
 #[test]
 fn the_reader_fails_on_a_kind_fence_inside_an_open_block() {
     assert_eq!(
-        doc::read("```fold\nx => x | x\n```desktop a\n[Desktop Entry]\n```\n"),
+        doc::RANKING.read("```fold\nx => x | x\n```desktop a\n[Desktop Entry]\n```\n"),
         Err(
             r#"line 3: "```desktop a" names a fixture kind inside the block from line 1"#
                 .to_owned()
         )
     );
     assert_eq!(
-        doc::read("~~~~text\n~~~\n```rank rule=3\nquery x\n```\n~~~~\n"),
+        doc::RANKING.read("~~~~text\n~~~\n```rank rule=3\nquery x\n```\n~~~~\n"),
         Err(
             r#"line 3: "```rank rule=3" names a fixture kind inside the block from line 1"#
                 .to_owned()
@@ -166,38 +166,38 @@ fn the_reader_fails_on_a_kind_fence_inside_an_open_block() {
 #[test]
 fn the_reader_follows_commonmark_fences() {
     assert_eq!(
-        doc::read("```rust\nlet x = 1;\n```\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("```rust\nlet x = 1;\n```\n```rank rule=3\nquery x\n```\n"),
         one_rank_block(4)
     );
     assert_eq!(
-        doc::read("```text\nprose\n``` \n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("```text\nprose\n``` \n```rank rule=3\nquery x\n```\n"),
         one_rank_block(4)
     );
     assert_eq!(
-        doc::read("```rank rule=3\nquery x\n   ````\t\n"),
+        doc::RANKING.read("```rank rule=3\nquery x\n   ````\t\n"),
         one_rank_block(1)
     );
     assert_eq!(
-        doc::read("  ```\nprose\n```\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("  ```\nprose\n```\n```rank rule=3\nquery x\n```\n"),
         one_rank_block(4)
     );
     assert_eq!(
-        doc::read("~~~text\n```\n~~~\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("~~~text\n```\n~~~\n```rank rule=3\nquery x\n```\n"),
         one_rank_block(4)
     );
     assert_eq!(
-        doc::read("````\n```\n````\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("````\n```\n````\n```rank rule=3\nquery x\n```\n"),
         one_rank_block(4)
     );
     assert_eq!(
-        doc::read("```x```\n```rank rule=3\nquery x\n```\n"),
+        doc::RANKING.read("```x```\n```rank rule=3\nquery x\n```\n"),
         one_rank_block(2)
     );
     // Only spaces and tabs may follow a closing fence, so ``` and a no-break space or U+3000 is
     // a line of the block.
     for after in ['\u{A0}', '\u{3000}'] {
         assert_eq!(
-            doc::read(&format!("```rank rule=3\nquery x\n```{after}\n```\n")),
+            doc::RANKING.read(&format!("```rank rule=3\nquery x\n```{after}\n```\n")),
             Ok(vec![doc::Block {
                 kind: "rank".to_owned(),
                 args: vec!["rule=3".to_owned()],
@@ -211,7 +211,7 @@ fn the_reader_follows_commonmark_fences() {
 /// Each line reads `input => case-kept | lowercased`, and either side may write `\u{XXXX}`.
 #[test]
 fn fold_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "fold");
+    let blocks = doc::RANKING.blocks("fold");
     assert_present(&blocks, "fold", &["Ｆｉｒｅｆｏｘ", "Soft\\u{AD}ware", "ｶﾞ"]);
     let results = blocks
         .iter()
@@ -229,7 +229,7 @@ fn fold_fixtures() {
 /// Each line reads `query | text => N shows`, `N below`, `exact`, or `∅`.
 #[test]
 fn score_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "score");
+    let blocks = doc::RANKING.blocks("score");
     assert_present(
         &blocks,
         "score",
@@ -270,7 +270,7 @@ fn offset(text: &str) -> i64 {
 /// entry with an empty query.
 #[test]
 fn frecency_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "frecency");
+    let blocks = doc::RANKING.blocks("frecency");
     assert_present(
         &blocks,
         "frecency",
@@ -317,7 +317,7 @@ fn quoted(mut text: &str) -> Vec<&str> {
 /// order, then its terms, most recent first.
 #[test]
 fn terms_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "terms");
+    let blocks = doc::RANKING.blocks("terms");
     assert_present(&blocks, "terms", &["\"Fire\" \"fire\""]);
     let key = Key::App(AppId("firefox.desktop".into()));
     let results = blocks
@@ -468,7 +468,7 @@ impl Scenario {
 
 #[test]
 fn rank_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "rank");
+    let blocks = doc::RANKING.blocks("rank");
     assert_present(
         &blocks,
         "rank",
@@ -502,7 +502,7 @@ const NAMED: [&str; 4] = ["empty-list", "keywords", "separators", "whitespace"];
 /// counts them, and a lost block fails.
 #[test]
 fn every_rank_block_has_one_tag_and_every_tag_a_block() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "rank");
+    let blocks = doc::RANKING.blocks("rank");
     assert_eq!(blocks.len(), 51, "ranking.md's rank blocks");
     let mut tags = BTreeSet::new();
     for block in &blocks {
@@ -531,7 +531,7 @@ fn every_rank_block_has_one_tag_and_every_tag_a_block() {
 /// `Command::keywords` gives it.
 #[test]
 fn the_keyword_table_is_command_keywords() {
-    let doc = doc::ranking_doc();
+    let doc = doc::RANKING.text();
     let rows: Vec<(String, Vec<String>)> = doc
         .lines()
         .skip_while(|line| *line != "| Command | Keywords |")

@@ -10,7 +10,7 @@ use lyncast_core::desktop::{self, ExecContext, Session, Unparseable, Verdict, to
 /// Name `Firefox`, Icon `firefox` (none in an `exec no-icon` block), and the path below.
 #[test]
 fn exec_fixtures() {
-    let blocks = doc::blocks(&doc::ranking_doc(), "exec");
+    let blocks = doc::RANKING.blocks("exec");
     let lines: Vec<&str> = blocks
         .iter()
         .flat_map(|block| &block.lines)
@@ -58,8 +58,9 @@ fn exec_fixtures() {
 /// is the verdict. The file is parsed as `/usr/share/applications/test.desktop`.
 #[test]
 fn entry_fixtures() {
-    let doc = doc::ranking_doc();
-    let blocks: Vec<doc::Block> = doc::read(&doc)
+    let doc = doc::RANKING.text();
+    let blocks: Vec<doc::Block> = doc::RANKING
+        .read(&doc)
         .expect("ranking.md reads")
         .into_iter()
         .filter(|block| block.kind == "entry" || block.kind == "parsed")
