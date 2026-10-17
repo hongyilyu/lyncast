@@ -184,6 +184,8 @@ fn query_prints_the_doc_rows() {
         blocks.len(),
         failures.join("\n")
     );
+    fs::remove_dir_all(&tree).unwrap();
+    fs::remove_dir_all(&out_dir).unwrap();
 }
 
 /// A write that fails exits 1, even when the error message cannot be written either, and a usage
