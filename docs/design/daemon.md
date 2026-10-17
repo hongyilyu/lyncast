@@ -16,11 +16,15 @@ The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
 The kernel releases the lock when the process exits, however it exits. A `Quit` command also removes the socket. The lock file stays, because removing it would let a second daemon lock a new file while the first still holds the old one.
 
-If the daemon cannot start the thread that accepts connections or the one that writes the visits, it prints `lyncast: not started: <error>` and exits 1.
+If the daemon cannot start the thread that writes its warnings, the one that accepts connections, or the one that writes the visits, it prints `lyncast: not started: <error>` and exits 1. The warnings thread is the first that the daemon starts, so [the session of a daemon that can start no thread](#a-stderr-that-does-not-drain-holds-up-no-start-no-quit-and-no-exit) shows its failure alone. No session can fail a later thread alone, so that each later thread that cannot start fails the start with the same line is read in source: each starts through `thread::Builder`, and the start hands its error to `not_started` in `crates/lyncast/src/daemon/serve.rs`.
 
 Without `XDG_RUNTIME_DIR`, the daemon and every client print `lyncast: XDG_RUNTIME_DIR is not set` and exit 1, as Wayland clients refuse to run without it. A socket path holds at most 107 bytes, so the tests put `XDG_RUNTIME_DIR` under `/tmp`, as `scripts/test-env.sh` does.
 
 The daemon reads its environment once, at start. The app scan reads `XDG_DATA_HOME`, `XDG_DATA_DIRS`, `PATH`, the locale variables, and `XDG_CURRENT_DESKTOP` there, with `HOME` in place of an unset `XDG_DATA_HOME`, and Reload Apps scans again with the same values. The visits use the same data home, and Open Config reads `XDG_CONFIG_HOME`, or `HOME` in its place, from the same start. A client's environment changes nothing but the socket path.
+
+## One thread writes the warnings
+
+The daemon prints each warning, such as a file it cannot read or a write that failed, as one line on stderr that starts with `lyncast: `. One thread writes every warning, so a stderr that stops draining, such as a pipe that no one reads, holds up that thread and no request: the daemon still starts and answers. Up to 8 warnings wait for the thread. A warning that does not fit is dropped, and once stderr drains, `lyncast: 1 warning was dropped while stderr was full` or `lyncast: <n> warnings were dropped while stderr was full` follows the warnings that waited. The start waits up to 1 s for its warnings before it binds the socket, so a client that the socket answers finds them on stderr. Quit waits the same before it replies. A daemon that stops on an error, at start or later, hands why to the same thread as its last line, after its warnings and the count of those dropped, and waits the same for them before it exits. The last line is never dropped, and a stderr that does not drain keeps no daemon from exiting: what still waits for stderr then is lost. A daemon whose warnings thread cannot start has no thread to hand its last line to, so it writes the line itself, in one write that a timer cuts off after 1 s, and exits 1 either way. The write unblocks the timer's signal on its thread, because a process inherits its signal mask, so a daemon started with that signal blocked still exits.
 
 ## The CLI sends one request and prints the reply
 
@@ -90,14 +94,14 @@ Log Out skips niri's own prompt, because lyncast has already asked. `XDG_CONFIG_
 
 Quit goes in this order:
 
-1. It removes the socket, so no new client connects. A request that still arrives, on a connection opened before, gets `failed` with `the daemon is quitting` at once while steps 2 and 3 wait. One that arrives during step 4 waits until the process exits, up to 1 s, and then gets that reply or finds the connection closed. Either way it runs nothing.
+1. It removes the socket, so no new client connects. A request that still arrives, on a connection opened before, gets `failed` with `the daemon is quitting` at once while steps 2 and 3 wait. One that arrives during step 4 waits until the process exits, up to 2 s, the 1 s for the warnings and the 1 s for the replies, and then gets that reply or finds the connection closed. Either way it runs nothing.
 2. It waits for the work in flight, such as a program the runner is starting, and sends each reply to its client. So a client exits 1 only when its program did not start.
-3. It waits for the last write of the visits, gives up the lock, and replies. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit.
-4. It waits up to 1 s for its replies, Quit's among them, to be written, and exits 0. The exit closes every connection, so it would cut off a reply that is still being written.
+3. It waits for the last write of the visits and gives up the lock. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit.
+4. It waits up to 1 s for its warnings to reach stderr and replies. Then it waits up to 1 s more for its replies, Quit's among them, to be written, and exits 0. The exit closes every connection, so it would cut off a reply that is still being written.
 
-Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 6 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time.
+Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 7 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time.
 
-Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it sends the reply and waits up to 1 s for the replies to be written. Plan step 7's palette host has to follow the same steps.
+Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. Plan step 7's palette host has to follow the same steps.
 
 ## The runner starts programs, and tests swap in a recorder
 
@@ -213,6 +217,8 @@ A `session` block is a terminal transcript against one environment:
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+- `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
+- `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
 - `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, as the `THREAD` constant in `crates/lyncast/src/daemon/store.rs` spells it. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
 
 At the end of a block the test stops any daemon still running.
@@ -768,6 +774,60 @@ $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/ranking.json: not saved: Is a directory (os error 21)
 $ ls data/lyncast
 ranking.json
+```
+
+### A stderr that does not drain holds up no start, no Quit, and no exit
+
+Here the daemon's stderr is full before it starts, so its warning about `ranking.json` waits. The start waits 1 s for it and then binds, so 1 s or more has passed since the line before the start, and the daemon answers. Once the test reads what filled the pipe, the warning goes through before Quit replies.
+
+```session
+$ mkdir -p data/lyncast && echo not json > data/lyncast/ranking.json
+$ date +%s%N > before
+$ stall-stderr
+$ lyncast daemon --headless
+$ [ $(( $(date +%s%N) - $(cat before) )) -ge 1000000000 ] && echo 1 s or more
+1 s or more
+$ lyncast status
+closed
+$ drain-stderr
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+stderr: lyncast: $TREE/data/lyncast/ranking.json: expected ident at line 1 column 2; moved it to ranking.json.bad
+```
+
+Here stderr stays full through Quit. Quit replies after its 1 s for the warning, and it waits for the reply to be written before the process exits, so the client still prints `ran cmd:quit`. The warning never reaches stderr. A second daemon finds the lock taken, hands why to the warnings thread, waits 1 s for it, and exits 1, though nothing reaches its stderr. `quit_replies_while_stderr_does_not_drain` in `crates/lyncast/tests/daemon.rs` runs this block five more times with each of its processes on one CPU, where a Quit that does not wait for its reply loses it.
+
+```session stalled
+$ mkdir -p data/lyncast && echo not json > data/lyncast/ranking.json
+$ stall-stderr
+$ lyncast daemon --headless
+$ date +%s%N > before
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ [ $(( $(date +%s%N) - $(cat before) )) -ge 1000000000 ] && echo 1 s or more
+1 s or more
+$ wait-exit
+$ lyncast daemon --headless
+$ date +%s%N > before
+$ stall-stderr
+$ lyncast daemon --headless
+exit: 1
+$ [ $(( $(date +%s%N) - $(cat before) )) -ge 1000000000 ] && echo 1 s or more
+1 s or more
+```
+
+Here the daemon can start no thread, so the thread that writes its warnings does not start, and the daemon writes why itself. With a stderr that does not drain, its write gives up after 1 s, though the daemon started with the timer's signal blocked, so it writes nothing and still exits 1. A block's stderr is full from the start, so `a_write_to_a_full_pipe_gives_up_at_its_wait` in `crates/lyncast/src/warning.rs` hands the write a pipe that is full when the write begins, as another writer can leave it just before.
+
+```session
+$ no-threads
+$ lyncast daemon --headless
+stderr: lyncast: not started: Resource temporarily unavailable (os error 11)
+exit: 1
+$ no-threads
+$ stall-stderr
+$ lyncast daemon --headless
+exit: 1
 ```
 
 ### One daemon owns the socket

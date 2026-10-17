@@ -1,14 +1,10 @@
-//! Who owns the socket: a daemon after one that died, two daemons that start at once, and a
-//! daemon that cannot start a thread. A session cannot kill a daemon, start two together, or
-//! limit a daemon's threads, so these check only exit codes, the `lyncast: ` line, and the
+//! Who owns the socket: a daemon after one that died, and two daemons that start at once. A
+//! session cannot kill a daemon or start two together, so these check only exit codes and the
 //! socket. docs/design/daemon.md's "One daemon owns the socket" session holds what they print.
 
 mod common;
 
-use std::fs;
-use std::io::{self, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use common::{Daemon, Runtime, ask, lyncast, poll};
 
@@ -68,65 +64,4 @@ fn of_two_daemons_started_at_once_one_serves() {
         1,
         "the winner still runs"
     );
-}
-
-/// Gives the process that `command` starts an `RLIMIT_NPROC` of 0, so it can start no thread and
-/// no process, unless the kernel exempts its user, as it exempts root.
-fn no_threads(command: &mut Command) -> &mut Command {
-    // SAFETY: setrlimit is async-signal-safe, and the closure touches only its own locals.
-    unsafe {
-        command.pre_exec(|| {
-            let none = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            match libc::setrlimit(libc::RLIMIT_NPROC, &none) {
-                0 => Ok(()),
-                _ => Err(io::Error::last_os_error()),
-            }
-        })
-    }
-}
-
-/// Whether a process under [`no_threads`] can still start one. `timeout` starts its command in a
-/// process of its own, and it fails at once when it cannot.
-fn limit_exempt() -> bool {
-    let mut timeout = Command::new("timeout");
-    timeout
-        .args(["10", "true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    no_threads(&mut timeout).status().unwrap().success()
-}
-
-/// A daemon that cannot start a thread exits 1 with one `lyncast: ` line. Without a data home
-/// the accept thread is the first to start, and with one the writer of the visits is. Under an
-/// `RLIMIT_NPROC` of 0 no thread starts, unless the kernel exempts the user, as it exempts root,
-/// and then the test says it skipped.
-#[test]
-fn a_daemon_that_cannot_start_a_thread_exits_1() {
-    if limit_exempt() {
-        // libtest hides what eprintln! prints in a test that passes, and the skip has to show.
-        let _ = writeln!(
-            io::stderr(),
-            "a_daemon_that_cannot_start_a_thread_exits_1 skipped: RLIMIT_NPROC does not limit this user"
-        );
-        return;
-    }
-    for data_home in [false, true] {
-        let runtime = Runtime::new();
-        let mut command = daemon(&runtime);
-        if data_home {
-            command.env("XDG_DATA_HOME", runtime.path().join("data"));
-        }
-        no_threads(&mut command);
-        let mut daemon = Daemon::spawn(command, &runtime);
-        let code = poll(|| daemon.exited()).and_then(|status| status.code());
-        let stderr = fs::read_to_string(runtime.path().join("daemon.stderr")).unwrap();
-        assert_eq!(code, Some(1), "data home {data_home}: {stderr:?}");
-        assert!(
-            stderr.starts_with("lyncast: ") && stderr.lines().count() == 1,
-            "data home {data_home}: {stderr:?}"
-        );
-    }
 }

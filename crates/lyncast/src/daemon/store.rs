@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -17,6 +17,7 @@ use lyncast_core::rank::{Timestamp, Visit, Visits};
 use serde::{Deserialize, Serialize};
 
 use crate::files::{self, Unread};
+use crate::warning::warn;
 
 /// One member of the file.
 #[derive(Serialize, Deserialize)]
@@ -111,10 +112,13 @@ impl Store {
                     let why = format!(
                         "{error}; not moved to ranking.json.bad: {moved}; the visits stay in memory"
                     );
-                    warn(&path, &why);
+                    warn(format_args!("{}: {why}", path.display()));
                     return Ok((Visits::default(), None));
                 }
-                warn(&path, &format!("{error}; moved it to ranking.json.bad"));
+                warn(format_args!(
+                    "{}: {error}; moved it to ranking.json.bad",
+                    path.display()
+                ));
                 BTreeMap::new()
             }
         };
@@ -146,7 +150,7 @@ impl Store {
             .spawn(move || {
                 while let Some(bytes) = writer.next() {
                     if let Err(error) = write(&path, &bytes) {
-                        warn(&path, &format!("not saved: {error}"));
+                        warn(format_args!("{}: not saved: {error}", path.display()));
                     }
                 }
                 ended();
@@ -242,10 +246,4 @@ fn move_aside(path: &Path, bad: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-/// Prints a warning about the file on stderr.
-fn warn(path: &Path, message: &str) {
-    // eprintln! panics when stderr fails, which would take the daemon down.
-    let _ = writeln!(io::stderr(), "lyncast: {}: {message}", path.display());
 }

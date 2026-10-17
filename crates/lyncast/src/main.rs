@@ -6,8 +6,12 @@ mod apps;
 mod client;
 mod daemon;
 mod files;
+#[cfg(test)]
+#[path = "../tests/common/pipe.rs"]
+mod pipe;
 mod vars;
 mod view;
+mod warning;
 mod wire;
 
 use std::io::{self, Write};
@@ -85,7 +89,7 @@ fn main() -> ExitCode {
         Err(error) => return clap_exit(&error),
     };
     let done = match cli.command {
-        Cmd::Daemon { record, .. } => daemon::run(record),
+        Cmd::Daemon { record, .. } => return daemon::run(record),
         Cmd::Toggle => summon(&Request::Toggle),
         Cmd::Status => summon(&Request::Status),
         Cmd::Query { text, .. } => query(text),
