@@ -5,10 +5,12 @@
 mod actions;
 pub mod calc;
 mod command;
+mod fold;
 mod key;
 
 pub use actions::{ActionItem, Actions, Chord, DesktopAction, Subject, Verb};
 pub use command::Command;
+pub use fold::{Folded, fold};
 pub use key::{AppId, ClipId, Key, KeyError, Kind};
 
 /// One row of the root list. Its key, kind, and actions all come from `subject`.

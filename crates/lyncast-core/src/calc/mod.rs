@@ -8,7 +8,7 @@ mod ops;
 mod parse;
 mod quantity;
 
-use std::borrow::Cow;
+use crate::fold::narrow;
 
 /// Everything an answer depends on besides the query text. Currency adds the rate snapshot.
 #[derive(Clone, Debug, Default)]
@@ -73,11 +73,11 @@ pub fn evaluate(text: &str, env: &Env) -> Outcome {
 
 fn answer(text: &str, env: &Env) -> Option<Answer> {
     let text = text.trim();
-    // Folding shrinks text by at most 3 to 1, so longer raw text would be over the cap anyway.
+    // Narrowing shrinks text by at most 3 to 1, so longer raw text would be over the cap anyway.
     if text.len() > 3 * MAX_BYTES {
         return None;
     }
-    let text = fold(text);
+    let text = narrow(text);
     if text.len() > MAX_BYTES || is_search(&text) {
         return None;
     }
@@ -95,21 +95,6 @@ fn answer(text: &str, env: &Env) -> Option<Answer> {
         copy: shown.copy,
         target_badge: shown.words,
     })
-}
-
-/// Folds full-width forms (U+FF01 to U+FF5E) to ASCII and the ideographic space to a space.
-fn fold(text: &str) -> Cow<'_, str> {
-    let wide = |c: char| matches!(c, '\u{FF01}'..='\u{FF5E}' | '\u{3000}');
-    if !text.chars().any(wide) {
-        return Cow::Borrowed(text);
-    }
-    let narrow = |c: char| match c {
-        // The full-width forms sit 0xFEE0 above ASCII 0x21 to 0x7E.
-        '\u{FF01}'..='\u{FF5E}' => char::from((u32::from(c) - 0xFEE0) as u8),
-        '\u{3000}' => ' ',
-        c => c,
-    };
-    Cow::Owned(text.chars().map(narrow).collect())
 }
 
 /// Empty text and one ASCII word are searches, as in TinyCast. A date shape is a date the MVP
