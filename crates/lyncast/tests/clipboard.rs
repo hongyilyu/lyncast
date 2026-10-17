@@ -11,7 +11,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, ErrorKind, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use common::doc::{self, Block};
 use common::{BUDGET, Daemon, Ran, Runtime, World, poll, run_bounded, session, session_with};
 use wl_clipboard_rs::copy::{self, MimeSource, MimeType, Source};
-use wl_clipboard_rs::paste::Seat;
+use wl_clipboard_rs::paste::{self, ClipboardType, Seat};
 use wl_clipboard_rs::watch::{self, ClipboardEvent, Watcher};
 
 /// Where each block's tree goes, named by the block's line.
@@ -94,7 +94,7 @@ fn every_session_block_runs_as_the_doc_says() {
 fn every_clipboard_block_runs_as_the_doc_says() {
     let fixtures = fixtures();
     let trees = fresh("clipboard");
-    let failures: Vec<String> = blocks(&fixtures, "clipboard", 9)
+    let failures: Vec<String> = blocks(&fixtures, "clipboard", 19)
         .into_iter()
         .flat_map(|block| {
             let (runtime, display) = Runtime::compositor();
@@ -163,6 +163,72 @@ fn quit_ends_the_capture_thread_at_once() {
     world.passed();
 }
 
+/// How many times [`copies_at_once_record_in_the_order_the_compositor_took_them`] copies two
+/// rows at once.
+const ROUNDS: usize = 10;
+
+/// Copies run one at a time on the copier, so each reply means that copy's own selection was
+/// taken, and the history records copies in the order the compositor took them. A block runs one
+/// line at a time, so this test copies two rows at once itself, ten times, and expects what the
+/// copy block shows: each `copied clip <id>` line, and a first row that holds what the clipboard
+/// holds.
+#[test]
+fn copies_at_once_record_in_the_order_the_compositor_took_them() {
+    let fixtures = fixtures();
+    let (runtime, display) = Runtime::compositor();
+    let wayland = [("WAYLAND_DISPLAY".to_owned(), display)];
+    let tree = fresh("at-once").join("tree");
+    let world = World::within(&fixtures, tree, runtime, &wayland);
+    let (daemon, _) = world.command("$ lyncast daemon --headless");
+    let daemon = Daemon::start(daemon, &world.runtime).unwrap();
+    let mut helpers = Helpers::new(&world);
+    let mut run = |line: &str| helpers.run(line).expect(line);
+    let ok = (Vec::new(), Vec::new(), Some(0));
+    for line in [
+        "$ seed text/plain;charset=utf-8 alpha",
+        "$ wait-clips 1",
+        "$ seed text/plain;charset=utf-8 beta",
+        "$ wait-clips 2",
+    ] {
+        assert_eq!(run(line), ok, "{line}");
+    }
+    for round in 0..ROUNDS {
+        let copies: Vec<(Child, PathBuf)> = [1, 2]
+            .into_iter()
+            .map(|id| {
+                let (mut copy, _) = world.command(&format!("$ lyncast activate clip:{id}"));
+                let out = world.out.join(format!("copy-{id}"));
+                let stdout = fs::File::create(&out).unwrap();
+                (copy.stdout(stdout).spawn().unwrap(), out)
+            })
+            .collect();
+        for ((mut copy, out), id) in copies.into_iter().zip([1, 2]) {
+            if poll(|| copy.try_wait().unwrap()).is_none() {
+                let _ = copy.kill();
+                panic!("round {round}: the copy of clip {id} ran over the test's time budget");
+            }
+            assert_eq!(
+                fs::read_to_string(out).unwrap(),
+                format!("copied clip {id}\n"),
+                "round {round}"
+            );
+        }
+        let (list, _) = world.command("$ lyncast clip list --json");
+        let (list, _, _) = run_bounded(list, &world.out).unwrap();
+        let first = String::from_utf8(list).unwrap();
+        let first = first.lines().next().unwrap().to_owned();
+        assert_eq!(run("$ paste text/plain;charset=utf-8 got"), ok);
+        let pasted = fs::read_to_string(world.tree.join("got")).unwrap();
+        assert!(
+            first.ends_with(&format!("\"preview\":\"{pasted}\"}}")),
+            "round {round}: the clipboard holds {pasted:?}, and the first row is {first}"
+        );
+    }
+    drop(helpers);
+    drop(daemon);
+    world.passed();
+}
+
 /// The helper lines of one `clipboard` block, and the seeders still serving.
 struct Helpers<'w> {
     world: &'w World,
@@ -211,6 +277,14 @@ impl<'w> Helpers<'w> {
                 let line = self.world.substitute(&line["$ wait-stderr ".len()..]);
                 self.wait_stderr(&line)
             }
+            ["paste", mime, path] => {
+                let mut helper = self.helper("paste");
+                helper.env("LYNCAST_TYPE", mime).env("LYNCAST_PATH", path);
+                self.ask(helper)
+            }
+            ["offers"] => self.ask(self.helper("offers")),
+            ["freeze-compositor"] => self.signal_compositor(libc::SIGSTOP),
+            ["thaw-compositor"] => self.signal_compositor(libc::SIGCONT),
             ["stop-compositor"] => {
                 let status = self.world.runtime.stop_compositor().unwrap();
                 (Vec::new(), Vec::new(), status.code())
@@ -289,6 +363,39 @@ impl<'w> Helpers<'w> {
         (printed, stderr, code)
     }
 
+    /// Runs a helper to its end, and gives the lines it means and its stderr and exit code.
+    fn ask(&self, helper: Command) -> Ran {
+        let Some((stdout, stderr, code)) = run_bounded(helper, &self.world.out) else {
+            return over("the helper");
+        };
+        let said: String = String::from_utf8_lossy(&stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix(SAID))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        (said.into_bytes(), stderr, code)
+    }
+
+    /// Sends `signal` to the block's anvil, whose pid `scripts/test-env.sh` writes on the second
+    /// line of `$RUNTIME/pids`, after Xvfb's.
+    fn signal_compositor(&self, signal: libc::c_int) -> Ran {
+        let pids = fs::read_to_string(self.world.runtime.path().join("pids")).unwrap_or_default();
+        let Some(anvil) = pids
+            .lines()
+            .nth(1)
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+        else {
+            return (
+                Vec::new(),
+                b"no anvil pid in $RUNTIME/pids\n".to_vec(),
+                Some(1),
+            );
+        };
+        // SAFETY: kill takes a pid and a signal, and touches no memory.
+        let sent = unsafe { libc::kill(anvil, signal) };
+        (Vec::new(), Vec::new(), Some(sent))
+    }
+
     /// Waits until `$RUNTIME/daemon.stderr` holds `line`. Fails the line with what it holds
     /// when the wait runs out.
     fn wait_stderr(&self, line: &str) -> Ran {
@@ -348,6 +455,31 @@ fn helper() {
             .unwrap();
     };
     match op.to_str() {
+        Some("paste") => {
+            let mime = var("LYNCAST_TYPE").into_string().unwrap();
+            let mime = match mime.as_str() {
+                "any" => paste::MimeType::Any,
+                mime => paste::MimeType::Specific(mime),
+            };
+            match paste::get_contents(ClipboardType::Regular, Seat::Unspecified, mime) {
+                Ok((mut pipe, _)) => {
+                    let mut bytes = Vec::new();
+                    pipe.read_to_end(&mut bytes).unwrap();
+                    fs::write(var("LYNCAST_PATH"), bytes).unwrap();
+                }
+                Err(paste::Error::ClipboardEmpty) => say("empty"),
+                Err(error) => panic!("paste: {error}"),
+            }
+        }
+        Some("offers") => match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+            Ok(types) => {
+                let mut types: Vec<String> = types.into_iter().collect();
+                types.sort();
+                types.iter().for_each(|mime| say(mime));
+            }
+            Err(paste::Error::ClipboardEmpty) => say("empty"),
+            Err(error) => panic!("offers: {error}"),
+        },
         Some("seed") => {
             let bytes = match env::var_os("LYNCAST_FILE") {
                 Some(path) => fs::read(path).unwrap(),

@@ -1,13 +1,14 @@
 //! The capture thread. It owns the `wl-clipboard-rs` `Watcher`, whose `next_event` blocks with
-//! no timeout, so no other thread waits on the compositor. It drops lyncast's own writes and the
-//! password manager's, reads one representation of every other offer, up to 25 MiB, and hands
-//! each entry to the daemon. It neither writes nor syncs.
+//! no timeout, so no other thread waits on the compositor. It tells the copier of each of
+//! lyncast's own writes, drops them and the password manager's, reads one representation of every
+//! other offer, up to 25 MiB, and hands each entry to the daemon. It neither writes nor syncs.
 //! docs/design/clipboard-and-paste.md describes the order.
 
 use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,10 +16,11 @@ use wl_clipboard_rs::paste::{self, Seat};
 use wl_clipboard_rs::utils::PASSWORD_MANAGER_HINT_MIME_TYPE;
 use wl_clipboard_rs::watch::{CancelHandle, ClipboardEvent, ClipboardType, Watcher};
 
-use super::{Entry, GNOME_FILES, MAX_BYTES, OWN, URI_LIST};
+use super::copy::Copier;
+use super::{Entry, GNOME_FILES, MAX_BYTES, OWN, URI_LIST, marked};
 
 /// How long the reads of one offer may take in all before the entry is dropped.
-const DEADLINE: Duration = Duration::from_secs(2);
+pub const DEADLINE: Duration = Duration::from_secs(2);
 
 /// What the capture thread tells the daemon.
 pub enum Seen {
@@ -40,21 +42,23 @@ pub struct Capture {
 
 impl Capture {
     /// Connects to the compositor that `WAYLAND_DISPLAY` names and starts the capture thread,
-    /// which calls `seen` with each entry. Fails when the compositor cannot be reached or the
-    /// thread cannot start.
-    pub fn start(mut seen: impl FnMut(Seen) + Send + 'static) -> Result<Capture, String> {
+    /// which calls `seen` with each entry, and the copier, which the capture thread tells of each
+    /// marked offer. Fails when the compositor cannot be reached or a thread cannot start.
+    pub fn start(mut seen: impl FnMut(Seen) + Send + 'static) -> Result<(Capture, Copier), String> {
         let mut watcher = Watcher::new(ClipboardType::Regular, Seat::Unspecified)
             .map_err(|error| error.to_string())?;
         let cancel = watcher.cancel_handle();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancelled);
+        let (marks, marked) = mpsc::channel();
+        let copier = Copier::start(marked).map_err(|error| error.to_string())?;
         thread::Builder::new()
             .spawn(move || {
-                let ending = watch(&mut watcher, &stop, &mut seen);
+                let ending = watch(&mut watcher, &stop, &marks, &mut seen);
                 seen(ending);
             })
             .map_err(|error| error.to_string())?;
-        Ok(Capture { cancel, cancelled })
+        Ok((Capture { cancel, cancelled }, copier))
     }
 
     /// Stops the thread after the offer in hand.
@@ -64,8 +68,14 @@ impl Capture {
     }
 }
 
-/// Hands every entry to `seen` until the `Watcher` is cancelled or fails.
-fn watch(watcher: &mut Watcher, cancelled: &AtomicBool, seen: &mut impl FnMut(Seen)) -> Seen {
+/// Hands every entry to `seen`, and tells `marks` the number of every copy whose marked offer it
+/// sees, until the `Watcher` is cancelled or fails.
+fn watch(
+    watcher: &mut Watcher,
+    cancelled: &AtomicBool,
+    marks: &Sender<u64>,
+    seen: &mut impl FnMut(Seen),
+) -> Seen {
     loop {
         let event = watcher.next_event();
         if cancelled.load(Ordering::Acquire) {
@@ -77,6 +87,11 @@ fn watch(watcher: &mut Watcher, cancelled: &AtomicBool, seen: &mut impl FnMut(Se
                 mut offer,
                 ..
             })) => {
+                if let Some(number) = mime_types.iter().find_map(|mime| marked(mime)) {
+                    // The copier ends only with the daemon, and then no copy waits for the mark.
+                    let _ = marks.send(number);
+                    continue;
+                }
                 let skipped = |mime: &String| {
                     mime.starts_with(OWN) || mime == PASSWORD_MANAGER_HINT_MIME_TYPE
                 };

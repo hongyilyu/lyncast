@@ -5,30 +5,58 @@
 
 mod blob;
 mod capture;
+mod copy;
 mod db;
 
 pub use capture::{Capture, Seen};
+pub use copy::{Copier, Payload};
 
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::process;
 use std::sync::Arc;
 
 use lyncast_core::ClipId;
-use lyncast_core::clip::{self, Place, Retention, TextKind};
+use lyncast_core::clip::{self, Delivery, Handed, Place, Retention, TextKind};
 use lyncast_core::rank::Timestamp;
 
 use crate::warning::warn;
 use blob::Hash;
 
-/// The family of types that mark lyncast's own writes.
+/// The family of types that mark lyncast's own writes. Each copy offers [`marker`] with the
+/// daemon's process ID and the copy's number.
 const OWN: &str = "application/x-lyncast-own";
+
+/// The type that marks this process's copy numbered `number`. It holds the same bytes as the
+/// payload, so a reader that takes the first type still gets them.
+fn marker(number: u64) -> String {
+    format!("{OWN};copy={}.{number}", process::id())
+}
+
+/// The number of the copy of this process that `mime` marks. Another lyncast process numbers its
+/// copies from 1 too, so its marks name its own process.
+fn marked(mime: &str) -> Option<u64> {
+    let (pid, number) = mime
+        .strip_prefix(OWN)?
+        .strip_prefix(";copy=")?
+        .split_once('.')?;
+    if pid.parse() == Ok(process::id()) {
+        number.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// The type a copy offers a text as, and a recorded write of text is read as.
+const TEXT: &str = "text/plain;charset=utf-8";
 
 /// The two types of a list of files.
 const URI_LIST: &str = "text/uri-list";
 const GNOME_FILES: &str = "x-special/gnome-copied-files";
 
-/// The most bytes a clip holds. A read that finds more drops the entry.
+/// The most bytes a clip holds. A read that finds more drops the entry, and a blob that holds
+/// more does not copy.
 const MAX_BYTES: usize = 25 << 20;
 
 /// What a row holds.
@@ -70,9 +98,19 @@ impl Content {
 }
 
 /// What a clip holds: a text or a list of file URIs, or an image's bytes.
+#[derive(Clone)]
 enum Body {
     Text(Arc<str>),
     Image(Arc<[u8]>),
+}
+
+impl Body {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Body::Text(text) => text.as_bytes(),
+            Body::Image(bytes) => bytes,
+        }
+    }
 }
 
 /// What a clip derives from its bytes when they arrive. The database keeps it beside the bytes,
@@ -265,6 +303,33 @@ impl Clips {
         self.prune(now);
     }
 
+    /// Records a write that a copy has seen the compositor take. A row of the history moves to the
+    /// front unless it is pinned, and text is recorded as a capture of it would be.
+    pub fn wrote(&mut self, delivery: &Delivery, now: Timestamp) {
+        match delivery.handed() {
+            Handed::Clip(id) => self.touch(id, now),
+            Handed::Text(text) => self.record(Entry::text(text, TEXT.to_owned()), now),
+        }
+    }
+
+    /// What a copy of `delivery` offers, and where its bytes are, or why it cannot copy.
+    pub fn payload(&self, delivery: &Delivery) -> Result<Payload, String> {
+        let id = match delivery.handed() {
+            Handed::Clip(id) => id,
+            Handed::Text(text) => return Ok(Payload::text(text)),
+        };
+        let row = self.get(id).ok_or_else(|| format!("no clip {}", id.0))?;
+        let source = match &self.store {
+            Store::Disk(Some(writer)) => copy::Source::Stored(writer.reader(), id),
+            Store::Disk(None) => return Err("not copied: the writer of the clips has ended".into()),
+            Store::Memory(bodies) => match bodies.get(&id) {
+                Some(body) => copy::Source::Held(body.clone()),
+                None => return Err(format!("no clip {}", id.0)),
+            },
+        };
+        Ok(Payload::new(row.content, row.mime.clone(), source))
+    }
+
     /// Every row in screen order.
     pub fn rows(&self) -> Vec<&Row> {
         let mut rows: Vec<&Row> = self.rows.iter().collect();
@@ -443,10 +508,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("line {}: no row holds {text}", block.line))
             };
             match line.split_once(' ') {
-                Some(("capture", text)) => clips.record(
-                    Entry::text(text, "text/plain;charset=utf-8".to_owned()),
-                    now,
-                ),
+                Some(("capture", text)) => clips.record(Entry::text(text, TEXT.to_owned()), now),
                 Some(("pin", text)) => clips.pin(held(&clips, text), now),
                 Some(("unpin", text)) => clips.unpin(held(&clips, text), now),
                 Some(("wait", wait)) => {

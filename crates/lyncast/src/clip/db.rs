@@ -1,8 +1,8 @@
 //! `$XDG_DATA_HOME/lyncast/clips.sqlite3` and `blobs/`, which only the writer thread touches. It
 //! opens the file and loads every row's metadata, then applies each change in the order the
-//! daemon made it, so the owner loop never waits on the disk. The connection holds SQLite's
-//! exclusive lock until the writer ends, so a second daemon with the same data home cannot load
-//! or write the file.
+//! daemon made it and reads a row's bytes for a copy after every change before it, so the owner
+//! loop never waits on the disk. The connection holds SQLite's exclusive lock until the writer
+//! ends, so a second daemon with the same data home cannot load or write the file.
 
 use std::fmt::Display;
 use std::fs::{self, File};
@@ -21,8 +21,8 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::blob::{self, Hash};
-use super::{Body, Content, Meta, Row};
-use crate::files;
+use super::{Body, Content, MAX_BYTES, Meta, Row};
+use crate::files::{self, Unread};
 use crate::warning::warn;
 
 /// The table. A text or a file list keeps its bytes in `body`, and an image's bytes live in the
@@ -54,6 +54,10 @@ const LOAD_WAIT: Duration = Duration::from_secs(5);
 
 /// The most bytes of new rows that may wait for the writer.
 pub const MAX_PENDING: u64 = 64 << 20;
+
+/// How long a copy waits for the writer to read a row's bytes, after the changes before it. Copies
+/// run one at a time, so this also bounds how long a stalled disk holds up each copy behind it.
+const READ_WAIT: Duration = Duration::from_secs(5);
 
 /// What a load finds.
 pub struct Loaded {
@@ -225,6 +229,12 @@ pub enum Change {
 /// What the writer thread reads.
 enum Command {
     Change(Change),
+    /// What row `id` holds, read after every change before it, so a row the writer has not
+    /// written yet reads too.
+    Read {
+        id: ClipId,
+        body: Sender<Result<Body, String>>,
+    },
     /// The writer ends once it has applied every change before this one.
     Close,
 }
@@ -235,6 +245,30 @@ pub struct Writer {
     /// The bytes of the new rows handed over that the writer has not saved yet.
     pending: Arc<AtomicU64>,
     path: PathBuf,
+}
+
+/// A handle that reads rows through the writer, for a copy on another thread.
+pub struct Reader {
+    commands: Sender<Command>,
+}
+
+impl Reader {
+    /// What row `id` holds, or why it cannot be read, within [`READ_WAIT`].
+    pub fn read(&self, id: ClipId) -> Result<Body, String> {
+        let (body, read) = mpsc::channel();
+        let ended = || "not copied: the writer of the clips has ended".to_owned();
+        self.commands
+            .send(Command::Read { id, body })
+            .map_err(|_| ended())?;
+        match read.recv_timeout(READ_WAIT) {
+            Ok(body) => body,
+            Err(RecvTimeoutError::Timeout) => Err(format!(
+                "not copied: the writer of the clips did not answer within {} s",
+                READ_WAIT.as_secs()
+            )),
+            Err(RecvTimeoutError::Disconnected) => Err(ended()),
+        }
+    }
 }
 
 impl Writer {
@@ -306,6 +340,12 @@ impl Writer {
     pub fn close(&self) {
         let _ = self.commands.send(Command::Close);
     }
+
+    pub fn reader(&self) -> Reader {
+        Reader {
+            commands: self.commands.clone(),
+        }
+    }
 }
 
 /// Applies each change until Close. A change that fails prints a warning and leaves the file as
@@ -326,6 +366,9 @@ fn write(
     for command in inbox {
         match command {
             Command::Close => return,
+            Command::Read { id, body } => {
+                let _ = body.send(read(connection, &blobs, id));
+            }
             Command::Change(change) => {
                 let (inserted, bytes) = match &change {
                     Change::Insert { id, meta, .. } => (Some(*id), meta.bytes),
@@ -477,4 +520,33 @@ fn apply(
         }
     }
     Ok(())
+}
+
+/// What row `id` holds: its text or file list from the file, or its image from the blob.
+fn read(connection: &Connection, blobs: &Path, id: ClipId) -> Result<Body, String> {
+    let row: Option<(Content, Option<String>, Hash)> = connection
+        .query_row(
+            "SELECT kind, body, hash FROM clips WHERE id = ?1",
+            [id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| format!("not copied: {error}"))?;
+    let failed = |reason: &str| format!("clip {}: {reason}", id.0);
+    match row {
+        None => Err(format!("no clip {}", id.0)),
+        Some((Content::Image, _, hash)) => {
+            match files::read_regular(&blob::path(blobs, hash), MAX_BYTES as u64) {
+                Ok(bytes) => Ok(Body::Image(bytes.into())),
+                Err(Unread::Io(error)) if error.kind() == ErrorKind::NotFound => {
+                    Err(failed("blob missing"))
+                }
+                Err(Unread::Io(error)) => Err(failed(&format!("blob: {error}"))),
+                Err(Unread::NotRegular) => Err(failed("blob: not a regular file")),
+                Err(Unread::TooLarge) => Err(failed("blob: over 25 MiB")),
+            }
+        }
+        Some((_, Some(text), _)) => Ok(Body::Text(text.into())),
+        Some((_, None, _)) => Err(failed("no text")),
+    }
 }

@@ -1,9 +1,9 @@
 //! The socket and the threads around the daemon's state. An accept thread starts one thread per
 //! connection, which reads the request line, parses it, and passes it to the owner loop over a
 //! channel. The owner loop holds the [`Daemon`] and never touches a socket. Work that blocks runs
-//! on a worker thread, whose result comes back over the same channel. No [`Daemon`] method
-//! blocks, and only this headless host waits, on its channel. Plan step 7 makes the same calls
-//! from a GPUI task that reads an async channel.
+//! on a worker thread, and a copy on the copier thread, and each result comes back over the same
+//! channel. No [`Daemon`] method blocks, and only this headless host waits, on its channel. Plan
+//! step 7 makes the same calls from a GPUI task that reads an async channel.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -20,9 +20,9 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Writer, quitting};
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, Writer, quitting};
 use crate::apps;
-use crate::clip::{Capture, Clips, Seen};
+use crate::clip::{Capture, Clips, Copier, Seen};
 use crate::config;
 use crate::vars::Vars;
 use crate::warning;
@@ -131,16 +131,17 @@ pub fn run(record: Option<PathBuf>) -> Result<(), String> {
         ended(Writer::Clips),
     )
     .map_err(not_started)?;
-    let capture = match vars.wayland_display {
+    let (capture, copier) = match vars.wayland_display {
         Some(_) => {
             let events = events.clone();
             let seen = move |seen| {
                 let _ = events.send(Event::Seen(seen));
             };
-            let started = Capture::start(seen);
-            Some(started.map_err(|error| format!("not started: {error}"))?)
+            let (capture, copier) =
+                Capture::start(seen).map_err(|error| format!("not started: {error}"))?;
+            (Some(capture), Some(copier))
         }
-        None => None,
+        None => (None, None),
     };
     let daemon = Daemon::new(vars, index, visits, store, clips, capture);
     let socket = runtime.join(wire::SOCKET);
@@ -149,6 +150,7 @@ pub fn run(record: Option<PathBuf>) -> Result<(), String> {
     let host = Host {
         events,
         runner: record.map_or(Runner::Real, Runner::recorder),
+        copier,
         unwritten: Unwritten::default(),
     };
     serve(daemon, host, inbox, listener, Claim { lock, socket })
@@ -266,6 +268,8 @@ struct Host {
     /// A sender for the worker threads.
     events: Sender<Event>,
     runner: Runner,
+    /// The copier, which runs one copy at a time. `None` without a compositor.
+    copier: Option<Copier>,
     unwritten: Unwritten,
 }
 
@@ -305,25 +309,40 @@ impl Host {
         }
     }
 
-    /// Runs the job on a worker thread, whose result comes back as an event. A job whose thread
-    /// cannot start finishes at once, failed.
+    /// Runs the job's task on a worker thread, or hands its copy to the copier, and its result
+    /// comes back as an event. A task whose thread cannot start finishes at once, failed.
     fn start(&mut self, daemon: &mut Daemon, job: Job, reply_to: ReplyTo) {
+        let Job { work, success } = job;
+        let task = match work {
+            Work::Task(task) => task,
+            Work::Copy(payload) => {
+                let copier = self
+                    .copier
+                    .as_ref()
+                    .expect("the daemon hands out a copy only with a compositor");
+                let events = self.events.clone();
+                return copier.copy(payload, move |copied| {
+                    let done = copied.map(|()| Done::Copied);
+                    let _ = events.send(Event::Finished(success, done, reply_to));
+                });
+            }
+        };
         let (events, runner) = (self.events.clone(), self.runner.clone());
-        // The job goes to the thread once it runs, so a thread that cannot start leaves it here.
-        let (hand, handed) = mpsc::channel();
+        // The task goes to the thread once it runs, so a thread that cannot start leaves it here.
+        let (hand, handed) = mpsc::channel::<(Task, Success, ReplyTo)>();
         let started = thread::Builder::new().spawn(move || {
-            if let Ok((Job { work, success }, reply_to)) = handed.recv() {
-                let done = work.run(&runner);
+            if let Ok((task, success, reply_to)) = handed.recv() {
+                let done = task.run(&runner);
                 let _ = events.send(Event::Finished(success, done, reply_to));
             }
         });
         match started {
             Ok(_) => {
-                let _ = hand.send((job, reply_to));
+                let _ = hand.send((task, success, reply_to));
             }
             Err(error) => {
                 let done = Err(format!("not run: {error}"));
-                let reply = daemon.finish(job.success, done, now());
+                let reply = daemon.finish(success, done, now());
                 self.unwritten.send(reply_to, reply);
             }
         }

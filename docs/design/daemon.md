@@ -59,10 +59,10 @@ The exit code is part of the contract:
 
 An `activate` request carries a key, the chord or verb, the confirmation, and the query. The daemon does this:
 
-1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from evaluating the key's text again. If the state has no such row, the request fails, for example with `no app nope.desktop`, `no clip 9`, or `calc:10/0 has no answer`.
+1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from the key's text. If the state has no such row, the request fails, for example with `no app nope.desktop` or `no clip 9`.
 2. It takes the item from the subject's `Actions`: `on(chord)` for a chord, or `pick(verb)` for a verb. If `pick` finds nothing, the request fails with `<key> has no action <verb>`.
 3. If the item runs a command that confirms, and the request is not confirmed, the daemon replies with a confirmation request and runs nothing. Log Out, Reboot, and Power Off confirm. The CLI prints `lyncast: Reboot? Run again with --yes to confirm.` and exits 1.
-4. It runs the item. Copy items need the clipboard, which comes in plan step 6. Until then they fail with `not copied: no Wayland compositor`. Items that start a program go to the runner.
+4. It runs the item. Copy Answer evaluates the key's text again, once, and a text with no answer fails with `calc:10/0 has no answer`. Copy items need the compositor, so without `WAYLAND_DISPLAY` they fail with `not copied: no Wayland compositor`, and with it they go to the copier ([clipboard and paste](clipboard-and-paste.md#a-copy-waits-for-the-compositor-to-take-it)). Items that start a program go to the runner.
 5. On success it records a visit for `Launch`, `LaunchAction`, and every `Run` but Quit's, and replies with the line below. A success closes the summon, except Clipboard History's, which opens it. On failure nothing is recorded and the summon stays as it was.
 
 | Item | Success line |
@@ -70,12 +70,12 @@ An `activate` request carries a key, the chord or verb, the confirmation, and th
 | `Launch(app)` | `launched app:<id>` |
 | `LaunchAction(app, action)` | `launched app:<id> <action id>` |
 | `Run(command)` | `ran cmd:<id>` |
-| `CopyAnswer(query)` | `copied <answer>`, from plan step 6 |
-| `CopyClip(clip)` | `copied clip <id>`, from plan step 6 |
-| `CopyPath(app)` | `copied <path>`, from plan step 6 |
+| `CopyAnswer(query)` | `copied <answer>` |
+| `CopyClip(clip)` | `copied clip <id>` |
+| `CopyPath(app)` | `copied <path>` |
 | `Pin(clip)`, `Unpin(clip)`, `Delete(clip)` | `pinned clip <id>`, `unpinned clip <id>`, `deleted clip <id>` |
 
-Starting a program, Open Config, and Reload Apps run on a worker thread, and the daemon answers other requests while they run. Their reply comes when the work ends. If the worker thread cannot start, the request fails at once with `not run: <error>`, nothing is recorded, and Quit does not wait for it. Two Reload Apps can overlap, and their scans can end in either order. Each scan has a number in the order it started. A scan's apps replace the index only when that scan started after the one the index came from, so a scan that ends after a newer one changes nothing.
+Starting a program, Open Config, and Reload Apps run on a worker thread, and the daemon answers other requests while they run. Their reply comes when the work ends. A copy runs on the copier thread, one copy at a time, and its reply comes once the capture thread has seen the compositor take it or the copy has failed. If the worker thread cannot start, the request fails at once with `not run: <error>`, nothing is recorded, and Quit does not wait for it. Two Reload Apps can overlap, and their scans can end in either order. Each scan has a number in the order it started. A scan's apps replace the index only when that scan started after the one the index came from, so a scan that ends after a newer one changes nothing.
 
 The commands run like this:
 
@@ -219,7 +219,7 @@ A `session` block is a terminal transcript against one environment:
 
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`, whose values may hold `$TREE` and `$RUNTIME`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
-- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, and exits as the daemon did.
 
 At the end of a block the test stops any daemon still running.
@@ -414,7 +414,7 @@ stderr: For more information, try '--help'.
 exit: 2
 ```
 
-### Copies fail until the clipboard exists
+### Copies fail without a compositor
 
 A calculator key is evaluated again, and a clip key that names no clip fails.
 

@@ -688,9 +688,13 @@ pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) ->
             .iter()
             .take_while(|line| !line.starts_with("$ "))
             .count();
+        let newest = daemons.last().map(|daemon| daemon.id().to_string());
         let want: Vec<String> = after[..printed]
             .iter()
-            .map(|line| world.substitute(line))
+            .map(|line| match &newest {
+                Some(pid) => world.substitute(line).replace("$DAEMON", pid),
+                None => world.substitute(line),
+            })
             .collect();
         rest = &after[printed..];
         let before = world.recorded().len();

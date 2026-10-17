@@ -383,16 +383,280 @@ A `clipboard` block runs inside its own `scripts/test-env.sh start` environment.
 
 - `$ seed <type>[,<type>...] <text>` offers the text under each type, and nothing else, until another selection replaces it. `$ seed-file <type>[,<type>...] <path>` offers a file's bytes the same way. Each returns once the compositor offers its types: the helper watches the clipboard itself, and it is ready when it sees the change that its selection makes.
 - `$ wait-clips <n>` waits until `lyncast clip list --json` prints `n` rows, and `$ wait-first <id>` waits until the first row has that id. A seed whose row is still on its way can make the next seed's read come back empty (measured), so a block waits for each row before it seeds again.
+- `$ paste <type|any> <path>` writes what a reader of that type gets to `<path>`, or prints `empty` when the clipboard is empty.
+- `$ offers` prints the offered types, one per line, sorted, because their order is not stable, or `empty`.
 - `$ stop-seed` stops the newest seeder with SIGSTOP, so it never answers a read.
+- `$ freeze-compositor` and `$ thaw-compositor` stop and continue the block's anvil with SIGSTOP and SIGCONT.
 - `$ wait-stderr <line>` waits until `$RUNTIME/daemon.stderr` holds the line, for an entry that adds no row.
 - `$ stop-compositor` stops the block's compositor, and `$RUNTIME` goes with it.
+
+### A copy promotes its row, and a copied answer adds one
+
+A copy replies once the compositor has taken it, so a read right after the reply gets the entry, and its own marked offer adds no row. A success closes the summon. A copied calculator answer adds a text row, the same text again promotes that row, and a row a copy added copies too. Once the daemon exits, the clipboard is empty, because the daemon served it.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 beta
+$ wait-clips 2
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast toggle
+open
+$ lyncast activate clip:1
+copied clip 1
+$ lyncast status
+closed
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+alpha
+$ offers
+STRING
+TEXT
+UTF8_STRING
+application/x-lyncast-own;copy=$DAEMON.1
+text/plain
+text/plain;charset=utf-8
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+$ lyncast activate calc:2+3*4
+copied 14
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+$ lyncast activate clip:2
+copied clip 2
+$ lyncast activate calc:20-6
+copied 14
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate clip:3
+copied clip 3
+$ paste any got
+$ cat got; echo
+14
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+$ paste text/plain;charset=utf-8 got
+empty
+```
+
+### An image comes back as the same PNG
+
+A reader that takes any type gets the PNG too, because the marker holds the same bytes. A blob that is gone fails the copy before anything is offered, so the seed's offer stays.
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ lyncast daemon --headless
+$ seed-file image/png one.png
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+$ lyncast activate clip:1
+copied clip 1
+$ paste any got.png
+$ cmp got.png one.png
+$ paste image/png got.png
+$ cmp got.png one.png
+$ offers
+application/x-lyncast-own;copy=$DAEMON.1
+image/png
+$ rm data/lyncast/blobs/*
+$ seed text/plain;charset=utf-8 other
+$ wait-clips 2
+$ lyncast activate clip:1
+stderr: lyncast: clip 1: blob missing
+exit: 1
+$ offers
+text/plain;charset=utf-8
+```
+
+### A file entry pastes as its paths
+
+A file entry offers its paths as text, and itself as `text/uri-list` and as a GNOME list. The paths are its first text source, so wl-clipboard-rs's other text types hold them too. A text row offers `text/plain;charset=utf-8` and wl-clipboard-rs's other text types, whatever type it was read as, such as `text/html` here.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/uri-list file:///etc/hostname
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":1,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname"}
+$ lyncast activate clip:1
+copied clip 1
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+/etc/hostname
+$ paste text/plain got
+$ cat got; echo
+/etc/hostname
+$ paste text/uri-list got
+$ cat got; echo
+file:///etc/hostname
+$ paste x-special/gnome-copied-files got
+$ cat got; echo
+copy
+file:///etc/hostname
+$ offers
+STRING
+TEXT
+UTF8_STRING
+application/x-lyncast-own;copy=$DAEMON.1
+text/plain
+text/plain;charset=utf-8
+text/uri-list
+x-special/gnome-copied-files
+$ seed text/html <b>gamma</b>
+$ wait-clips 2
+$ lyncast activate clip:2
+copied clip 2
+$ offers
+STRING
+TEXT
+UTF8_STRING
+application/x-lyncast-own;copy=$DAEMON.2
+text/plain
+text/plain;charset=utf-8
+```
+
+### Copy Path hands over text
+
+Copy Path copies the desktop file's path and adds a text row, and a second copy promotes that row. A copy records no visit, so no `ranking.json` appears.
+
+```clipboard
+$ mkdir -p share/applications && printf '[Desktop Entry]\nType=Application\nName=Files\nExec=/bin/sh\n' > share/applications/files.desktop
+$ lyncast daemon --headless
+$ lyncast activate app:files.desktop --verb copy-path
+copied $TREE/share/applications/files.desktop
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+$TREE/share/applications/files.desktop
+$ wait-clips 1
+$ lyncast activate app:files.desktop --verb copy-path
+copied $TREE/share/applications/files.desktop
+$ wait-clips 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+clips.sqlite3
+```
+
+### A compositor that does not take the selection fails the copy
+
+A copy waits 500 ms at most for the compositor. Here anvil is stopped, so the copy fails, records nothing, and leaves the summon open. Its source waits for the compositor with its payload, and while it waits, a new copy fails at once, so a stopped compositor holds one copy's payload and thread, not one for each copy. The source is never served, so once anvil goes on, the clipboard still holds the seed, and a copy then works.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 beta
+$ wait-clips 2
+$ lyncast toggle
+open
+$ freeze-compositor
+$ lyncast activate clip:1
+stderr: lyncast: not copied: the compositor did not take the selection
+exit: 1
+$ lyncast activate clip:2
+stderr: lyncast: not copied: an earlier copy still waits for the compositor
+exit: 1
+$ thaw-compositor
+$ offers
+text/plain;charset=utf-8
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+beta
+$ lyncast status
+open
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate clip:1
+copied clip 1
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+alpha
+```
+
+The compositor may take the selection while the capture thread is held by a read that does not answer, and the thread reports the marked offer once the read gives up, within 2 s. Here the daemon's first event is the offer of a stopped seeder, so the copy right after the start waits for that read, and then succeeds.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8 one
+$ stop-seed
+$ lyncast daemon --headless
+$ lyncast activate clip:1
+copied clip 1
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+alpha
+```
+
+Each stopped seeder whose offer waits behind the read holds the thread 2 s more. Here three more come before the copy, so its report comes about 8 s after the start, past the copy's 2.5 s. The copy fails and records nothing, though the compositor holds its selection. The first seed after the start carries the marker of process 1, another process whose copies also number from 1, and its mark confirms no copy here.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8 one
+$ stop-seed
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8,application/x-lyncast-own;copy=1.1 mine
+$ seed text/plain;charset=utf-8 two
+$ stop-seed
+$ seed text/plain;charset=utf-8 three
+$ stop-seed
+$ seed text/plain;charset=utf-8 four
+$ stop-seed
+$ lyncast activate clip:1
+stderr: lyncast: not copied: the clipboard watcher did not confirm the selection
+exit: 1
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+alpha
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+```
+
+### A stalled disk fails a copy after 5 s
+
+Here the writer waits to write the image's blob through a FIFO, as in the block on 64 MiB below, so a copy of the image, which reads its blob through the writer, gets no answer. It fails after 5 s, and a copy of an answer, which needs no disk, then works. Once the FIFO is read, the blob fails to write, and the image's row goes.
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ lyncast daemon --headless
+$ mkdir -p data/lyncast/blobs && mkfifo data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
+$ seed-file image/png one.png
+$ wait-clips 1
+$ lyncast activate clip:1
+stderr: lyncast: not copied: the writer of the clips did not answer within 5 s
+exit: 1
+$ lyncast activate calc:1+1
+copied 2
+$ cat data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp > /dev/null
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"2"}
+```
 
 ### The filters keep own writes, passwords, and large entries out
 
 A seed that carries the marker or the password hint adds no row, and neither does one over 25 MiB, empty text, text that is not UTF-8, or an empty image. An image of exactly 25 MiB is kept. Each seed comes before a daemon starts, so that daemon's first event is the seed's offer, which the capture thread takes before Quit cancels its `Watcher`, and nothing replaces the offer before its read. The rows persist from one daemon to the next.
 
 ```clipboard
-$ seed text/plain;charset=utf-8,application/x-lyncast-own;copy=1 mine
+$ seed text/plain;charset=utf-8,application/x-lyncast-own;copy=1.1 mine
 $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
@@ -631,7 +895,7 @@ lyncast: $TREE/data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64a
 
 ### A new row that the file does not save leaves the history
 
-While the journal's path is a directory, SQLite cannot save a row, so the new row goes from the history, and a later capture of the same text records it again with a new id. An image whose blob does not reach the disk goes the same way. Its id stays used: the pin is the next change that the file saves, and it keeps the image's id in the file's count, so the next daemon gives the image, captured again as its first event, the id after it.
+While the journal's path is a directory, SQLite cannot save a row, so the new row goes from the history, and a later capture of the same text records it again with a new id, which copies. An image whose blob does not reach the disk goes the same way. Its id stays used: the pin is the next change that the file saves, and it keeps the image's id in the file's count, so the next daemon gives the image, captured again as its first event, the id after it.
 
 ```clipboard
 $ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
@@ -648,6 +912,8 @@ $ seed text/plain;charset=utf-8 alpha
 $ wait-clips 1
 $ lyncast clip list --json
 {"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate clip:2
+copied clip 2
 $ mkdir data/lyncast/blobs && mkfifo data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
 $ seed-file image/png one.png
 $ wait-clips 2
@@ -688,6 +954,90 @@ $ wait-stderr lyncast: no clip id is left; the clip was not recorded
 $ lyncast clip list --json
 {"id":9223372036854775807,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
 {"id":9223372036854775806,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+```
+
+### A stderr that does not drain holds up no copy
+
+The warnings go to stderr through one thread ([daemon.md](daemon.md#one-thread-writes-the-warnings)). Here stderr is full before the daemon starts, and once the first copy has taken the last id, each copied answer warns that no id is left. The first warning waits to be written, 8 more wait behind it, and 3 are dropped. Every copy and `status` still answer. Once the test reads what filled stderr, the warnings that waited go through, and a line counts the dropped ones.
+
+```clipboard
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1)"
+$ stall-stderr
+$ lyncast daemon --headless
+$ lyncast activate calc:1+1
+copied 2
+$ lyncast activate calc:2+1
+copied 3
+$ lyncast activate calc:3+1
+copied 4
+$ lyncast activate calc:4+1
+copied 5
+$ lyncast activate calc:5+1
+copied 6
+$ lyncast activate calc:6+1
+copied 7
+$ lyncast activate calc:7+1
+copied 8
+$ lyncast activate calc:8+1
+copied 9
+$ lyncast activate calc:9+1
+copied 10
+$ lyncast activate calc:10+1
+copied 11
+$ lyncast activate calc:11+1
+copied 12
+$ lyncast activate calc:12+1
+copied 13
+$ lyncast activate calc:13+1
+copied 14
+$ lyncast status
+closed
+$ drain-stderr
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: no clip id is left; the clip was not recorded
+stderr: lyncast: 3 warnings were dropped while stderr was full
+```
+
+### Without a data home the history lives in memory
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ env -u HOME XDG_DATA_HOME=data lyncast daemon --headless
+$ seed-file image/png one.png
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 2
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+$ lyncast activate clip:1
+copied clip 1
+$ paste image/png got.png
+$ cmp got.png one.png
+$ lyncast activate clip:2
+copied clip 2
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+alpha
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls
+got
+got.png
+one.png
 ```
 
 ### The daemon needs its compositor
