@@ -9,6 +9,8 @@ use lyncast_core::calc::Answer;
 use lyncast_core::{Actions, Chord, Key, KeyError, Kind, Row, Section, Verb};
 use serde::{Deserialize, Serialize};
 
+use crate::clip;
+
 /// A value that the CLI and the wire spell as `query --json` prints it.
 pub trait Spelled: Sized {
     fn spelling(&self) -> String;
@@ -49,6 +51,30 @@ struct ActionView {
     chords: Vec<String>,
 }
 
+/// One clip as `clip list --json` prints it.
+#[derive(Serialize, Deserialize)]
+pub struct ClipView {
+    id: i64,
+    kind: String,
+    pinned: bool,
+    mime: String,
+    bytes: u64,
+    preview: Option<String>,
+}
+
+pub fn clips(rows: &[&clip::Row]) -> Vec<ClipView> {
+    rows.iter()
+        .map(|row| ClipView {
+            id: row.id.0,
+            kind: row.content.spelling().to_owned(),
+            pinned: row.pinned,
+            mime: row.mime.clone(),
+            bytes: row.bytes,
+            preview: row.preview.clone(),
+        })
+        .collect()
+}
+
 /// The view of each row, numbered in order.
 pub fn rows(rows: &[Row]) -> Vec<RowView> {
     rows.iter()
@@ -69,7 +95,7 @@ pub fn rows(rows: &[Row]) -> Vec<RowView> {
 }
 
 /// Writes one line per row.
-pub fn write_rows(out: &mut impl Write, rows: &[RowView]) -> io::Result<()> {
+pub fn write_lines<T: Serialize>(out: &mut impl Write, rows: &[T]) -> io::Result<()> {
     for row in rows {
         serde_json::to_writer(&mut *out, row)?;
         out.write_all(b"\n")?;

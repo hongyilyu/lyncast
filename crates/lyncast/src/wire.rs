@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use lyncast_core::{Chord, Key, Verb};
 use serde::{Deserialize, Serialize};
 
-use crate::view::{RowView, Spelled};
+use crate::view::{ClipView, RowView, Spelled};
 
 /// The socket's file name in `$XDG_RUNTIME_DIR`.
 pub const SOCKET: &str = "lyncast.sock";
@@ -24,6 +24,8 @@ pub enum Request {
     Query {
         text: String,
     },
+    /// The clipboard history in screen order.
+    Clips,
     /// Runs one item of the row that `key` names. `query` is the search text the row was found
     /// with, which frecency keeps as a search term.
     Activate {
@@ -53,6 +55,9 @@ pub enum Reply {
     },
     Rows {
         rows: Vec<RowView>,
+    },
+    Clips {
+        clips: Vec<ClipView>,
     },
     /// The success line, such as `ran cmd:reboot`.
     Done {

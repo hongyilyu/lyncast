@@ -4,7 +4,12 @@
 
 mod apps;
 mod client;
+mod clip;
+mod config;
 mod daemon;
+#[cfg(test)]
+#[path = "../../lyncast-core/tests/doc/mod.rs"]
+mod doc;
 mod files;
 mod permit;
 #[cfg(test)]
@@ -62,6 +67,11 @@ enum Cmd {
         #[arg(long, action = clap::ArgAction::Help)]
         help: Option<bool>,
     },
+    /// Work with the clipboard history.
+    Clip {
+        #[command(subcommand)]
+        command: ClipCmd,
+    },
     /// Run one action of a row, and print what happened.
     Activate {
         /// The row's key, such as `app:firefox.desktop`, `cmd:reboot`, or `calc:-5+3`.
@@ -82,6 +92,16 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ClipCmd {
+    /// Print every clip in screen order, one per line.
+    List {
+        /// Print each clip as one compact JSON object. Required until a plain view exists.
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
 /// Exits 0 on success, 1 when the request fails or stdout cannot be written, and 2 on a usage
 /// error.
 fn main() -> ExitCode {
@@ -94,6 +114,9 @@ fn main() -> ExitCode {
         Cmd::Toggle => summon(&Request::Toggle),
         Cmd::Status => summon(&Request::Status),
         Cmd::Query { text, .. } => query(text),
+        Cmd::Clip {
+            command: ClipCmd::List { .. },
+        } => clips(),
         Cmd::Activate {
             key,
             chord,
@@ -137,7 +160,14 @@ fn summon(request: &Request) -> Result<(), String> {
 
 fn query(text: String) -> Result<(), String> {
     match client::send(&Request::Query { text })? {
-        Reply::Rows { rows } => print(|out| view::write_rows(out, &rows)),
+        Reply::Rows { rows } => print(|out| view::write_lines(out, &rows)),
+        reply => Err(client::refusal(reply)),
+    }
+}
+
+fn clips() -> Result<(), String> {
+    match client::send(&Request::Clips)? {
+        Reply::Clips { clips } => print(|out| view::write_lines(out, &clips)),
         reply => Err(client::refusal(reply)),
     }
 }

@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,7 @@ use lyncast_core::Key;
 use lyncast_core::rank::{Timestamp, Visit, Visits};
 use serde::{Deserialize, Serialize};
 
-use crate::files::{self, Unread};
+use crate::files;
 use crate::warning::warn;
 
 /// One member of the file.
@@ -62,11 +61,6 @@ const MAX_FILE_BYTES: u64 = 64 << 20;
 
 /// The writer thread's name, by which the `freeze-thread` fixtures find it.
 const THREAD: &str = "visits";
-
-/// The error for a file over [`MAX_FILE_BYTES`], read or written.
-fn too_large() -> String {
-    format!("over {} MiB", MAX_FILE_BYTES >> 20)
-}
 
 /// The handle to the writer thread.
 pub struct Store {
@@ -150,7 +144,7 @@ impl Store {
             .spawn(move || {
                 while let Some(bytes) = writer.next() {
                     if let Err(error) = write(&path, &bytes) {
-                        warn(format_args!("{}: not saved: {error}", path.display()));
+                        warn(format_args!("{}", files::Unsaved::new(&path, error)));
                     }
                 }
                 ended();
@@ -204,22 +198,17 @@ impl Shared {
 /// The file's members. Without a file there are none, but a symlink to nothing is a file that
 /// cannot be read. Only a regular file of at most [`MAX_FILE_BYTES`] is read, after symlinks.
 fn read(path: &Path) -> Result<BTreeMap<String, Stored>, String> {
-    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
-        return Ok(BTreeMap::new());
+    match files::read_if_present(path, MAX_FILE_BYTES).map_err(|unread| unread.to_string())? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
+        None => Ok(BTreeMap::new()),
     }
-    let bytes = files::read_regular(path, MAX_FILE_BYTES).map_err(|unread| match unread {
-        Unread::NotRegular => "not a regular file".to_owned(),
-        Unread::TooLarge => too_large(),
-        Unread::Io(error) => error.to_string(),
-    })?;
-    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
 /// Writes `bytes` over the file. Bytes over [`MAX_FILE_BYTES`] are not written, because the
 /// daemon would not read them back.
 fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(io::Error::other(too_large()));
+        return Err(io::Error::other(files::over(MAX_FILE_BYTES)));
     }
     files::write_private(path, bytes)
 }

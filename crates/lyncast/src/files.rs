@@ -1,10 +1,11 @@
 //! Reads a file only when it is a regular file of at most a given size, after symlinks, and writes
 //! files and directories that only their owner can read.
 
+use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 /// Why [`read_regular`] read nothing.
@@ -12,8 +13,46 @@ pub enum Unread {
     /// A FIFO, a device, or a directory.
     NotRegular,
     /// Over the cap, by the file's size or by what the read found.
-    TooLarge,
+    TooLarge {
+        max: u64,
+    },
     Io(io::Error),
+}
+
+impl fmt::Display for Unread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unread::NotRegular => f.write_str("not a regular file"),
+            Unread::TooLarge { max } => f.write_str(&over(*max)),
+            Unread::Io(error) => error.fmt(f),
+        }
+    }
+}
+
+/// A write that did not reach the file at its path, and why, as its warning spells it.
+pub struct Unsaved {
+    path: PathBuf,
+    why: String,
+}
+
+impl Unsaved {
+    pub fn new(path: &Path, why: impl ToString) -> Unsaved {
+        Unsaved {
+            path: path.to_owned(),
+            why: why.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for Unsaved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: not saved: {}", self.path.display(), self.why)
+    }
+}
+
+/// Why a file of more than `max` bytes, a whole number of MiB, is not read or written.
+pub fn over(max: u64) -> String {
+    format!("over {} MiB", max >> 20)
 }
 
 /// The bytes of the file at `path`, when it is a regular file of at most `max` bytes after
@@ -35,9 +74,29 @@ pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, Unread> {
         .read_to_end(&mut bytes)
         .map_err(Unread::Io)?;
     if bytes.len() as u64 > max {
-        return Err(Unread::TooLarge);
+        return Err(Unread::TooLarge { max });
     }
     Ok(bytes)
+}
+
+/// Whether a regular file is at `path` after symlinks, `false` when nothing is there. Anything
+/// else there fails, and a symlink to nothing is a file that cannot be read.
+pub fn regular_if_present(path: &Path) -> Result<bool, Unread> {
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
+        return Ok(false);
+    }
+    if !fs::metadata(path).map_err(Unread::Io)?.is_file() {
+        return Err(Unread::NotRegular);
+    }
+    Ok(true)
+}
+
+/// [`read_regular`], or `None` when nothing is at `path`, as [`regular_if_present`] finds it.
+pub fn read_if_present(path: &Path, max: u64) -> Result<Option<Vec<u8>>, Unread> {
+    if !regular_if_present(path)? {
+        return Ok(None);
+    }
+    read_regular(path, max).map(Some)
 }
 
 /// Fails unless the file is a regular file of at most `max` bytes.
@@ -46,7 +105,7 @@ fn check(metadata: &Metadata, max: u64) -> Result<(), Unread> {
         return Err(Unread::NotRegular);
     }
     if metadata.len() > max {
-        return Err(Unread::TooLarge);
+        return Err(Unread::TooLarge { max });
     }
     Ok(())
 }
