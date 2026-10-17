@@ -93,34 +93,14 @@ These are missing on the dev box:
 - `wl-copy` and `wl-paste` (notes/07, measured). Tier 2 seeds and reads the clipboard with an in-process wl-clipboard-rs helper.
 - niri. Its build needs libinput, libseat, systemd, mesa-libgbm, pango, cairo, and libdisplay-info `-devel` packages, all in the AL2023 repos (notes/03). No note built it (notes/07), so niri inside Xvfb is unverified.
 
-## Planned Tier 2 cases for copy and close
+## Tier 2 cases for copy and close
 
-None of these cases has run. They come from [notes/07](../research/notes/07-paste-seam-workflow.md), and [clipboard-and-paste.md](clipboard-and-paste.md) holds the full design. Each seed waits for its row, because back-to-back seeds can race the watcher:
+Plan step 6 turns the copy cases from [notes/07](../research/notes/07-paste-seam-workflow.md) into fixtures in [clipboard-and-paste.md](clipboard-and-paste.md): own writes, promotion, a copied answer, the filters, an image read back as the same PNG, a missing blob, file entries, and an empty clipboard after the daemon stops. A copy replies only after the capture thread sees its own marked offer, so a read right after `copied clip 1` gets the entry ([notes/11](../research/notes/11-clipboard-prototype.md), measured). Each seed waits for its row, because back-to-back seeds can race the watcher.
 
-```rust
-seed("alpha"); wait_rows(1);
-seed("beta"); wait_rows(2);
-assert_eq!(cli("activate clip:1"), "copied clip 1\n");
-assert_eq!(read_text(), "alpha");
-assert!(read_mimes().contains(OWN));
-assert_eq!(cli("clip list"), "1\talpha\n2\tbeta\n"); // promoted, no new row
-assert_eq!(cli("activate calc:2+3*4"), "copied 14\n");
-assert_eq!(cli("clip list"), "3\t14\n1\talpha\n2\tbeta\n");
-stop_daemon();
-assert_eq!(read_text_or_empty(), ""); // the daemon owned the selection
-```
+These cases need the GPUI daemon under anvil and come with plan step 7:
 
-The design and reviews add these cases:
-
-- **Core sees own writes.** After the calc copy, `activate clip:3` must not print `lyncast: no clip 3`. In the reviewed design it did, and that finding led to `Clips` owning every clip row.
-- **Missing blob.** With an image's blob deleted, `lyncast activate clip:1` exits 1 with `lyncast: clip 1: blob missing`, and the selection lacks `OWN`.
-- **Image re-copy.** Reading a re-copied image with `MimeType::Any` gives a non-empty PNG. An empty marker failed 5 of 12 such reads (measured).
-- **Close after copy.** After `lyncast toggle` and `lyncast activate clip:1`, a status query prints `closed`, `read_text()` still returns the entry, and a second toggle opens one window. The case catches a nested close and a missing `QuitMode::Explicit`, which would quit and clear the selection.
+- **Close after copy.** After `lyncast toggle` and `lyncast activate clip:1`, a status query prints `closed`, the clipboard still holds the entry, and a second toggle opens one window. The case catches a nested close and a missing `QuitMode::Explicit`, which would quit and clear the selection.
 - **Close after launch.** Activating an app row closes the window. The reviewed Launch arm never closed it.
-
-The close cases run the GPUI daemon under anvil, not `lyncast daemon --headless`.
-
-`read_text()` right after `copied clip 1` can flake, because wl-clipboard-rs reports success before it serves (notes/07, read in source). The notes do not say what Tier 2 expects for a clip's Source, which comes from niri IPC.
 
 ## A fake niri socket stands in for niri IPC
 
