@@ -103,7 +103,7 @@ Source is filled from plan step 8, which brings the niri IPC client. Until then 
 
 ## The fixtures
 
-The tests in `crates/lyncast/tests/clipboard.rs` read the `env` and `session` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, and shell lines through `/bin/sh`. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks.
+The tests in `crates/lyncast/tests/clipboard.rs` read the `env`, `session`, and `clipboard` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, shell lines through `/bin/sh`, and the `stall-stderr`, `drain-stderr`, and `wait-exit` lines. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks, and the unit tests in `crates/lyncast/src/clip/mod.rs` read the `store` blocks.
 
 ```env
 HOME=$TREE/home
@@ -284,6 +284,33 @@ used 400d ago, unpinned, keep 0 => kept
 used 2d ago, unpinned, keep 1 => expired
 ```
 
+A session cannot let days pass, and whether a seed was read before the next one replaced it does not show in a block. So the unit tests in `crates/lyncast/src/clip/mod.rs` run each `store` block on a history in memory, with the default retention of 90 days and a clock that they move. `capture <text>` records a capture of the text, `pin <text>` and `unpin <text>` change the row that holds it, `wait <n>d` and `wait <n>ms` move the clock, and `=> <text>, ...` gives the previews in screen order. A capture of a pinned row's bytes changes nothing, and unpinning the row puts it back where its pin put it:
+
+```store
+capture alpha
+capture beta
+pin alpha
+capture gamma
+capture alpha
+=> alpha, gamma, beta
+unpin alpha
+=> gamma, alpha, beta
+```
+
+A capture prunes the rows that have expired since start:
+
+```store
+capture old
+capture pinned
+pin pinned
+wait 90d
+capture new
+=> pinned, new, old
+wait 1ms
+capture newer
+=> pinned, newer, new
+```
+
 ### A database the daemon cannot use stays as it is
 
 A file that SQLite cannot read, a FIFO, a symlink to nothing, and a file whose largest id leaves no next one each leave the rows in memory. The daemon never opens the FIFO, writes over the file, or creates the symlink's target. SQLite opens the journal beside the file itself, after the daemon's check, so a FIFO there holds the load, and after 5 s the daemon starts with its rows in memory and leaves the file as it was.
@@ -350,6 +377,342 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+```
+
+A `clipboard` block runs inside its own `scripts/test-env.sh start` environment. `$RUNTIME` is the compositor's `XDG_RUNTIME_DIR`, and the block's daemons also get its `WAYLAND_DISPLAY`, so the daemon and the helpers below share one anvil. A helper is the test binary run again with only those two variables. A `clipboard` block may also use these lines:
+
+- `$ seed <type>[,<type>...] <text>` offers the text under each type, and nothing else, until another selection replaces it. `$ seed-file <type>[,<type>...] <path>` offers a file's bytes the same way. Each returns once the compositor offers its types: the helper watches the clipboard itself, and it is ready when it sees the change that its selection makes.
+- `$ wait-clips <n>` waits until `lyncast clip list --json` prints `n` rows, and `$ wait-first <id>` waits until the first row has that id. A seed whose row is still on its way can make the next seed's read come back empty (measured), so a block waits for each row before it seeds again.
+- `$ stop-seed` stops the newest seeder with SIGSTOP, so it never answers a read.
+- `$ wait-stderr <line>` waits until `$RUNTIME/daemon.stderr` holds the line, for an entry that adds no row.
+- `$ stop-compositor` stops the block's compositor, and `$RUNTIME` goes with it.
+
+### The filters keep own writes, passwords, and large entries out
+
+A seed that carries the marker or the password hint adds no row, and neither does one over 25 MiB, empty text, text that is not UTF-8, or an empty image. An image of exactly 25 MiB is kept. Each seed comes before a daemon starts, so that daemon's first event is the seed's offer, which the capture thread takes before Quit cancels its `Watcher`, and nothing replaces the offer before its read. The rows persist from one daemon to the next.
+
+```clipboard
+$ seed text/plain;charset=utf-8,application/x-lyncast-own;copy=1 mine
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8,x-kde-passwordManagerHint hunter2
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ head -c 26214401 /dev/zero | tr '\0' a > big.txt
+$ seed-file text/plain;charset=utf-8 big.txt
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ : > empty.txt
+$ seed-file text/plain;charset=utf-8 empty.txt
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed-file image/png empty.txt
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf '\377' > bad.txt
+$ seed-file text/plain;charset=utf-8 bad.txt
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ head -c 26214400 /dev/zero > big.png
+$ seed-file image/png big.png
+$ lyncast daemon --headless
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 kept
+$ wait-clips 2
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"kept"}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":26214400,"preview":null}
+```
+
+A source that never answers holds a read for 2 s at most. Here the seeder stops before the daemon starts, so the daemon's first event is its offer. The next seed's row comes once that read gives up.
+
+```clipboard
+$ seed text/plain;charset=utf-8 stuck
+$ stop-seed
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 kept
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"kept"}
+```
+
+### An offer gives files, else an image, else text
+
+Each seed here offers more than one representation, and the row shows which one the thread read. An image comes before text, and files before an image. `image/png` comes before another image type, which the thread takes when no PNG is offered, and `text/uri-list` comes before the GNOME list.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed image/png,text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ seed image/webp,image/png beta
+$ wait-clips 2
+$ seed image/webp gamma
+$ wait-clips 3
+$ seed text/uri-list,x-special/gnome-copied-files file:///etc/hostname
+$ wait-clips 4
+$ seed text/uri-list,image/png file:///etc/hosts
+$ wait-clips 5
+$ lyncast clip list --json
+{"id":5,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":17,"preview":"/etc/hosts"}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname"}
+{"id":3,"kind":"image","pinned":false,"mime":"image/webp","bytes":5,"preview":null}
+{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":4,"preview":null}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":5,"preview":null}
+```
+
+### The same bytes promote a row, and pins stay first
+
+A seed of text that a row holds moves that row to the front and keeps its id. A pin stays first, and unpinning it puts it back where its pin put it. A file list that names a local file is a file entry, and one that names only a link is read as text. The rows persist. The next daemon's first event, the selection already there, promotes the row that holds it, and the daemon after that keeps the promotion and gives a new row the next id.
+
+```clipboard
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 beta
+$ wait-clips 2
+$ seed text/plain;charset=utf-8 alpha
+$ wait-first 1
+$ lyncast activate clip:2 --verb pin
+pinned clip 2
+$ seed text/uri-list,text/plain;charset=utf-8 https://example.org/a
+$ wait-clips 3
+$ printf 'copy\nfile:///etc/hostname' > gnome.txt
+$ seed-file x-special/gnome-copied-files gnome.txt
+$ wait-clips 4
+$ seed text/plain;charset=utf-8 me@example.org
+$ wait-clips 5
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
+{"id":3,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":21,"preview":"https://example.org/a"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate clip:2 --verb unpin
+unpinned clip 2
+$ lyncast activate clip:3 --verb delete
+deleted clip 3
+$ lyncast activate clip:3
+stderr: lyncast: no clip 3
+exit: 1
+$ lyncast clip list --json
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8 beta
+$ lyncast daemon --headless
+$ wait-first 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8 gamma
+$ lyncast daemon --headless
+$ wait-clips 5
+$ lyncast clip list --json
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+```
+
+A capture of a pinned row's bytes changes nothing, which the first `store` block shows, because whether a seed was read before the next one replaced it does not show here.
+
+### An image keeps its blob until its row goes
+
+The writer writes an image's blob before its row, and the blob goes with its last row. Only the user may open a blob or list `blobs/`. The writer writes after the row appears, so the block reads the blob once Quit has waited for the writer. The id of a deleted row never comes back, even the newest one across a restart, whose first event here adds the selection again as a new row.
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ lyncast daemon --headless
+$ seed-file image/png one.png
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20 one.png
+$ stat -c %a data/lyncast/blobs data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
+700
+600
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb delete
+deleted clip 1
+$ lyncast activate clip:2 --verb delete
+deleted clip 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast/blobs
+$ lyncast daemon --headless
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+```
+
+Two rows here name one blob, which stays until the second goes. The delete of a row comes first and its blob's after it, so while the journal's path is a directory and SQLite cannot delete the row, the blob stays too, and the next daemon lists the row and deletes it.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ mkdir data/lyncast/blobs && printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 2)"
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb delete
+deleted clip 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast/blobs
+2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
+$ lyncast daemon --headless
+$ mkdir data/lyncast/clips.sqlite3-journal
+$ lyncast activate clip:2 --verb delete
+deleted clip 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rmdir data/lyncast/clips.sqlite3-journal
+$ ls data/lyncast/blobs
+2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+$ lyncast activate clip:2 --verb delete
+deleted clip 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast/blobs
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: unable to open database file
+```
+
+### A stalled disk drops new rows past 64 MiB
+
+Here the writer waits to write the image's blob through a FIFO, so the rows after it wait with their bytes. Two texts of 25 MiB wait beside the image, and a third would bring what waits past 64 MiB, so it is not recorded. A small text still is. Once the FIFO is read, the blob fails to write, as a FIFO cannot sync, so the image's row leaves the history, and the rows that waited reach the database.
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ head -c 26214400 /dev/zero | tr '\0' a > a.txt
+$ head -c 26214400 /dev/zero | tr '\0' b > b.txt
+$ head -c 26214400 /dev/zero | tr '\0' c > c.txt
+$ lyncast daemon --headless
+$ mkdir -p data/lyncast/blobs && mkfifo data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
+$ seed-file image/png one.png
+$ wait-clips 1
+$ seed-file text/plain;charset=utf-8 a.txt
+$ wait-clips 2
+$ seed-file text/plain;charset=utf-8 b.txt
+$ wait-clips 3
+$ seed-file text/plain;charset=utf-8 c.txt
+$ wait-stderr lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: 64 MiB of clips wait for the disk; the clip was not recorded
+$ seed text/plain;charset=utf-8 kept
+$ wait-clips 4
+$ cat data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp > /dev/null
+$ wait-clips 3
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, bytes from clips"
+2|26214400
+3|26214400
+4|4
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: 64 MiB of clips wait for the disk; the clip was not recorded
+lyncast: $TREE/data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20: not saved: Invalid argument (os error 22); the clip was not recorded
+```
+
+### A new row that the file does not save leaves the history
+
+While the journal's path is a directory, SQLite cannot save a row, so the new row goes from the history, and a later capture of the same text records it again with a new id. An image whose blob does not reach the disk goes the same way. Its id stays used: the pin is the next change that the file saves, and it keeps the image's id in the file's count, so the next daemon gives the image, captured again as its first event, the id after it.
+
+```clipboard
+$ printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > one.png
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast daemon --headless
+$ mkdir data/lyncast/clips.sqlite3-journal
+$ seed text/plain;charset=utf-8 alpha
+$ wait-stderr lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: unable to open database file; the clip was not recorded
+$ wait-clips 0
+$ rmdir data/lyncast/clips.sqlite3-journal
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ mkdir data/lyncast/blobs && mkfifo data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
+$ seed-file image/png one.png
+$ wait-clips 2
+$ cat data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp > /dev/null
+$ wait-clips 1
+$ lyncast activate clip:2 --verb pin
+pinned clip 2
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, preview from clips"
+2|alpha
+$ sqlite3 data/lyncast/clips.sqlite3 "select seq from sqlite_sequence"
+3
+$ lyncast daemon --headless
+$ wait-clips 2
+$ lyncast clip list --json
+{"id":2,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":4,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: unable to open database file; the clip was not recorded
+lyncast: $TREE/data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20: not saved: Invalid argument (os error 22); the clip was not recorded
+```
+
+### The ids run out
+
+A row with the second largest id leaves one id, which the first capture takes. The next capture then adds no row.
+
+```clipboard
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1)"
+$ seed text/plain;charset=utf-8 alpha
+$ lyncast daemon --headless
+$ wait-clips 2
+$ seed text/plain;charset=utf-8 beta
+$ wait-stderr lyncast: no clip id is left; the clip was not recorded
+$ lyncast clip list --json
+{"id":9223372036854775807,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":9223372036854775806,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+```
+
+### The daemon needs its compositor
+
+A daemon whose `WAYLAND_DISPLAY` names no compositor does not start. When the compositor goes, the daemon stops as Quit does and exits 1. A block cannot time a Quit, so `quit_ends_the_capture_thread_at_once` in `crates/lyncast/tests/clipboard.rs` expects a daemon with a compositor to exit within 2.5 s of a Quit, half of Quit's 5 s, while the read of a stopped seeder's offer holds the capture thread and the offers of two more wait behind it. The thread reads neither of those. Here the write of Lock Screen's visit waits on a FIFO, as in [daemon.md's](daemon.md#a-slow-write-holds-up-nothing-but-quit) slow write, and its warning comes before the daemon's last line, so the daemon waited for it.
+
+```clipboard
+$ WAYLAND_DISPLAY=nowhere lyncast daemon --headless
+stderr: lyncast: not started: Couldn't connect to the Wayland compositor
+exit: 1
+$ lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ mkfifo data/lyncast/ranking.json.$DAEMON.tmp
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ (sleep 1; timeout 5 cat data/lyncast/ranking.json.$DAEMON.tmp) > /dev/null 2>&1 &
+$ stop-compositor
+$ wait-exit
+stderr: lyncast: $TREE/data/lyncast/ranking.json: not saved: Invalid argument (os error 22)
+stderr: lyncast: the Wayland connection closed
+exit: 1
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, body from clips"
+1|alpha
 ```
 
 ### A text's kind and a file list's paths

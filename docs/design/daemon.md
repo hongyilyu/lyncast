@@ -6,7 +6,7 @@ The palette and the CLI send the same requests. The CLI sends them over a Unix s
 
 ## Start the daemon with lyncast daemon
 
-`lyncast daemon --headless` runs the daemon without GPUI. It takes the socket's lock, scans the apps, loads the visits, binds the socket, and then answers requests until a `Quit` command. `--headless` is required until plan step 7 builds the palette, the same way `--json` is required for `query`.
+`lyncast daemon --headless` runs the daemon without GPUI. It takes the socket's lock, scans the apps, loads the visits and the clips, starts the capture thread when it has `WAYLAND_DISPLAY`, binds the socket, and then answers requests until a `Quit` command or until the compositor goes. `--headless` is required until plan step 7 builds the palette, the same way `--json` is required for `query`.
 
 The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
@@ -16,11 +16,11 @@ The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
 The kernel releases the lock when the process exits, however it exits. A `Quit` command also removes the socket. The lock file stays, because removing it would let a second daemon lock a new file while the first still holds the old one.
 
-If the daemon cannot start the thread that writes its warnings, the one that accepts connections, the one that writes the visits, or the one that writes the clips, it prints `lyncast: not started: <error>` and exits 1.
+If the daemon cannot start the thread that writes its warnings, the one that accepts connections, the one that writes the visits, the one that writes the clips, or the capture thread, or cannot reach the compositor that `WAYLAND_DISPLAY` names, it prints `lyncast: not started: <error>` and exits 1. When the compositor goes later, the daemon stops as Quit does, prints `lyncast: the Wayland connection closed`, and exits 1 ([clipboard and paste](clipboard-and-paste.md#the-capture-thread-reads-one-representation-per-offer)).
 
 Without `XDG_RUNTIME_DIR`, the daemon and every client print `lyncast: XDG_RUNTIME_DIR is not set` and exit 1, as Wayland clients refuse to run without it. A socket path holds at most 107 bytes, so the tests put `XDG_RUNTIME_DIR` under `/tmp`, as `scripts/test-env.sh` does.
 
-The daemon reads its environment once, at start. The app scan reads `XDG_DATA_HOME`, `XDG_DATA_DIRS`, `PATH`, the locale variables, and `XDG_CURRENT_DESKTOP` there, with `HOME` in place of an unset `XDG_DATA_HOME`, and Reload Apps scans again with the same values. The visits and the [clipboard history](clipboard-and-paste.md#clips-keeps-the-rows-in-memory-and-in-sqlite) use the same data home. Open Config and the read of `config.toml` use `XDG_CONFIG_HOME`, or `HOME` in its place, from the same start. A client's environment changes nothing but the socket path.
+The daemon reads its environment once, at start. The app scan reads `XDG_DATA_HOME`, `XDG_DATA_DIRS`, `PATH`, the locale variables, and `XDG_CURRENT_DESKTOP` there, with `HOME` in place of an unset `XDG_DATA_HOME`, and Reload Apps scans again with the same values. The visits and the [clipboard history](clipboard-and-paste.md#clips-keeps-the-rows-in-memory-and-in-sqlite) use the same data home. Open Config and the read of `config.toml` use `XDG_CONFIG_HOME`, or `HOME` in its place, from the same start, and the capture thread runs only when `WAYLAND_DISPLAY` is set then. A client's environment changes nothing but the socket path.
 
 ## One thread writes the warnings
 
@@ -97,7 +97,7 @@ Quit goes in this order:
 
 1. It removes the socket, so no new client connects. A request that still arrives, on a connection opened before, gets `failed` with `the daemon is quitting` at once while steps 2 and 3 wait. One that arrives during step 4 waits until the process exits, up to 1 s, and then gets that reply or finds the connection closed. Either way it runs nothing.
 2. It waits for the work in flight, such as a program the runner is starting, and sends each reply to its client. So a client exits 1 only when its program did not start.
-3. It waits for the last writes of the visits and the clips, gives up the lock, and replies. The writer of the clips gives up SQLite's lock when it ends. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit and clip.
+3. It cancels the capture thread's `Watcher` and waits for the thread to end after the offer in hand. Then it waits for the last writes of the visits and the clips, gives up the lock, and replies. The writer of the clips gives up SQLite's lock when it ends. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit and clip.
 4. It waits up to 1 s for its warnings to reach stderr and for its replies, Quit's among them, to be written, and exits 0. The exit closes every connection, so it would cut off a reply that is still being written.
 
 Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 6 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time, and finds `clips.sqlite3` locked.

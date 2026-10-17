@@ -7,6 +7,10 @@ mod client;
 mod clip;
 mod config;
 mod daemon;
+// The fixture reader that lyncast-core's tests use, for the unit tests that read a design doc.
+#[cfg(test)]
+#[path = "../../lyncast-core/tests/doc/mod.rs"]
+mod doc;
 mod files;
 mod vars;
 mod view;

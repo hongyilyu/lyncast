@@ -1,8 +1,9 @@
 //! Reads the fixture blocks of a design doc, the only copy of its fixtures. lyncast-core's
 //! `tests/ranking.rs` and `tests/desktop.rs` read docs/design/ranking.md, as does the binary's
 //! `tests/query.rs`, and the binary's `tests/daemon.rs` and the unit test in `src/daemon/mod.rs`
-//! read docs/design/daemon.md. lyncast-core's `tests/clip.rs` and the binary's
-//! `tests/clipboard.rs` read docs/design/clipboard-and-paste.md.
+//! read docs/design/daemon.md. lyncast-core's `tests/clip.rs`, the binary's
+//! `tests/clipboard.rs`, and the unit tests in `src/clip/mod.rs` read
+//! docs/design/clipboard-and-paste.md.
 
 #![allow(dead_code)]
 
@@ -49,7 +50,15 @@ pub const DAEMON: Doc = Doc {
 
 pub const CLIPBOARD: Doc = Doc {
     file: "clipboard-and-paste.md",
-    kinds: &["env", "session", "retention", "kind", "uris"],
+    kinds: &[
+        "env",
+        "session",
+        "clipboard",
+        "retention",
+        "store",
+        "kind",
+        "uris",
+    ],
     prose: &["", "rust"],
 };
 

@@ -276,7 +276,14 @@ pub fn run_bounded(mut command: Command, dir: &Path) -> Option<Ran> {
 
 /// A fresh directory under `/tmp` for one test's `XDG_RUNTIME_DIR`, removed when dropped. A
 /// socket path holds at most 107 bytes, which a path under `CARGO_TARGET_TMPDIR` can pass.
-pub struct Runtime(PathBuf);
+pub struct Runtime {
+    path: PathBuf,
+    /// The directory belongs to a `scripts/test-env.sh` compositor, which goes with it.
+    compositor: bool,
+}
+
+/// The script that starts and stops a Tier 2 compositor.
+const TEST_ENV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/test-env.sh");
 
 impl Runtime {
     pub fn new() -> Runtime {
@@ -285,20 +292,61 @@ impl Runtime {
         let made = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
         assert!(!made.is_null(), "mkdtemp: {}", io::Error::last_os_error());
         template.pop();
-        Runtime(PathBuf::from(OsString::from_vec(template)))
+        Runtime {
+            path: PathBuf::from(OsString::from_vec(template)),
+            compositor: false,
+        }
+    }
+
+    /// The `XDG_RUNTIME_DIR` of a compositor that `scripts/test-env.sh start` starts, and the
+    /// `WAYLAND_DISPLAY` that reaches it. Dropping the runtime stops the compositor.
+    pub fn compositor() -> (Runtime, String) {
+        let started = Command::new(TEST_ENV)
+            .arg("start")
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("test-env.sh runs");
+        assert!(
+            started.status.success(),
+            "test-env.sh start: {}",
+            started.status
+        );
+        let printed = String::from_utf8(started.stdout).expect("test-env.sh prints UTF-8");
+        let export = |name: &str| {
+            printed
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("export {name}=")))
+                .unwrap_or_else(|| panic!("test-env.sh exports no {name}: {printed:?}"))
+                .to_owned()
+        };
+        let runtime = Runtime {
+            path: PathBuf::from(export("XDG_RUNTIME_DIR")),
+            compositor: true,
+        };
+        (runtime, export("WAYLAND_DISPLAY"))
+    }
+
+    /// Stops the compositor and removes the directory, as `scripts/test-env.sh stop` does.
+    pub fn stop_compositor(&self) -> io::Result<ExitStatus> {
+        Command::new(TEST_ENV)
+            .arg("stop")
+            .arg(&self.path)
+            .stdin(Stdio::null())
+            .status()
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.0.join("lyncast.sock")
+        self.path.join("lyncast.sock")
     }
 
     /// The file that each test daemon records to.
     pub fn runs(&self) -> PathBuf {
-        self.0.join("runs")
+        self.path.join("runs")
     }
 
     /// `name` in the directory, opened to append, as a daemon's stdout or stderr.
@@ -322,7 +370,10 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if self.compositor {
+            let _ = self.stop_compositor();
+        }
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -511,11 +562,21 @@ pub struct World {
 }
 
 impl World {
-    /// A fresh tree at `tree`.
+    /// A fresh tree at `tree`, with a fresh runtime directory.
     pub fn new(fixtures: &[doc::Block], tree: PathBuf) -> World {
+        World::within(fixtures, tree, Runtime::new(), &[])
+    }
+
+    /// A fresh tree at `tree` with `runtime`, and `more` variables beside the `env` block's.
+    pub fn within(
+        fixtures: &[doc::Block],
+        tree: PathBuf,
+        runtime: Runtime,
+        more: &[(String, String)],
+    ) -> World {
         materialize(fixtures, &tree);
-        let runtime = Runtime::new();
-        let env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
+        let mut env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
+        env.extend_from_slice(more);
         let out = tree.with_extension("out");
         fs::create_dir_all(&out).unwrap();
         World {
@@ -605,8 +666,17 @@ impl Printed {
     }
 }
 
+/// A command line that a doc's own fixtures define, such as a clipboard block's `seed`, which
+/// gives what it printed, or `None` for a line it does not define.
+pub type Verbs<'v> = dyn FnMut(&str) -> Option<Ran> + 'v;
+
 /// Runs one session block and gives what failed.
 pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
+    session_with(world, block, &mut |_| None)
+}
+
+/// [`session`] for a block whose lines may also run `verbs`.
+pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) -> Vec<String> {
     let mut failures = Vec::new();
     // Kept to the end of the block, which kills any still running.
     let mut daemons: Vec<Daemon> = Vec::new();
@@ -640,44 +710,47 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
                     .finish()
                     .map(|(stderr, code)| (Vec::new(), stderr, code))
             }
-            _ => {
-                let (mut run, lyncast) = world.command(command);
-                if lyncast.is_none()
-                    && let Some(newest) = daemons.last()
-                {
-                    run.env("DAEMON", newest.id().to_string());
-                }
-                let daemon = lyncast
-                    .as_ref()
-                    .filter(|line| line.args.first().is_some_and(|arg| arg == "daemon"));
-                if let Some(line) = daemon
-                    && want.is_empty()
-                {
-                    let socket = line.var("XDG_RUNTIME_DIR").map_or_else(
-                        || world.runtime.socket(),
-                        |dir| Path::new(dir).join("lyncast.sock"),
-                    );
-                    // Daemon::spawn adds --record itself.
-                    let started = if stall {
-                        Daemon::spawn_stalled(run, &world.runtime)
-                    } else {
-                        Daemon::spawn(run, &world.runtime)
-                    };
-                    stall = false;
-                    match started.serving(&world.runtime, &socket) {
-                        Ok(daemon) => daemons.push(daemon),
-                        Err(error) => {
-                            failures.push(format!("line {}: {command}\n  {error}", block.line));
-                            break;
-                        }
+            _ => match verbs(command) {
+                Some(ran) => Some(ran),
+                None => {
+                    let (mut run, lyncast) = world.command(command);
+                    if lyncast.is_none()
+                        && let Some(newest) = daemons.last()
+                    {
+                        run.env("DAEMON", newest.id().to_string());
                     }
-                    continue;
+                    let daemon = lyncast
+                        .as_ref()
+                        .filter(|line| line.args.first().is_some_and(|arg| arg == "daemon"));
+                    if let Some(line) = daemon
+                        && want.is_empty()
+                    {
+                        let socket = line.var("XDG_RUNTIME_DIR").map_or_else(
+                            || world.runtime.socket(),
+                            |dir| Path::new(dir).join("lyncast.sock"),
+                        );
+                        // Daemon::spawn adds --record itself.
+                        let started = if stall {
+                            Daemon::spawn_stalled(run, &world.runtime)
+                        } else {
+                            Daemon::spawn(run, &world.runtime)
+                        };
+                        stall = false;
+                        match started.serving(&world.runtime, &socket) {
+                            Ok(daemon) => daemons.push(daemon),
+                            Err(error) => {
+                                failures.push(format!("line {}: {command}\n  {error}", block.line));
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    if daemon.is_some() {
+                        world.runtime.record(&mut run);
+                    }
+                    run_bounded(run, &world.out)
                 }
-                if daemon.is_some() {
-                    world.runtime.record(&mut run);
-                }
-                run_bounded(run, &world.out)
-            }
+            },
         };
         let Some((stdout, stderr, code)) = ran else {
             failures.push(format!(

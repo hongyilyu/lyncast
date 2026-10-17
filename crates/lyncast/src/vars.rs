@@ -1,13 +1,13 @@
-//! The environment the daemon reads once, at start. The app scan, the visits, and Open Config
-//! all read it from here, and a client's environment changes none of it.
+//! The environment the daemon reads once, at start. The app scan, the visits, the clips, and Open
+//! Config all read it from here, and a client's environment changes none of it.
 
 use std::env;
 use std::ffi::OsString;
 
 /// The environment the daemon reads at start. The app scan reads all of it but
-/// `XDG_CONFIG_HOME`. An empty variable counts as unset, except `PATH`. A value that is not
-/// UTF-8 counts as unset, except in `XDG_DATA_DIRS` and `PATH`, whose entries count one by one.
-/// `Vars::default()` is an environment with nothing set.
+/// `XDG_CONFIG_HOME` and `WAYLAND_DISPLAY`. An empty variable counts as unset, except `PATH`. A
+/// value that is not UTF-8 counts as unset, except in `XDG_DATA_DIRS` and `PATH`, whose entries
+/// count one by one. `Vars::default()` is an environment with nothing set.
 #[derive(Default)]
 pub struct Vars {
     /// The locale names to try, best first. `LANGUAGE` split on `:`, as GLib reads it, or else
@@ -20,6 +20,9 @@ pub struct Vars {
     pub home: Option<String>,
     /// As set, even when empty, because an empty `PATH` holds one empty entry and not the default.
     pub path: Option<OsString>,
+    /// The compositor whose clipboard the daemon keeps. wl-clipboard-rs reads it again from the
+    /// environment, which the daemon never changes.
+    pub wayland_display: Option<OsString>,
 }
 
 impl Vars {
@@ -41,6 +44,7 @@ impl Vars {
             config_home: var("XDG_CONFIG_HOME"),
             home: var("HOME"),
             path: env::var_os("PATH"),
+            wayland_display: env::var_os("WAYLAND_DISPLAY").filter(|value| !value.is_empty()),
         }
     }
 

@@ -1,6 +1,6 @@
 //! The rules of clipboard history that need no store: the kind a text shows as, a row's
-//! preview, the files a list of URIs names, when a row expires, and the order of the clipboard
-//! screen. The binary's `Clips` owns the rows and applies these rules to them.
+//! preview, the files a list of URIs names and their paths, when a row expires, and the order of
+//! the clipboard screen. The binary's `Clips` owns the rows and applies these rules to them.
 //! docs/design/clipboard-and-paste.md holds the fixtures.
 
 use std::cmp::Reverse;
@@ -78,6 +78,16 @@ pub fn local_files(list: &str) -> Vec<LocalFile<'_>> {
             })
         })
         .collect()
+}
+
+/// The paths of the local files a list names, one per line, as a file entry shows and pastes
+/// them.
+pub fn paths(list: &str) -> String {
+    let paths: Vec<String> = local_files(list)
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    paths.join("\n")
 }
 
 /// `text` with each `%` and two hex digits replaced by the byte they spell. A `%` without two

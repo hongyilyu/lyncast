@@ -15,13 +15,14 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lyncast_core::ClipId;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
 use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Writer, quitting};
 use crate::apps;
-use crate::clip::Clips;
+use crate::clip::{Capture, Clips, Seen};
 use crate::config;
 use crate::vars::Vars;
 use crate::warning;
@@ -49,6 +50,18 @@ enum Event {
     Finished(Success, Result<Done, String>, ReplyTo),
     /// A writer ended, after Quit.
     WriterEnded(Writer),
+    /// The writer of the clips could not save a new row.
+    Unsaved(ClipId),
+    /// The capture thread saw an offer, or ended.
+    Seen(Seen),
+}
+
+/// Why the owner loop stops serving.
+enum Stop {
+    /// A Quit command, whose reply goes out once the daemon has stopped.
+    Quit(Reply, ReplyTo),
+    /// The compositor has gone.
+    Closed,
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -104,14 +117,32 @@ pub fn run(record: Option<PathBuf>) -> Result<(), String> {
         Some(dir) => Store::open(dir, ended(Writer::Visits)).map_err(not_started)?,
         None => (Visits::default(), None),
     };
+    let unsaved = {
+        let events = events.clone();
+        move |id| {
+            let _ = events.send(Event::Unsaved(id));
+        }
+    };
     let clips = Clips::open(
         data_home.as_deref(),
         config.retention,
         now(),
+        unsaved,
         ended(Writer::Clips),
     )
     .map_err(not_started)?;
-    let daemon = Daemon::new(vars, index, visits, store, clips);
+    let capture = match vars.wayland_display {
+        Some(_) => {
+            let events = events.clone();
+            let seen = move |seen| {
+                let _ = events.send(Event::Seen(seen));
+            };
+            let started = Capture::start(seen);
+            Some(started.map_err(|error| format!("not started: {error}"))?)
+        }
+        None => None,
+    };
+    let daemon = Daemon::new(vars, index, visits, store, clips, capture);
     let socket = runtime.join(wire::SOCKET);
     warning::flush(Instant::now() + LAST_WRITES);
     let listener = bind(&socket)?;
@@ -168,9 +199,9 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     UnixListener::bind(socket).map_err(failed)
 }
 
-/// The owner loop. It serves until a Quit command, and then stops in the order
-/// docs/design/daemon.md gives: no new connections, the work in flight, the last write, the
-/// reply. The daemon keeps answering while it stops.
+/// The owner loop. It serves until a Quit command or until the compositor goes, and then stops in
+/// the order docs/design/daemon.md gives: no new connections, the work in flight, the last
+/// writes, the reply. The daemon keeps answering while it stops.
 fn serve(
     mut daemon: Daemon,
     mut host: Host,
@@ -182,10 +213,10 @@ fn serve(
     thread::Builder::new()
         .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
-    let (reply, reply_to) = loop {
+    let stop = loop {
         let event = inbox.recv().expect("the host holds a sender");
-        if let Some(quit) = host.dispatch(&mut daemon, event) {
-            break quit;
+        if let Some(stop) = host.dispatch(&mut daemon, event) {
+            break stop;
         }
     };
     let _ = fs::remove_file(&claim.socket);
@@ -200,7 +231,8 @@ fn serve(
         let Ok(event) = inbox.recv_timeout(wait) else {
             break;
         };
-        // The daemon fails every request now, so no second Quit comes back.
+        // The daemon fails every request now, and the capture thread has ended or been
+        // cancelled, so no second stop comes back.
         host.dispatch(&mut daemon, event);
     }
     // The daemon takes no more events, so each one still queued fails.
@@ -218,9 +250,15 @@ fn serve(
     }
     let deadline = Instant::now() + LAST_WRITES;
     warning::flush(deadline);
-    host.unwritten.send(reply_to, reply);
+    let closed = match stop {
+        Stop::Quit(reply, reply_to) => {
+            host.unwritten.send(reply_to, reply);
+            Ok(())
+        }
+        Stop::Closed => Err("the Wayland connection closed".to_owned()),
+    };
     host.unwritten.wait(deadline);
-    Ok(())
+    closed
 }
 
 /// What the owner loop holds beside the daemon.
@@ -233,19 +271,27 @@ struct Host {
 
 impl Host {
     /// Hands one event to the daemon and sends the reply it gives, or starts the job it hands
-    /// back. Gives back the reply to a Quit, which waits.
-    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<(Reply, ReplyTo)> {
+    /// back. Gives back why the daemon stops serving: the reply to a Quit, which waits, or the
+    /// compositor's end.
+    fn dispatch(&mut self, daemon: &mut Daemon, event: Event) -> Option<Stop> {
         match event {
             Event::Request(request, reply_to) => match daemon.handle(request, now()) {
                 Handled::Reply(reply) => self.unwritten.send(reply_to, reply),
                 Handled::Job(job) => self.start(daemon, job, reply_to),
-                Handled::Quit(reply) => return Some((reply, reply_to)),
+                Handled::Quit(reply) => return Some(Stop::Quit(reply, reply_to)),
             },
+            Event::Seen(Seen::Entry(entry)) => daemon.captured(entry, now()),
+            Event::Seen(Seen::Ended) => daemon.capture_ended(),
+            Event::Seen(Seen::Closed) => {
+                daemon.compositor_closed();
+                return Some(Stop::Closed);
+            }
             Event::Finished(success, done, reply_to) => {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
             Event::WriterEnded(writer) => daemon.writer_ended(writer),
+            Event::Unsaved(id) => daemon.unsaved(id),
         }
         None
     }

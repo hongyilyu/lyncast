@@ -106,10 +106,8 @@ fn uris_fixtures() {
         .into_iter()
         .map(|line| {
             let (list, want) = split(&line);
-            let list = doc::unescape(list);
-            let files = clip::local_files(&list);
-            let got: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
-            (line.clone(), doc::unescape(want), got.join("\n"))
+            let got = clip::paths(&doc::unescape(list));
+            (line.clone(), doc::unescape(want), got)
         })
         .collect();
     assert_all("uris", results);

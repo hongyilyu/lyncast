@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lyncast_core::rank::{Index, Timestamp, Visits};
-use lyncast_core::{ActionItem, Command, Key, Subject, root};
+use lyncast_core::{ActionItem, ClipId, Command, Key, Subject, root};
 
-use crate::clip::Clips;
+use crate::clip::{Capture, Clips, Entry};
 use crate::vars::Vars;
 use crate::view::{self, Spelled};
 use crate::wire::{Reply, Request, Summon, Via};
@@ -48,6 +48,9 @@ pub struct Daemon {
     /// ended after Quit, so nothing is left to write.
     store: Option<Store>,
     clips: Clips,
+    /// The capture thread, without which there is no compositor to copy to. `None` too once
+    /// it has ended, after Quit or when the compositor went.
+    capture: Option<Capture>,
     summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
@@ -107,6 +110,7 @@ impl Daemon {
         visits: Visits,
         store: Option<Store>,
         clips: Clips,
+        capture: Option<Capture>,
     ) -> Daemon {
         Daemon {
             vars: Arc::new(vars),
@@ -116,6 +120,7 @@ impl Daemon {
             visits,
             store,
             clips,
+            capture,
             summon: Summon::Closed,
             jobs: 0,
             quitting: false,
@@ -184,9 +189,34 @@ impl Daemon {
         reply
     }
 
-    /// Quit has begun, no job is out, and each writer has ended after its last write.
+    /// Records what the clipboard offered. The capture thread keeps running while Quit waits
+    /// for the work in flight, so its entries still count.
+    pub fn captured(&mut self, entry: Entry, now: Timestamp) {
+        self.clips.record(entry, now);
+    }
+
+    /// The writer of the clips could not save the new row `id`, so the history drops it.
+    pub fn unsaved(&mut self, id: ClipId) {
+        self.clips.unsaved(id);
+    }
+
+    /// The capture thread has ended after Quit cancelled it.
+    pub fn capture_ended(&mut self) {
+        self.capture = None;
+        self.settle();
+    }
+
+    /// The compositor has gone, so the daemon stops as Quit does, with no reply to send.
+    pub fn compositor_closed(&mut self) {
+        self.capture = None;
+        self.quitting = true;
+        self.settle();
+    }
+
+    /// Quit has begun, no job is out, the capture thread has ended, and each writer has ended
+    /// after its last write.
     pub fn stopped(&self) -> bool {
-        self.idle() && self.store.is_none() && self.clips.ended()
+        self.idle() && self.capture.is_none() && self.store.is_none() && self.clips.ended()
     }
 
     /// A writer has ended. Each ends only once Quit has begun and no job is out.
@@ -202,7 +232,9 @@ impl Daemon {
         self.quitting && self.jobs == 0
     }
 
-    /// Once the daemon is idle, the writers can end after their last writes.
+    /// Once the daemon is idle, the capture thread can end, and the writers can end after
+    /// their last writes. The writer of the clips waits for the capture thread, whose last entry
+    /// it records.
     fn settle(&self) {
         if !self.idle() {
             return;
@@ -210,7 +242,10 @@ impl Daemon {
         if let Some(store) = &self.store {
             store.close();
         }
-        self.clips.close();
+        match &self.capture {
+            Some(capture) => capture.cancel(),
+            None => self.clips.close(),
+        }
     }
 
     /// Rebuilds the row from current state, takes the item that `via` names from its actions,
@@ -366,11 +401,6 @@ impl Daemon {
     }
 }
 
-// Inside `mod tests`, a `#[path]` would resolve under src/daemon/tests/, which does not exist.
-#[cfg(test)]
-#[path = "../../../lyncast-core/tests/doc/mod.rs"]
-mod doc;
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -380,6 +410,7 @@ mod tests {
     use lyncast_core::{AppId, Chord};
 
     use super::*;
+    use crate::doc;
 
     /// Reload Apps, and the number and the success of the scan it hands out.
     fn reload(daemon: &mut Daemon) -> (u64, Success) {
@@ -435,7 +466,8 @@ mod tests {
             Index::new(Vec::new()),
             Visits::default(),
             None,
-            Clips::open(None, Retention::DEFAULT, Timestamp(0), || {}).unwrap(),
+            Clips::open(None, Retention::DEFAULT, Timestamp(0), |_| {}, || {}).unwrap(),
+            None,
         );
         let (older, older_success) = reload(&mut daemon);
         let (newer, newer_success) = reload(&mut daemon);
