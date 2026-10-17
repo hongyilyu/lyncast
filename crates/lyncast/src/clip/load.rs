@@ -11,17 +11,21 @@ use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
 use super::schema::SCHEMA;
-use super::{Content, Meta, Row, Seq, no_seq};
+use super::{Content, Meta, Row, Seq, no_id, no_seq};
 use crate::files;
 
 pub struct Loaded {
     pub rows: Vec<Row>,
+    /// One above every id the file has used, deleted ones included.
+    pub next_id: ClipId,
     pub next_seq: Seq,
 }
 
 /// A Wayland message gives its size in 16 bits, so no type that a capture reads is longer, and a
 /// longer one is in a file the daemon did not write.
 const MAX_TYPE: usize = 65_535;
+
+const HASH_BYTES: usize = 64;
 
 pub fn path(data_home: &Path) -> PathBuf {
     data_home.join("lyncast/clips.sqlite3")
@@ -59,6 +63,7 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
     if pages == 0 {
         let loaded = Loaded {
             rows: Vec::new(),
+            next_id: ClipId(1),
             next_seq: Seq::FIRST,
         };
         return Ok((connection, loaded));
@@ -76,7 +81,7 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
     check(foreign_count(&connection))?;
     check(foreign_row(&connection))?;
     let rows = connection
-        .prepare("SELECT id, kind, mime, bytes, preview, used, pinned, seq FROM clips")
+        .prepare("SELECT id, kind, mime, bytes, hash, preview, used, pinned, seq FROM clips")
         .and_then(|mut select| {
             select
                 .query_map([], |row| {
@@ -84,15 +89,16 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
                         content: row.get(1)?,
                         mime: row.get(2)?,
                         bytes: unsigned(row, 3)?,
-                        preview: row.get(4)?,
+                        hash: row.get(4)?,
+                        preview: row.get(5)?,
                     };
-                    let used = Timestamp(row.get(5)?);
+                    let used = Timestamp(row.get(6)?);
                     Ok(Row::new(
                         ClipId(row.get(0)?),
                         meta,
                         used,
-                        row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 })?
                 .collect::<Result<Vec<Row>, _>>()
@@ -106,14 +112,21 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
             |row| row.get(0),
         )
         .map_err(failed)?;
-    if used.checked_add(1).is_none() {
-        return Err(format!("no clip id is left after {used}"));
-    }
+    let next_id = used
+        .checked_add(1)
+        .ok_or_else(|| no_id(Some(ClipId(used))))?;
     let next_seq = match rows.iter().map(|row| row.seq).max() {
         Some(seq) => seq.next().ok_or_else(|| no_seq(Some(seq)))?,
         None => Seq::FIRST,
     };
-    Ok((connection, Loaded { rows, next_seq }))
+    Ok((
+        connection,
+        Loaded {
+            rows,
+            next_id: ClipId(next_id),
+            next_seq,
+        },
+    ))
 }
 
 /// rusqlite's default flags hold `SQLITE_OPEN_CREATE`, which would create a file that went after
@@ -248,8 +261,8 @@ fn foreign_count(connection: &Connection) -> rusqlite::Result<Option<String>> {
 }
 
 /// Why a row of `clips` holds what the daemon does not write. `typeof` and `octet_length` read
-/// only a value's header, and a kind is compared only once it is measured, so a long value costs
-/// no memory.
+/// only a value's header, and a kind or a hash is compared only once it is measured, so a long
+/// value costs no memory. `GLOB` stops at a NUL byte, and `ltrim` reads every byte of the hash.
 fn foreign_row(connection: &Connection) -> rusqlite::Result<Option<String>> {
     let kind_bytes = Content::ALL.map(|content| content.spelling().len());
     let kind_bytes = kind_bytes.into_iter().max().unwrap_or(0);
@@ -272,8 +285,11 @@ fn foreign_row(connection: &Connection) -> rusqlite::Result<Option<String>> {
                     WHEN bytes < 0 THEN 'a negative size'
                     WHEN kind = '{image}' AND typeof(body) <> 'null' THEN 'an image with a text'
                     WHEN kind <> '{image}' AND typeof(body) = 'null' THEN 'no text'
+                    WHEN typeof(hash) <> 'text' THEN 'a hash that is not text'
+                    WHEN octet_length(hash) <> ?3 THEN 'a hash that is not ' || ?3 || ' bytes'
+                    WHEN ltrim(hash, '0123456789abcdef') <> '' THEN 'a hash that is not lowercase hex'
                     WHEN typeof(preview) NOT IN ('text', 'null') THEN 'a preview that is not text'
-                    WHEN octet_length(preview) > ?3 THEN 'a preview over ' || ?3 || ' bytes'
+                    WHEN octet_length(preview) > ?4 THEN 'a preview over ' || ?4 || ' bytes'
                     WHEN kind = '{image}' AND typeof(preview) <> 'null' THEN 'an image with a preview'
                     WHEN kind <> '{image}' AND typeof(preview) = 'null' THEN 'no preview'
                     WHEN typeof(used) <> 'integer' THEN 'a last use that is not an integer'
@@ -284,7 +300,12 @@ fn foreign_row(connection: &Connection) -> rusqlite::Result<Option<String>> {
                 END AS why
             FROM clips) WHERE why IS NOT NULL LIMIT 1"
             ),
-            params![kind_bytes as i64, MAX_TYPE as i64, PREVIEW_BYTES as i64],
+            params![
+                kind_bytes as i64,
+                MAX_TYPE as i64,
+                HASH_BYTES as i64,
+                PREVIEW_BYTES as i64
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;

@@ -45,7 +45,16 @@ pub const DAEMON: Doc = Doc {
 
 pub const CLIPBOARD: Doc = Doc {
     file: "clipboard-and-paste.md",
-    kinds: &["env", "file", "session", "retention", "kind", "uris"],
+    kinds: &[
+        "env",
+        "file",
+        "session",
+        "clipboard",
+        "retention",
+        "store",
+        "kind",
+        "uris",
+    ],
     prose: &["", "rust"],
 };
 

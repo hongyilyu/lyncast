@@ -295,7 +295,12 @@ pub fn run_bounded(mut command: Command, dir: &Path) -> Option<Ran> {
 
 /// A fresh directory under `/tmp` for one test's `XDG_RUNTIME_DIR`, removed when dropped. A
 /// socket path holds at most 107 bytes, which a path under `CARGO_TARGET_TMPDIR` can pass.
-pub struct Runtime(PathBuf);
+pub struct Runtime {
+    path: PathBuf,
+    compositor: bool,
+}
+
+const TEST_ENV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/test-env.sh");
 
 impl Runtime {
     pub fn new() -> Runtime {
@@ -304,20 +309,61 @@ impl Runtime {
         let made = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
         assert!(!made.is_null(), "mkdtemp: {}", io::Error::last_os_error());
         template.pop();
-        Runtime(PathBuf::from(OsString::from_vec(template)))
+        Runtime {
+            path: PathBuf::from(OsString::from_vec(template)),
+            compositor: false,
+        }
+    }
+
+    /// The `XDG_RUNTIME_DIR` of a compositor that `scripts/test-env.sh start` starts, and the
+    /// `WAYLAND_DISPLAY` that reaches it. Dropping the runtime stops the compositor.
+    pub fn compositor() -> (Runtime, String) {
+        let started = Command::new(TEST_ENV)
+            .arg("start")
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("test-env.sh runs");
+        assert!(
+            started.status.success(),
+            "test-env.sh start: {}",
+            started.status
+        );
+        let printed = String::from_utf8(started.stdout).expect("test-env.sh prints UTF-8");
+        let export = |name: &str| {
+            printed
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("export {name}=")))
+                .unwrap_or_else(|| panic!("test-env.sh exports no {name}: {printed:?}"))
+                .to_owned()
+        };
+        let runtime = Runtime {
+            path: PathBuf::from(export("XDG_RUNTIME_DIR")),
+            compositor: true,
+        };
+        (runtime, export("WAYLAND_DISPLAY"))
+    }
+
+    /// Stops the compositor and removes the directory, as `scripts/test-env.sh stop` does.
+    pub fn stop_compositor(&self) -> io::Result<ExitStatus> {
+        Command::new(TEST_ENV)
+            .arg("stop")
+            .arg(&self.path)
+            .stdin(Stdio::null())
+            .status()
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.0.join("lyncast.sock")
+        self.path.join("lyncast.sock")
     }
 
     /// The file that each test daemon records to.
     pub fn runs(&self) -> PathBuf {
-        self.0.join("runs")
+        self.path.join("runs")
     }
 
     fn log(&self, name: &str) -> fs::File {
@@ -338,7 +384,10 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if self.compositor {
+            let _ = self.stop_compositor();
+        }
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -556,10 +605,14 @@ impl Drop for Frozen {
     }
 }
 
-/// The thread of process `pid` that is named `name`.
-/// A thread takes its name only once it runs, after the call that started it has returned, so the
-/// lookup waits for the name as [`poll`] does.
+/// The thread of process `pid` that is named `name`. `main` is the main thread, whose ID is the
+/// process ID, because a thread that the daemon starts without a name has the main thread's name.
+/// Any other thread takes its name only once it runs, after the call that started it has
+/// returned, so the lookup waits for the name as [`poll`] does.
 pub fn named_thread(pid: u32, name: &str) -> Result<libc::pid_t, String> {
+    if name == "main" {
+        return libc::pid_t::try_from(pid).map_err(|error| error.to_string());
+    }
     let tasks = format!("/proc/{pid}/task");
     poll(|| match fs::read_dir(&tasks) {
         Err(error) => Some(Err(format!("{tasks}: {error}"))),
@@ -624,11 +677,21 @@ pub struct World {
 }
 
 impl World {
-    /// A fresh tree at `tree`.
+    /// A fresh tree at `tree`, with a fresh runtime directory.
     pub fn new(fixtures: &[doc::Block], tree: PathBuf) -> World {
+        World::within(fixtures, tree, Runtime::new(), &[])
+    }
+
+    /// A fresh tree at `tree` with `runtime`, and `more` variables beside the `env` block's.
+    pub fn within(
+        fixtures: &[doc::Block],
+        tree: PathBuf,
+        runtime: Runtime,
+        more: &[(String, String)],
+    ) -> World {
         materialize(fixtures, &tree);
-        let runtime = Runtime::new();
-        let env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
+        let mut env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
+        env.extend_from_slice(more);
         let out = tree.with_extension("out");
         fs::create_dir_all(&out).unwrap();
         World {
@@ -676,6 +739,7 @@ impl World {
                 .env("PATH", "/usr/bin:/bin")
                 .env("TREE", &self.tree)
                 .env("RUNTIME", self.runtime.path())
+                .env("LYNCAST", LYNCAST)
                 .current_dir(&self.tree);
             umask(&mut command);
             return (command, None);
@@ -754,8 +818,18 @@ fn hold_line(line: &str, newest: Option<&Daemon>, frozen: &mut Vec<Frozen>) -> O
     })
 }
 
+/// A command line that a doc's own fixtures define, such as a clipboard block's `seed`, given the
+/// newest daemon's process ID, which gives what it printed, or `None` for a line it does not
+/// define.
+pub type Verbs<'v> = dyn FnMut(&str, Option<u32>) -> Option<Ran> + 'v;
+
 /// Runs one session block and gives what failed.
 pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
+    session_with(world, block, &mut |_, _| None)
+}
+
+/// [`session`] for a block whose lines may also run `verbs`.
+pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) -> Vec<String> {
     let mut failures = Vec::new();
     // Kept to the end of the block, which kills any still running.
     let mut daemons: Vec<Daemon> = Vec::new();
@@ -807,6 +881,7 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
             }
             _ => match hold_line(command, daemons.last(), &mut frozen)
                 .or_else(|| connections.line(command, daemons.last(), &world.runtime))
+                .or_else(|| verbs(command, daemons.last().map(Daemon::id)))
             {
                 Some(ran) => Some(ran),
                 None => {
