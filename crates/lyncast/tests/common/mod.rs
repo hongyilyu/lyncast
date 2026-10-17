@@ -389,3 +389,161 @@ impl Drop for Daemon {
         let _ = self.0.wait();
     }
 }
+
+/// One block's tree, runtime directory, and environment.
+pub struct World {
+    pub tree: PathBuf,
+    pub runtime: Runtime,
+    pub env: Vec<(String, String)>,
+    /// Where each run's stdout and stderr go, beside the tree.
+    pub out: PathBuf,
+}
+
+impl World {
+    /// A fresh tree at `tree`.
+    pub fn new(fixtures: &[doc::Block], tree: PathBuf) -> World {
+        materialize(fixtures, &tree);
+        let runtime = Runtime::new();
+        let env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
+        let out = tree.with_extension("out");
+        fs::create_dir_all(&out).unwrap();
+        World {
+            tree,
+            runtime,
+            env,
+            out,
+        }
+    }
+
+    /// A world on a fresh tree named `name` under `CARGO_TARGET_TMPDIR`, for a test that no
+    /// block drives.
+    pub fn scratch(fixtures: &[doc::Block], name: &str) -> World {
+        World::new(fixtures, Path::new(env!("CARGO_TARGET_TMPDIR")).join(name))
+    }
+
+    /// Removes the tree and the output beside it once the run in them passes, so a run that
+    /// fails keeps them to look at.
+    pub fn passed(self) {
+        fs::remove_dir_all(&self.out).unwrap();
+        fs::remove_dir_all(&self.tree).unwrap();
+    }
+
+    /// `text` with `$TREE` and `$RUNTIME` replaced.
+    pub fn substitute(&self, text: &str) -> String {
+        substitute(
+            text,
+            &[("$TREE", &self.tree), ("$RUNTIME", self.runtime.path())],
+        )
+    }
+
+    /// The `$ ...` line as a command in this world, and the arguments of a line that runs
+    /// lyncast. Any other line runs through `/bin/sh`.
+    pub fn command(&self, line: &str) -> (Command, Option<Vec<String>>) {
+        let Some(lyncast) = command_line(line, &self.tree) else {
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(&line[2..])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("TREE", &self.tree)
+                .env("RUNTIME", self.runtime.path())
+                .current_dir(&self.tree);
+            return (command, None);
+        };
+        let mut command = lyncast.command(&lyncast.args, &self.env);
+        command.current_dir(&self.tree);
+        (command, Some(lyncast.args))
+    }
+
+    /// The bytes the recorder file holds now. A recorder that is not a file holds none.
+    pub fn recorded(&self) -> Vec<u8> {
+        fs::read(self.runtime.runs()).unwrap_or_default()
+    }
+}
+
+/// What a command printed, each line with its newline, and the lines it added to the recorder.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Printed {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit: i32,
+    pub record: String,
+}
+
+impl Printed {
+    /// The lines after a command in a session block.
+    pub fn expected(lines: &[String]) -> Printed {
+        let mut printed = Printed::default();
+        for line in lines {
+            if let Some(line) = line.strip_prefix("stderr: ") {
+                printed.stderr += &format!("{line}\n");
+            } else if let Some(code) = line.strip_prefix("exit: ") {
+                printed.exit = code.parse().expect("exit: <n>");
+            } else if let Some(argv) = line.strip_prefix("record: ") {
+                printed.record += &format!("{argv}\n");
+            } else {
+                printed.stdout += &format!("{line}\n");
+            }
+        }
+        printed
+    }
+}
+
+/// Runs one session block and gives what failed.
+pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
+    let mut failures = Vec::new();
+    // Kept to the end of the block, which kills any still running.
+    let mut daemons: Vec<Daemon> = Vec::new();
+    let mut rest = block.lines.as_slice();
+    while let [command, after @ ..] = rest {
+        let number = block.line + 1 + block.lines.len() - rest.len();
+        let printed = after
+            .iter()
+            .take_while(|line| !line.starts_with("$ "))
+            .count();
+        let want: Vec<String> = after[..printed]
+            .iter()
+            .map(|line| world.substitute(line))
+            .collect();
+        rest = &after[printed..];
+        let (mut run, args) = world.command(command);
+        if args.is_none()
+            && let Some(newest) = daemons.last()
+        {
+            run.env("DAEMON", newest.id().to_string());
+        }
+        let daemon = args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
+        if daemon && want.is_empty() {
+            match Daemon::start(run, &world.runtime) {
+                Ok(daemon) => daemons.push(daemon),
+                Err(error) => {
+                    failures.push(format!("line {number}: {command}\n  {error}"));
+                    break;
+                }
+            }
+            continue;
+        }
+        let before = world.recorded().len();
+        let Some((stdout, stderr, code)) = run_bounded(run, &world.out) else {
+            failures.push(format!(
+                "line {number}: {command}\n  ran over the test's time budget"
+            ));
+            break;
+        };
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+        let got = Printed {
+            stdout: text(&stdout),
+            stderr: text(&stderr),
+            exit: code.unwrap_or(-1),
+            record: text(world.recorded().get(before..).unwrap_or_default()),
+        };
+        let want = Printed::expected(&want);
+        if got != want {
+            failures.push(format!(
+                "line {number}: {command}\n  want {want:?}\n  got  {got:?}"
+            ));
+        }
+    }
+    failures
+}
