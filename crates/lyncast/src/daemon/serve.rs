@@ -2,8 +2,9 @@
 //! connection, for [`MAX_CONNECTIONS`] at most at once, which reads the request line, parses it,
 //! and passes it to the owner loop over a channel. The owner loop holds the [`Daemon`] and never
 //! touches a socket. Work that blocks runs on a worker thread, whose result comes back over the
-//! same channel. No [`Daemon`] method blocks, and only this headless host waits, on its channel.
-//! Plan step 7 makes the same calls from a GPUI task that reads an async channel.
+//! same channel, and each writer says there when it has ended. No [`Daemon`] method blocks, and
+//! only this headless host waits, on its channel. Plan step 7 makes the same calls from a GPUI task
+//! that reads an async channel.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -20,8 +21,10 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, WriterKind, quitting};
 use crate::apps;
+use crate::clip::Clips;
+use crate::config;
 use crate::permit::Permits;
 use crate::vars::Vars;
 use crate::warning;
@@ -63,8 +66,8 @@ enum Event {
     Request(Request, ReplyTo),
     /// A worker thread's job ended.
     Finished(Success, Result<Done, String>, ReplyTo),
-    /// The writer of the visits ended, after Quit.
-    WriterEnded,
+    /// A writer ended, after Quit.
+    WriterEnded(WriterKind),
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -121,17 +124,27 @@ fn start(record: Option<PathBuf>) -> Result<(), String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
     let vars = Vars::read();
+    let config = config::read(vars.config_home().as_deref().map(Path::new));
     let index = Index::new(apps::scan(&vars));
     let (events, inbox) = mpsc::channel();
-    let writer = events.clone();
-    let ended = move || {
-        let _ = writer.send(Event::WriterEnded);
+    let ended = |writer: WriterKind| {
+        let events = events.clone();
+        move || {
+            let _ = events.send(Event::WriterEnded(writer));
+        }
     };
-    let (visits, store) = match vars.data_home() {
-        Some(dir) => Store::open(Path::new(&dir), ended).map_err(not_started)?,
+    let data_home = vars.data_home().map(PathBuf::from);
+    let (visits, store) = match &data_home {
+        Some(dir) => Store::open(dir, ended(WriterKind::Visits)).map_err(not_started)?,
         None => (Visits::default(), None),
     };
-    let daemon = Daemon::new(vars, index, visits, store);
+    let clips = Clips::open(
+        data_home.as_deref(),
+        config.retention,
+        ended(WriterKind::Clips),
+    )
+    .map_err(not_started)?;
+    let daemon = Daemon::new(vars, index, visits, store, clips);
     let socket = runtime.join(wire::SOCKET);
     warning::flush(Instant::now() + WARNINGS_BEFORE_BIND);
     let listener = bind(&socket)?;
@@ -202,6 +215,7 @@ fn serve(
     thread::Builder::new()
         .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
+    daemon.started(now());
     let (reply, reply_to) = loop {
         let event = inbox.recv().expect("the host holds a sender");
         if let Some(quit) = host.dispatch(&mut daemon, event) {
@@ -264,7 +278,7 @@ impl Host {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
-            Event::WriterEnded => daemon.writer_ended(),
+            Event::WriterEnded(writer) => daemon.writer_ended(writer),
         }
         None
     }

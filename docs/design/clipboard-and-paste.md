@@ -49,19 +49,59 @@ The thread reads, and it never writes or syncs, so only an offer's reads can hol
 
 ## Clips keeps the rows in memory and in sqlite
 
-`Clips` is the only owner of clip rows, and core ranks a borrowed slice, because a second copy went out of sync in review. It holds every row in memory and loads them at start from `$XDG_DATA_HOME/lyncast/clips.sqlite3`. A row keeps its id, kind, type, size, times, pin, the SHA-256 of what it holds, and a preview: the first 1,024 bytes of its text or of its paths, cut at a character boundary. Whether a text is a link or an email comes from its whole text when it arrives. The database keeps the kind, the hash, and the preview beside the bytes, so a load reads no text, derives nothing again, and holds at most the previews in memory. The full text lives only in the database, and an image's bytes live in `$XDG_DATA_HOME/lyncast/blobs/<sha256 hex>`, one file per distinct image.
+`Clips` is the only owner of clip rows, and core ranks a borrowed slice, because a second copy went out of sync in review. It holds every row in memory and loads them at start from `$XDG_DATA_HOME/lyncast/clips.sqlite3`. A row in memory keeps its id, kind, type, size, last use, pin, sequence number, and a preview: the first 1,024 bytes of its text or of its paths, cut at a character boundary. The file keeps when each row was captured too. Whether a text is a link or an email comes from its whole text when it arrives. The database keeps the kind, the hash, and the preview beside the bytes, so a load reads no text and derives nothing again. Before it reads a row, it checks that each column it reads holds the type of value that the daemon writes there, an integer or text, and measures each row's kind, type, and preview, so it holds no more of a row in memory than its integers, a kind of 5 bytes, a type of 65,535, and a preview of 1,024. It checks too that an image holds no text and no preview, and that a row of every other kind holds both. The full text lives only in the database, and an image's bytes live in `$XDG_DATA_HOME/lyncast/blobs/<sha256 hex>`, one file per distinct image.
 
 The daemon never waits on the disk, as with `ranking.json`. One writer thread owns `clips.sqlite3` and `blobs/`, and each change to a row goes to it in order. A change that fails prints `lyncast: <path>: not saved: <error>`. A pin, an unpin, or a promotion that fails leaves the row as it is in memory, and a delete that fails leaves the row in the file for the next daemon. A new row that fails, its blob or its row, goes from the history too, and its warning ends with `; the clip was not recorded`, so the history never lists a row whose bytes are nowhere, and a later capture of the same bytes records it again. A new row brings its bytes. For an image, the writer writes the blob through a temporary file named with the process ID, and then the row, and a blob that fails to write keeps its row out of the database. A delete removes the row first and then the blob, once no saved row names it, so a crash between the two leaves a blob that no row names, never a row whose blob is gone. A copy reads a row's text or blob through the writer, so a row that the writer has not written yet reads too. The data directory and `blobs/` are created with mode 0700, and `clips.sqlite3` and each blob with mode 0600, because the history holds whatever the user copied, secrets among them. Without an absolute data home, the rows and what they hold live in memory only.
 
 New rows wait for the writer with their bytes. A new row whose bytes would bring what waits past 64 MiB is not recorded, and the daemon prints `lyncast: <path>: not saved: 64 MiB of clips wait for the disk; the clip was not recorded`, so a stalled disk cannot grow the daemon without bound.
 
-The writer thread opens and loads `clips.sqlite3`, and the start waits 5 s at most for it. The writer reads the file only when it is a regular file after symlinks, and creates it when there is none, so a FIFO or a device there fails at once. A file that is not a regular file, a symlink to nothing, a file that SQLite cannot read, and a file whose ids have run out each print `lyncast: <path>: <error>; the clips stay in memory`. The rows then live in memory only, and the daemon never writes the file. SQLite opens the file, and the journal beside it, by path after that check, and an open of a FIFO waits for good, so a load that has not ended in 5 s prints `lyncast: <path>: not loaded within 5 s; the clips stay in memory` too. Its thread writes nothing when it ends. The daemon holds SQLite's exclusive lock until its writer ends, so a second daemon with the same data home finds the database locked and keeps its rows in memory.
+The writer thread opens and loads `clips.sqlite3`, and the start waits 5 s at most for it. The writer reads the file only when it is a regular file after symlinks, and creates it empty, with mode 0600, when there is none, so a FIFO or a device there fails at once. The load itself writes nothing to the file. It takes SQLite's exclusive lock with a transaction that it rolls back, and on an empty file it keeps that transaction's journal in memory, so no journal appears beside the file either. Then it reads, and an empty file holds no row, so a new file stays empty. The daemon holds the lock until its writer ends, so a second daemon with the same data home finds the database locked and keeps its rows in memory.
+
+Until the daemon's first change, the file keeps its bytes unless SQLite rolls a crashed writer's journal back into it, and of the files that SQLite keeps beside it, the journal and the `-wal` change only as this list says, in rollback mode and in WAL mode alike. With a missing file that the writer creates, that is all that changes, whether the daemon uses the file or not.
+
+- Beside a file in rollback mode that is not empty, SQLite takes any file at the journal's path whose first byte is not 0 for the journal of a writer that crashed, at the first read, as any SQLite client does. It rolls back what it can read of that journal, which restores the file to its last commit, and removes it. So a file there goes even when it is no journal, and the database then stays as it was.
+- Beside an empty file, SQLite removes a journal or a `-wal` that holds anything at the first read, since neither can hold a commit of an empty file.
+- Beside a file in WAL mode, an empty `-wal` goes as the load's connection closes, at once for a file that the daemon does not use and as the writer ends for one that it does. When there is none, as SQLite leaves a file that it closed cleanly, SQLite creates an empty one at the first read. A `-wal` that holds anything keeps its bytes, and its frames stay out of the file. The load turns off the checkpoint that SQLite makes as a connection closes unless the `-wal` is empty, and it looks only once it holds the lock, which keeps every other connection from writing to the `-wal`.
+
+Each of these leaves the rows in memory only, and nothing changes but a missing file that the writer created empty and what SQLite rolls back or removes for the load. It prints `lyncast: <path>: <why>; the clips stay in memory`, with `<why>` as given:
+
+- A file that is not a regular file after symlinks: `not a regular file`.
+- A symlink to nothing: `No such file or directory (os error 2)`.
+- A data directory or a file that the daemon cannot look up or create: the system's error, such as `Not a directory (os error 20)` when the data directory is a file, or `File exists (os error 17)` when it is a symlink to nothing.
+- A file that SQLite cannot read, or that another daemon holds: SQLite's error, such as `file is not a database` or `database is locked`.
+- A file that goes after the daemon's check, or turns into a symlink to nothing, before SQLite opens it: SQLite's `unable to open database file: <path>`, as SQLite opens the file without creating it. No block can time that, so `the_open_creates_no_file` in `crates/lyncast/src/clip/load.rs` opens a symlink to nothing.
+- A file whose text encoding is not UTF-8, the one that the daemon writes: `a text encoding of UTF-16le, which the daemon does not write`, with SQLite's name of the encoding in its place.
+- A file whose application id, the number in its header that names the program that made it, is not lyncast's: `an application id of 0, which the daemon does not write`, with the file's id in its place. SQLite leaves it 0 unless a program sets it.
+- A file that holds a table, an index, a view, or a trigger besides those that `schema.sql` makes, the `clips` table and SQLite's count of used ids in `sqlite_sequence`: `a table that the daemon does not make`, or `an index`, and so on, in its place.
+- A `clips` table whose SQL is not that of `schema.sql`, as when it lacks `STRICT`, `AUTOINCREMENT`, or a column, or a column compares text without regard to case: `a clips table that the daemon does not make`.
+- A table of `schema.sql` at another root page, the page where SQLite begins the table, as when an edit of `sqlite_master` moves `sqlite_sequence` to the page of `clips`, so that both tables would keep their rows in one place: `a sqlite_sequence table that the daemon does not make`, with the table's name in its place.
+- A file without a table that `schema.sql` makes: `no clips table`, with the table's name in its place.
+- A `sqlite_sequence` with more than one row: `sqlite_sequence: more than one row`. The load would read the count of used ids from one of them, and another could hold a larger one.
+- A row of `sqlite_sequence` that is not named `clips`: `sqlite_sequence: a row not named clips`.
+- A count of used ids that is not an integer, which the daemon never writes: `sqlite_sequence: a count of used ids that is not an integer`.
+- A row whose id is below 1: `clip <id>: an id below 1`. The daemon numbers its rows from 1, and a `clip:<id>` key takes no sign, so no key could name a row whose id is negative.
+- A row where a column that the load reads holds a type of value that the daemon does not write there: `clip <id>: a last use that is not an integer`, with `a size`, `a pin`, or `a sequence number` in its place, or `clip <id>: a type that is not text`, with `a kind` or `a preview` in its place.
+- A row whose kind holds more than 5 bytes: `clip <id>: a kind over 5 bytes`.
+- A row whose kind is none of `text`, `link`, `email`, `image`, and `files`: `clip <id>: an unknown kind`.
+- A row whose type holds more than 65,535 bytes: `clip <id>: a type over 65535 bytes`.
+- A row whose size is below 0: `clip <id>: a negative size`.
+- An image that holds a text, or a row of another kind that holds none, which the table's checks refuse: `clip <id>: an image with a text`, or `clip <id>: no text`.
+- A row whose preview holds more than 1,024 bytes: `clip <id>: a preview over 1024 bytes`.
+- An image that holds a preview, or a row of another kind that holds none, which the table's checks refuse too: `clip <id>: an image with a preview`, or `clip <id>: no preview`.
+- A row whose sequence number is below 0: `clip <id>: a negative sequence number`.
+- A row whose pin is neither 0 nor 1, the two that the daemon writes: `clip <id>: a pin that is not 0 or 1`.
+- A row whose type or preview is text that is not UTF-8: rusqlite's error, such as `invalid utf-8 sequence of 1 bytes from index 0 at index 2`.
+- A file whose ids have run out: `no clip id is left after <id>`.
+- A file whose sequence numbers have run out: `no sequence number is left after <n>`.
+- A load that has not ended in 5 s: `not loaded within 5 s`.
+
+Before it reads any row, the load compares the file with one that `schema.sql` makes, in this order: its text encoding is UTF-8, its application id is lyncast's, 1819897443, which spells `lync` in ASCII, `sqlite_master` holds the objects that `schema.sql` makes, each with the same table, root page, and SQL, and nothing else, and `sqlite_sequence` holds at most one row, named `clips`, whose count of used ids is an integer. The first check that fails gives the warning. The load compares nothing else in the file's header, such as the page size, the bytes reserved at the end of each page, or the user version, which change neither the rows that the load reads nor the tables that the writer writes to. So whatever another program writes, the checks of the rows meet only the table of `schema.sql`, whose `id` is SQLite's row id, an integer that no other row holds. The load then checks every row column by column, in the order of `schema.sql`. For each column that it reads, it checks the type of value with `typeof`, then the length of a text with SQLite's `octet_length`, and then the value where the daemon limits it. The daemon writes an id of at least 1, one of the five kinds, a size not below 0, a pin of 0 or 1, and a sequence number not below 0. It writes a text and a preview in a row of every kind but an image, and neither in an image, as the table's two checks say, so the load checks with `typeof` that the text, which it does not read, and the preview are there or not as the row's kind says. `typeof` and `octet_length` read only a value's header, so the load reads no value whole before it has bounded it, and a long value costs no memory. In a row, the first check that fails gives the warning. Once every check passes, it reads every row without an error, unless the row's type or preview is text that is not UTF-8. SQLite checks the type of a value as it writes the value into a `STRICT` table, and the table's checks unless they are turned off, but not as it reads the value, so a file whose schema was edited around a row, or whose bytes changed, can hold a value that the daemon does not write. A Wayland message gives its size in 16 bits, so no type that a capture reads holds 65,535 bytes, and a row that the daemon wrote always loads. SQLite opens the file, and the journal beside it, by path after the daemon's check, and an open of a FIFO waits for good, so the start waits 5 s at most. A load that the start has stopped waiting for writes no more than one that it waits for, because its thread gets no change.
 
 The daemon gives each new row the next id itself, one above every id the database has used, so a reply can name the row before the database has it, and the id of a deleted row never comes back. Neither does the id of a new row that the file did not save: the next change that the file saves raises its count of used ids to that id. A database whose ids leave no next one is one the daemon cannot use, and once the ids run out in memory, a new row is not recorded and the daemon prints `lyncast: no clip id is left; the clip was not recorded`. A capture or a recorded write whose kind and bytes match a row promotes that row: it moves to the front and keeps its id. A pinned row stays where it is. The `Watcher`'s first event is the current selection, so without this every daemon start would add the clipboard again (measured, 23 of 23).
 
-The screen order is pins first, in the order they were pinned, then the rest by last use, newest first. A pin is a use. Every insert, promotion, and pin takes the next number in one sequence, so two in the same millisecond keep their order. Unpinning keeps the row's number, so the row goes back where its pin put it.
+The screen order is pins first, in the order they were pinned, then the rest by last use, newest first. A pin is a use. Every insert, promotion, and pin takes the next number in one sequence, so two in the same millisecond keep their order. Unpinning keeps the row's number, so the row goes back where its pin put it. The numbers end at the largest that SQLite stores, 9,223,372,036,854,775,807. Once that one is taken, a pin fails with `no sequence number is left`, and a file whose rows hold it is one the daemon cannot use.
 
-Unpinned rows expire 90 days after their last use, and pins never expire. Unpinning starts a row's age again, so a row pinned for longer than that does not expire as soon as it is unpinned. `[clipboard] retention-days` in `$XDG_CONFIG_HOME/lyncast/config.toml` sets the days, and 0 keeps rows forever. The daemon prunes at start and after each insert. The daemon reads `config.toml` only when it is a regular file of at most 1 MiB after symlinks, so a FIFO there cannot hold up the start. A `config.toml` that cannot be read, does not parse, or gives `retention-days` a value that is not a whole number from 0 up prints `lyncast: <path>: <error>; using the defaults` and leaves the defaults. The daemon leaves every other key alone.
+Unpinned rows expire 90 days after their last use, and pins never expire. Unpinning starts a row's age again, so a row pinned for longer than that does not expire as soon as it is unpinned. `[clipboard] retention-days` in `$XDG_CONFIG_HOME/lyncast/config.toml` sets the days, and 0 keeps rows forever. The daemon prunes once its start has succeeded, so a start that fails changes nothing in the file, and after each insert. The writer removes the rows that a prune takes in one transaction. The daemon reads `config.toml` only when it is a regular file of at most 1 MiB after symlinks, so a FIFO there cannot hold up the start. A `config.toml` that cannot be read, does not parse, or gives `retention-days` a value that is not a whole number from 0 to 4,294,967,295 prints `lyncast: <path>: <error>; using the defaults` and leaves the defaults. The daemon leaves every other key alone.
 
 ## A copy waits for the compositor to take it
 
@@ -196,3 +236,891 @@ Four had no fix in the log or the spec. Plan step 6 settled three on 2026-10-17 
 - `deliver` returned before the compositor applied the selection. A copy now waits for its own marked offer, as [a copy waits for the compositor to take it](#a-copy-waits-for-the-compositor-to-take-it) says.
 - Back-to-back seeding races the watcher. A Tier 2 test waits for each seed's row before it seeds again.
 - A daemon restart empties the clipboard. The daemon does not offer the newest row again at start.
+
+## The fixtures
+
+The tests in `crates/lyncast/tests/clipboard.rs` read the `env` and `session` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, with the `file` blocks of this doc written in `$TREE`, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, shell lines through `/bin/sh`, and the `stall-stderr`, `freeze-thread`, and `thaw-thread` lines. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks.
+
+```env
+HOME=$TREE/home
+XDG_DATA_HOME=$TREE/data
+XDG_CONFIG_HOME=$TREE/config
+XDG_DATA_DIRS=$TREE/share
+XDG_RUNTIME_DIR=$RUNTIME
+XDG_CURRENT_DESKTOP=niri
+LANG=C
+PATH=$TREE/bin
+```
+
+A `session` block runs with no compositor, as Tier 1 does. Its shell lines add rows to `clips.sqlite3` with `sqlite3` while no daemon runs, because a running daemon holds the file's lock. A daemon leaves a new file empty, so a block first creates the table from `schema.sql`, the schema that the load takes, with lyncast's application id, which a unit test in `crates/lyncast/src/clip/schema.rs` checks against the load's own. A row's columns are its id, kind, type, size, text, the SHA-256 of what it holds in hex, preview, creation time, last use, pin, and sequence number.
+
+```file schema.sql
+PRAGMA application_id = 1819897443;
+CREATE TABLE IF NOT EXISTS clips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'link', 'email', 'image', 'files')),
+    mime TEXT NOT NULL,
+    bytes INTEGER NOT NULL CHECK (bytes >= 0),
+    body TEXT,
+    hash TEXT NOT NULL,
+    preview TEXT,
+    created INTEGER NOT NULL,
+    used INTEGER NOT NULL,
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    seq INTEGER NOT NULL CHECK (seq >= 0),
+    CHECK ((kind = 'image') = (body IS NULL)),
+    CHECK ((kind = 'image') = (preview IS NULL))
+) STRICT;
+```
+
+### Without a compositor the history still answers
+
+With no `WAYLAND_DISPLAY`, no capture thread runs and a copy fails, but the stored rows load and change. The first daemon creates the database empty, so that only the user may open it, in a directory that only the user may list, and it writes nothing to the file, not even a journal beside it, since it has nothing to save. The rows load as the database keeps them, with their kinds and previews: a link, an email, a file list's paths, and an image without a preview. Pins come first in the order they were pinned, and an unpinned row goes back to the place its pin gave it. A pin, an unpin, and a delete close the summon and record no visit, so no `ranking.json` appears. The changes reach the database, so the next daemon shows the same list.
+
+```session
+$ lyncast daemon --headless
+$ ls data/lyncast
+clips.sqlite3
+$ lyncast clip list --json
+$ lyncast activate clip:1 --verb pin
+stderr: lyncast: no clip 1
+exit: 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ stat -c %a data/lyncast data/lyncast/clips.sqlite3
+700
+600
+$ stat -c %s data/lyncast/clips.sqlite3
+0
+$ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'link', 'text/plain;charset=utf-8', 23, ' https://example.org/a ', '90eec24f494163b854df68f6fcb8feab4755335c0c73119a27c7ee52974cea47', ' https://example.org/a ', 0, unixepoch() * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'email', 'text/plain;charset=utf-8', 14, 'me@example.org', '855c94f3498940b241d6b5e78bb6f9293b941953b2799f8b925bd25180571d77', 'me@example.org', 0, unixepoch() * 1000, 0, 3)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (4, 'files', 'text/uri-list', 38, 'file:///etc/hostname' || char(10) || 'file:///tmp/a%20b', '34584a5c97220e11a055a677ac6f7554c88cc378dd609350fa15c13d8b19f772', '/etc/hostname' || char(10) || '/tmp/a b', 0, unixepoch() * 1000, 0, 4)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (5, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 5)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast toggle
+open
+$ lyncast activate clip:3 --verb pin
+pinned clip 3
+$ lyncast status
+closed
+$ lyncast activate clip:1 --verb pin
+pinned clip 1
+$ lyncast clip list --json
+{"id":3,"kind":"email","pinned":true,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+$ lyncast toggle
+open
+$ lyncast activate clip:3 --verb unpin
+unpinned clip 3
+$ lyncast status
+closed
+$ lyncast activate clip:1 --verb pin
+stderr: lyncast: clip:1 has no action pin
+exit: 1
+$ lyncast toggle
+open
+$ lyncast activate clip:5 --verb delete
+deleted clip 5
+$ lyncast status
+closed
+$ lyncast activate clip:5
+stderr: lyncast: no clip 5
+exit: 1
+$ lyncast activate clip:2
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast activate calc:2+3
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, seq from clips"
+1|1|7
+2|0|2
+3|0|6
+4|0|4
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+```
+
+### Old rows expire at start
+
+Row 1 was last used 91 days ago, row 2 89 days ago, and row 3 is a pin last used in 1970. With `retention-days = 0` every row stays. A config that does not parse warns, and the default of 90 days removes row 1. A number of days past 4,294,967,295 warns too, and 4,294,967,295 itself does not. Unpinning row 3 starts its age again, so with `retention-days = 1` the next start removes row 2 and keeps row 3.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, (unixepoch() - 91 * 86400) * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 6, 'recent', '034a7e52c5c9534b709dc1dba403868399b0949f7c1933a67325c22077ffc221', 'recent', 0, (unixepoch() - 89 * 86400) * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'text', 'text/plain;charset=utf-8', 6, 'pinned', '3fab5c181bd28a09b64397df76ae2bfaf1eac182979b5fdb7a342858004f36af', 'pinned', 0, 0, 1, 3)"
+$ mkdir -p config/lyncast && printf '[clipboard]\nretention-days = 0\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf '[clipboard]\nretention-days = "ninety"\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: invalid type: string "ninety", expected u32 at line 2 column 18; using the defaults
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
+$ lyncast activate clip:3 --verb unpin
+unpinned clip 3
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf '[clipboard]\nretention-days = 4294967296\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf '[clipboard]\nretention-days = 4294967295\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf 'theme = "dark"\n\n[clipboard]\nretention-days = 1\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id from clips"
+3
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: invalid type: string "ninety", expected u32 at line 2 column 18; using the defaults
+lyncast: $TREE/config/lyncast/config.toml: invalid value: integer `4294967296`, expected u32 at line 2 column 18; using the defaults
+```
+
+The daemon reads `config.toml` only when it is a regular file of at most 1 MiB after symlinks, and it never opens a FIFO there, so a FIFO cannot hold up the start. A FIFO, a directory, a symlink to nothing, and a file over 1 MiB each warn, and the daemon starts with the defaults.
+
+```session
+$ mkdir -p config/lyncast && mkfifo config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm config/lyncast/config.toml && mkdir config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rmdir config/lyncast/config.toml && ln -s missing.toml config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm config/lyncast/config.toml && truncate -s 1048577 config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: not a regular file; using the defaults
+lyncast: $TREE/config/lyncast/config.toml: not a regular file; using the defaults
+lyncast: $TREE/config/lyncast/config.toml: No such file or directory (os error 2); using the defaults
+lyncast: $TREE/config/lyncast/config.toml: over 1 MiB; using the defaults
+```
+
+The writer removes the rows that a prune takes in one transaction, so a start that finds many rows expired, as after a long absence or a lower `retention-days`, does not hold the writer up. Here 5,000 rows last used in 1970 go at the first start, before a Quit right after it replies. With a transaction for each row, Quit gave up after its 5 s with 3,930 and 3,976 of them left in two runs, and with one transaction the daemon exited 45 to 49 ms after the Quit in three, each on the dev box's NVMe disk (measured). The daemon drops the expired rows from memory by looking each row up in a set of their ids. While the start pruned before it bound the socket, a list of the ids in place of the set made the first start bind it after 71 ms in six runs of a debug build, against 24 ms with the set (measured).
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "with recursive n (i) as (select 1 union all select i + 1 from n where i < 5000) insert into clips select i, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, 0, 0, i from n"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select count(*) from clips"
+0
+```
+
+The daemon prunes only once its start has succeeded, so a start that fails changes nothing in the file. Here the socket's path is a directory, so each start fails at its bind, after the load, and the row last used in 1970 stays, with no journal beside the file. The second daemon's stderr does not drain, so it waits 1 s for its last line before it exits, which would give a prune that the load began the time to reach the file. Once the directory goes, the next start removes the row.
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, 0, 0, 1)"
+$ cp data/lyncast/clips.sqlite3 before.sqlite3 && mkdir $RUNTIME/lyncast.sock
+$ lyncast daemon --headless
+stderr: lyncast: $RUNTIME/lyncast.sock: Is a directory (os error 21)
+exit: 1
+$ date +%s%N > started
+$ stall-stderr
+$ lyncast daemon --headless
+exit: 1
+$ [ $(( $(date +%s%N) - $(cat started) )) -ge 1000000000 ] && echo 1 s or more
+1 s or more
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rmdir $RUNTIME/lyncast.sock
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select count(*) from clips"
+0
+```
+
+A `retention` line gives a row's last use in days before now, whether it is pinned, and `retention-days`, and says whether the row expires. The core predicate reads these lines, and the store applies the same predicate at start and after each insert.
+
+```retention
+used 89d ago, unpinned, keep 90 => kept
+used 90d ago, unpinned, keep 90 => kept
+used 91d ago, unpinned, keep 90 => expired
+used 400d ago, pinned, keep 90 => kept
+used 400d ago, unpinned, keep 0 => kept
+used 2d ago, unpinned, keep 1 => expired
+```
+
+### A database the daemon cannot use stays as it is
+
+The four blocks below start daemons on databases that the daemon cannot use, beside a few that it can. A daemon that cannot use its database keeps its rows in memory and prints the warning that the [list above](#clips-keeps-the-rows-in-memory-and-in-sqlite) gives. It writes nothing to the file, and SQLite changes nothing beside it but what the list of side files there says.
+
+The daemon looks the file up after symlinks, and creates it only where nothing is. Each of these leaves the rows in memory:
+
+- A data directory that is a file, which leaves the visits in memory too.
+- A data directory that is a symlink to nothing, whose target the daemon does not create.
+- A file that SQLite cannot read, which keeps its bytes.
+- A FIFO in the file's place, which the daemon never opens, so the start goes on.
+- A symlink to nothing in the file's place, whose target the daemon does not create.
+
+```session
+$ mkdir -p data && echo not a directory > data/lyncast
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast && ln -s missing data/lyncast
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data
+lyncast
+$ rm data/lyncast
+$ mkdir -p data/lyncast && echo not a database > data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat data/lyncast/clips.sqlite3
+not a database
+$ rm data/lyncast/clips.sqlite3 && mkfifo data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/clips.sqlite3 && ln -s missing.sqlite3 data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+clips.sqlite3
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: Not a directory (os error 20); not moved to ranking.json.bad: Not a directory (os error 20); the visits stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: Not a directory (os error 20); the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: File exists (os error 17); the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: file is not a database; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: not a regular file; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: No such file or directory (os error 2); the clips stay in memory
+```
+
+The load takes a file that holds anything only when it matches one that `schema.sql` makes in all that the load compares. Each of these files differs from such a file, and stays byte for byte as it was:
+
+- Another program's file, which has no application id, with a table whose count in `sqlite_sequence`, the table where SQLite counts the ids it has used, is text.
+- A file from `schema.sql` whose application id is then set to 1, and a file in UTF-16 from `schema.sql`, which holds lyncast's application id and, as SQLite reads it, the same SQL.
+- A file from `schema.sql` with an index beside `clips`, then with another table in the index's place, and then with neither that table nor `clips`, which leaves `sqlite_sequence`.
+- A file from `schema.sql` whose `sqlite_sequence` an edit of `sqlite_master` moves to the root page of `clips`.
+- A file from `schema.sql` with a second row in `sqlite_sequence` for `clips`, whose count is the largest id, and one whose only row is another table's.
+- A `clips` table without `STRICT` and with a column named `Used`, a name that SQLite matches without regard to case, one whose `kind` compares without regard to case and holds `Text`, and one without `AUTOINCREMENT`, which makes no `sqlite_sequence`. Each holds lyncast's application id and a row.
+
+A file from `schema.sql` with a page size of 65,536 bytes, 64 bytes reserved at the end of each page, and a user version of 7 loads, since the load compares nothing else in the header, and the next daemon finds the pin that the first one saved.
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 "create table t (id integer primary key autoincrement); insert into t default values; update sqlite_sequence set seq = 'one'"
+$ cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma application_id = 1" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma encoding = 'UTF-16le'" ".read schema.sql" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma encoding" "pragma application_id"
+UTF-16le
+1819897443
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "create index used on clips (used)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "drop index used; create table t (x)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "drop table t; drop table clips" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "select name from sqlite_master"
+sqlite_sequence
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma writable_schema = on; update sqlite_master set rootpage = (select rootpage from sqlite_master where name = 'clips') where name = 'sqlite_sequence'" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1); insert into sqlite_sequence values ('clips', 9223372036854775807)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "select * from sqlite_sequence"
+clips|1
+clips|9223372036854775807
+$ sqlite3 data/lyncast/clips.sqlite3 "delete from sqlite_sequence; insert into sqlite_sequence values ('t', 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma application_id = 1819897443; create table clips (id integer primary key autoincrement, kind text, mime text, bytes integer, body text, hash text, preview text, created integer, Used integer, pinned integer, seq integer); insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sed 's/kind TEXT NOT NULL/kind TEXT NOT NULL COLLATE NOCASE/' schema.sql | sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'Text', 'text/plain', 3, 'abc', 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'abc', 0, 0, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sed 's/ AUTOINCREMENT//' schema.sql | sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma page_size = 65536" ".filectrl reserve_bytes 64" ".read schema.sql" "pragma user_version = 7" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+64
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb pin
+pinned clip 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 1, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a text encoding of UTF-16le, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an index that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a table that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: no clips table; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a sqlite_sequence table that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: more than one row; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: a row not named clips; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
+```
+
+Of the files beside the database, the journal and the `-wal` change only as the list of side files says, whether the daemon refuses the database or loads it:
+
+- Beside the file with the index, in rollback mode, a file at the journal's path whose first byte is 0 stays. One that holds text goes, as SQLite takes it for the journal of a writer that crashed, and the database stays as it was.
+- Another program's file in WAL mode stays as it was, and its `-wal` keeps its frames. So it goes when a symlink names that file, since SQLite keeps the `-wal` beside the file that the symlink leads to.
+- Such a file with no `-wal`, as SQLite leaves a file that it closed cleanly, or with an empty one, stays as it was too, and once the daemon has refused it, no `-wal` is left beside it.
+- A lyncast file in WAL mode that the daemon loads stays as it was, and the empty `-wal` that SQLite creates beside it at the load's first read is there while the daemon runs and goes once it quits.
+- A writer that crashes in a transaction leaves a journal beside the file, and SQLite rolls it back at the load's first read, so the file holds its last commit and the journal goes. Here a copy of a file and its journal, taken in the middle of a transaction, stands for such a crash.
+- Beside an empty file, a `-wal` and a journal go at the load's first read, and the file stays empty.
+- SQLite opens the journal beside the file itself, after the daemon's check, so a FIFO there holds the load. After 5 s the daemon starts with its rows in memory, and the file keeps its row.
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "create index used on clips (used)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ printf '\0stale' > data/lyncast/clips.sqlite3-journal && cp data/lyncast/clips.sqlite3-journal before.sqlite3-journal
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3 && cmp before.sqlite3-journal data/lyncast/clips.sqlite3-journal
+$ echo stale > data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 ".dbconfig no_ckpt_on_close on" "pragma journal_mode = wal" "create table t (v)" "insert into t values (1)"
+   no_ckpt_on_close on
+wal
+$ cp data/lyncast/clips.sqlite3 before.sqlite3 && cp data/lyncast/clips.sqlite3-wal before.sqlite3-wal
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3 && cmp before.sqlite3-wal data/lyncast/clips.sqlite3-wal
+$ ls data/lyncast
+clips.sqlite3
+clips.sqlite3-shm
+clips.sqlite3-wal
+$ mkdir elsewhere && mv data/lyncast/clips.sqlite3* elsewhere && ln -s ../../elsewhere/clips.sqlite3 data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 elsewhere/clips.sqlite3 && cmp before.sqlite3-wal elsewhere/clips.sqlite3-wal
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3*
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma journal_mode = wal" "create table t (v)" "insert into t values (1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+wal
+$ ls data/lyncast
+clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ touch data/lyncast/clips.sqlite3-wal
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma journal_mode = wal" ".read schema.sql" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+wal
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ ls data/lyncast
+clips.sqlite3
+clips.sqlite3-wal
+$ stat -c %s data/lyncast/clips.sqlite3-wal
+0
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3*
+$ sqlite3 t.sqlite3 "create table t (v); insert into t values (1)" && cp t.sqlite3 before.sqlite3
+$ sqlite3 t.sqlite3 "pragma cache_size = 1" "begin" "insert into t select zeroblob(4096) from (select 1 union all select 2 union all select 3 union all select 4 union all select 5 union all select 6 union all select 7 union all select 8)" ".shell cp t.sqlite3 data/lyncast/clips.sqlite3 && cp t.sqlite3-journal data/lyncast/clips.sqlite3-journal" "rollback"
+$ cmp -s before.sqlite3 data/lyncast/clips.sqlite3 || echo the writer left its change
+the writer left its change
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 w.sqlite3 ".dbconfig no_ckpt_on_close on" "pragma journal_mode = wal" "create table t (v)"
+   no_ckpt_on_close on
+wal
+$ cp w.sqlite3-wal data/lyncast/clips.sqlite3-wal && echo stale > data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ stat -c %s data/lyncast/clips.sqlite3
+0
+$ ls data/lyncast
+clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && mkfifo data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/clips.sqlite3-journal
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, preview from clips"
+1|alpha
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: an index that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an index that the daemon does not make; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: an application id of 0, which the daemon does not write; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: not loaded within 5 s; the clips stay in memory
+```
+
+The load checks each value that it reads before it reads any row. Each of these leaves the rows in memory:
+
+- A file whose largest id leaves no next one.
+- A preview of 1,025 bytes, where one of 1,024 loads, and a type of 65,536 bytes, where one of 65,535 loads.
+- A kind of 6 bytes, which only a file that ignores the table's checks can hold.
+- A sequence number that is the largest that SQLite stores. One below it loads, and a pin takes the last number, so the next pin fails.
+- An id of -1, which the table takes but no `clip:<id>` key can name. The file stays byte for byte as it was.
+- A value of a type that `STRICT` refuses, which a table holds once its schema has been edited around the row. `loose.sql` here takes `STRICT` off `clips`, and turns its checks off, while a line writes the row, and `strict.sql` puts `STRICT` back, so the file holds the SQL of `schema.sql` again. Each of these leaves the rows in memory:
+  - A last use that holds 32 MiB of text.
+  - A kind, type, or preview that is a blob.
+  - A size, pin, or sequence number that is text.
+- A count of used ids that is text, which `sqlite_sequence` takes, since its columns take any type.
+- With the table's checks turned off, a kind of `texts`, which names no kind, a size or a sequence number below 0, and a pin of 2. The file stays byte for byte as it was after the pin.
+- With the table's checks turned off, a text row without its text, then without its preview, a link without its text, an email without its preview, and then the row as an image with a text, and as one with a preview, which the table's two checks refuse. The file stays byte for byte as it was after each.
+- A type that is text that is not UTF-8.
+
+```file loose.sql
+PRAGMA ignore_check_constraints = ON;
+PRAGMA writable_schema = ON;
+UPDATE sqlite_master SET sql = replace(sql, ') STRICT', ')') WHERE name = 'clips';
+PRAGMA writable_schema = RESET;
+```
+
+```file strict.sql
+PRAGMA writable_schema = ON;
+UPDATE sqlite_master SET sql = sql || ' STRICT' WHERE name = 'clips';
+```
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775807, 'text', 'text/plain;charset=utf-8', 3, 'max', '9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6', 'max', 0, unixepoch() * 1000, 0, 1)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "delete from clips; delete from sqlite_sequence; insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 1)"
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb pin
+pinned clip 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set preview = preview || 'a'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, length(preview) from clips"
+1|1|1025
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set preview = 'alpha', mime = 'text/' || replace(hex(zeroblob(32765)), '0', 'a')"
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb unpin
+unpinned clip 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set mime = mime || 'a'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set mime = 'text/plain;charset=utf-8', kind = 'images'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, kind, length(preview), length(mime) from clips"
+1|0|images|5|24
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set kind = 'text', seq = 9223372036854775806"
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb pin
+pinned clip 1
+$ lyncast activate clip:1 --verb unpin
+unpinned clip 1
+$ lyncast activate clip:1 --verb pin
+stderr: lyncast: no sequence number is left
+exit: 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, seq from clips"
+1|0|9223372036854775807
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set seq = 1, id = -1" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set id = 1, used = replace(hex(zeroblob(16777216)), '0', 'a')" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set used = unixepoch() * 1000, mime = cast(mime as blob)" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set mime = cast(mime as text), kind = cast(kind as blob)" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set kind = cast(kind as text), bytes = 'five'" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set bytes = 5, preview = cast(preview as blob)" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set preview = cast(preview as text), pinned = 'no'" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set pinned = 1, seq = 'one'" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set seq = 2" ".read strict.sql" "update sqlite_sequence set seq = 'one'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, typeof(used), typeof(mime), (select typeof(seq) from sqlite_sequence) from clips"
+1|1|integer|text|text
+$ sqlite3 data/lyncast/clips.sqlite3 "update sqlite_sequence set seq = 1; pragma ignore_check_constraints = 1; update clips set kind = 'texts'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set kind = 'text', bytes = -1"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set bytes = 5, seq = -1"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set seq = 1, pinned = 2" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set pinned = 1, body = null" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set body = 'alpha', preview = null" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set kind = 'link', body = null, preview = 'alpha'" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set kind = 'email', body = 'alpha', preview = null" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set kind = 'image', mime = 'image/png'" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set body = null, preview = 'not-written-by-daemon'" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set kind = 'text', body = 'alpha', preview = 'alpha', mime = cast(x'ff' as text)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, kind, bytes, seq, hex(mime), (select seq from sqlite_sequence) from clips"
+1|text|5|1|FF|1
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: no clip id is left after 9223372036854775807; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a preview over 1024 bytes; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a type over 65535 bytes; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a kind over 5 bytes; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: no sequence number is left after 9223372036854775807; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip -1: an id below 1; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a last use that is not an integer; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a type that is not text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a kind that is not text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a size that is not an integer; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a preview that is not text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a pin that is not an integer; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a sequence number that is not an integer; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: a count of used ids that is not an integer; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an unknown kind; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a negative size; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a negative sequence number; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a pin that is not 0 or 1; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no preview; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no preview; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an image with a text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an image with a preview; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: invalid utf-8 sequence of 1 bytes from index 0 at index 2; the clips stay in memory
+```
+
+A load that the start has stopped waiting for changes no more than a load that the start waits for, which is at most what SQLite rolls back or removes for it. Here a FIFO at the journal's path holds the load's open of a database that holds no table past the 5 s. Once the daemon has started with its rows in memory, the test holds the load's thread still, removes the FIFO, and lets the thread go on, so its open starts again and finds no journal, and the load ends. The test waits until the daemon holds no descriptor of the file, looking 1,000 times at most, and `ls` may find a descriptor gone that it listed, so the wait drops its errors. Once the load has closed the file, the file is as it was. So it goes for a file in WAL mode that gets a `-wal` with frames while the thread is held, before the load holds the lock. The test copies that `-wal` from a connection to a copy of the file. The load looks at the `-wal` only once it holds the lock, so the `-wal` keeps its frames, and the file its bytes.
+
+```session
+$ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 "create table t (x); drop table t"
+$ cp data/lyncast/clips.sqlite3 before.sqlite3 && mkfifo data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ freeze-thread clips
+$ rm data/lyncast/clips.sqlite3-journal
+$ thaw-thread
+$ i=0; while ls -l /proc/$DAEMON/fd 2>/dev/null | grep -q clips.sqlite3; do [ $((i += 1)) -lt 1000 ] || exit 1; sleep 0.01; done
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma journal_mode = wal" "create table t (x)" "drop table t"
+wal
+$ cp data/lyncast/clips.sqlite3 before.sqlite3 && cp data/lyncast/clips.sqlite3 w.sqlite3
+$ sqlite3 w.sqlite3 ".dbconfig no_ckpt_on_close on" "create table t (x)" "drop table t"
+   no_ckpt_on_close on
+$ mkfifo data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ freeze-thread clips
+$ cp w.sqlite3-wal data/lyncast/clips.sqlite3-wal && rm data/lyncast/clips.sqlite3-journal
+$ thaw-thread
+$ i=0; while ls -l /proc/$DAEMON/fd 2>/dev/null | grep -q clips.sqlite3; do [ $((i += 1)) -lt 1000 ] || exit 1; sleep 0.01; done
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3 && cmp w.sqlite3-wal data/lyncast/clips.sqlite3-wal
+$ ls data/lyncast
+clips.sqlite3
+clips.sqlite3-wal
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: not loaded within 5 s; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: not loaded within 5 s; the clips stay in memory
+```
+
+### A second daemon finds the history locked
+
+The first daemon holds SQLite's exclusive lock from its load on, so `sqlite3` cannot read the database while it runs, and a second daemon with its own `XDG_RUNTIME_DIR` and the same data home keeps its clips in memory. Once the first daemon quits, the next one loads the database. So it goes for a file that holds a row: the daemon that loads it lists the row, `sqlite3` cannot read the file, and a second daemon lists nothing.
+
+```session
+$ lyncast daemon --headless
+$ sqlite3 data/lyncast/clips.sqlite3 "select count(*) from sqlite_master"
+stderr: Error: in prepare, database is locked (5)
+exit: 5
+$ mkdir $RUNTIME/two
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ sqlite3 data/lyncast/clips.sqlite3 "select count(*) from clips"
+stderr: Error: in prepare, database is locked (5)
+exit: 5
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast daemon --headless
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast clip list --json
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+```
+
+### A text's kind and a file list's paths
+
+A `kind` line gives a whole text and the kind it shows as. A `uris` line gives one line of a `text/uri-list` or `x-special/gnome-copied-files` list and the local path it names, or nothing after `=>` when it names none. Either side may write `\u{XXXX}` for a character.
+
+```kind
+alpha => text
+https://example.org/a => link
+http://example.org => link
+\u{20}https://example.org/a\u{A} => link
+https://example.org/a b => text
+https:// => text
+ftp://example.org => text
+me@example.org => email
+\u{9}me@example.org\u{A} => email
+me@example => text
+@example.org => text
+me@.org => text
+me@example. => text
+me@you@example.org => text
+me @example.org => text
+```
+
+```uris
+file:///etc/hostname => /etc/hostname
+file://localhost/etc/hostname => /etc/hostname
+file:///etc/hostname\u{D} => /etc/hostname
+file:///tmp/a%20b => /tmp/a b
+file:///tmp/%FF => /tmp/\u{FFFD}
+file:///tmp/a%2 => /tmp/a%2
+file:///tmp/a%zz => /tmp/a%zz
+file:///tmp/a%+1 => /tmp/a%+1
+file://example.org/etc/hostname =>
+file:/etc/hostname =>
+https://example.org/a =>
+# a comment =>
+copy =>
+```

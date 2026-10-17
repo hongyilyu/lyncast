@@ -4,6 +4,7 @@
 
 mod actions;
 pub mod calc;
+pub mod clip;
 mod command;
 pub mod desktop;
 mod fold;

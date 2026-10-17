@@ -31,9 +31,9 @@ use connections::Connections;
 /// The binary under test.
 pub const LYNCAST: &str = env!("CARGO_BIN_EXE_lyncast");
 
-/// Writes every `desktop <path>` and `executable <path>` block under `tree`, from scratch, makes
-/// each `symlink <path> -> <target>` block a link to `target` as written, and makes each
-/// `fifo <path>` block a FIFO. A `desktop` block may give `mode=<octal>` after its path.
+/// Writes every `desktop <path>`, `executable <path>`, and `file <path>` block under `tree`, from
+/// scratch, makes each `symlink <path> -> <target>` block a link to `target` as written, and makes
+/// each `fifo <path>` block a FIFO. A `desktop` block may give `mode=<octal>` after its path.
 pub fn materialize(blocks: &[doc::Block], tree: &Path) {
     match fs::remove_dir_all(tree) {
         Err(error) if error.kind() != ErrorKind::NotFound => panic!("{tree:?}: {error}"),
@@ -41,7 +41,7 @@ pub fn materialize(blocks: &[doc::Block], tree: &Path) {
     }
     fs::create_dir_all(tree).unwrap();
     let of = |kind: &'static str| blocks.iter().filter(move |block| block.kind == kind);
-    for kind in ["desktop", "executable"] {
+    for kind in ["desktop", "executable", "file"] {
         for block in of(kind) {
             let (relative, mode) = match block.args.as_slice() {
                 [relative] => (relative, (kind == "executable").then_some(0o755)),
@@ -168,6 +168,13 @@ pub struct CommandLine {
 }
 
 impl CommandLine {
+    pub fn var(&self, name: &str) -> Option<&OsStr> {
+        self.vars
+            .iter()
+            .find(|(set, _)| set == name)
+            .map(|(_, value)| value.as_os_str())
+    }
+
     /// `lyncast` with `args` and only `env`'s variables, as this line changes them.
     pub fn command<S: AsRef<OsStr>>(
         &self,
@@ -201,8 +208,9 @@ fn umask(command: &mut Command) {
 }
 
 /// A `$ [env -u NAME ...] [NAME=value ...] lyncast ...` line, or `None` for a line that runs
-/// another program. A value may hold `$TREE` and `\x{HH}`, and `""` is an empty argument.
-pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
+/// another program. A value may hold each `$NAME` in `paths` and `\x{HH}`, and `""` is an empty
+/// argument.
+pub fn command_line(command: &str, paths: &[(&str, &Path)]) -> Option<CommandLine> {
     let mut words: &[&str] = &command
         .strip_prefix("$ ")
         .unwrap_or_else(|| panic!("a command line starts with `$ `: {command:?}"))
@@ -224,7 +232,7 @@ pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
         .iter()
         .map(|word| {
             let (name, value) = word.split_once('=').expect("a word with =");
-            let value = OsString::from_vec(raw_bytes(&substitute(value, &[("$TREE", tree)])));
+            let value = OsString::from_vec(raw_bytes(&substitute(value, paths)));
             (name.to_owned(), value)
         })
         .collect();
@@ -408,12 +416,12 @@ impl Daemon {
     /// Spawns `command` and waits, as [`poll`] does, until the socket accepts. Fails when the
     /// daemon exits first, or when the wait runs out.
     pub fn start(command: Command, runtime: &Runtime) -> Result<Daemon, String> {
-        Daemon::spawn(command, runtime).serving(runtime)
+        Daemon::spawn(command, runtime).serving(runtime, &runtime.socket())
     }
 
-    pub fn serving(mut self, runtime: &Runtime) -> Result<Daemon, String> {
+    pub fn serving(mut self, runtime: &Runtime, socket: &Path) -> Result<Daemon, String> {
         let accepted = poll(|| {
-            if UnixStream::connect(runtime.socket()).is_ok() {
+            if UnixStream::connect(socket).is_ok() {
                 return Some(Ok(()));
             }
             self.exited().map(Err)
@@ -652,10 +660,14 @@ impl World {
         )
     }
 
-    /// The `$ ...` line as a command in this world, and the arguments of a line that runs
-    /// lyncast. Any other line runs through `/bin/sh`.
-    pub fn command(&self, line: &str) -> (Command, Option<Vec<String>>) {
-        let Some(lyncast) = command_line(line, &self.tree) else {
+    /// The `$ ...` line as a command in this world, and the line itself when it runs lyncast.
+    /// Any other line runs through `/bin/sh`.
+    pub fn command(&self, line: &str) -> (Command, Option<CommandLine>) {
+        let paths = [
+            ("$TREE", self.tree.as_path()),
+            ("$RUNTIME", self.runtime.path()),
+        ];
+        let Some(lyncast) = command_line(line, &paths) else {
             let mut command = Command::new("/bin/sh");
             command
                 .arg("-c")
@@ -670,7 +682,7 @@ impl World {
         };
         let mut command = lyncast.command(&lyncast.args, &self.env);
         command.current_dir(&self.tree);
-        (command, Some(lyncast.args))
+        (command, Some(lyncast))
     }
 
     /// The bytes the recorder file holds now. A recorder that is not a file holds none.
@@ -798,26 +810,33 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
             {
                 Some(ran) => Some(ran),
                 None => {
-                    let (mut run, args) = world.command(command);
-                    if args.is_none()
+                    let (mut run, lyncast) = world.command(command);
+                    if lyncast.is_none()
                         && let Some(newest) = daemons.last()
                     {
                         run.env("DAEMON", newest.id().to_string());
                     }
-                    let daemon =
-                        args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
-                    if daemon && threadless {
+                    let daemon = lyncast
+                        .as_ref()
+                        .filter(|line| line.args.first().is_some_and(|arg| arg == "daemon"));
+                    if daemon.is_some() && threadless {
                         threadless = false;
                         no_threads(&mut run);
                     }
-                    if daemon && want.is_empty() {
+                    if let Some(line) = daemon
+                        && want.is_empty()
+                    {
+                        let socket = line.var("XDG_RUNTIME_DIR").map_or_else(
+                            || world.runtime.socket(),
+                            |dir| Path::new(dir).join("lyncast.sock"),
+                        );
                         let started = if stall {
                             Daemon::spawn_stalled(run, &world.runtime)
                         } else {
                             Daemon::spawn(run, &world.runtime)
                         };
                         stall = false;
-                        match started.serving(&world.runtime) {
+                        match started.serving(&world.runtime, &socket) {
                             Ok(daemon) => daemons.push(daemon),
                             Err(error) => {
                                 failures.push(format!("line {number}: {command}\n  {error}"));
@@ -826,13 +845,13 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
                         }
                         continue;
                     }
-                    if daemon && stall {
+                    if daemon.is_some() && stall {
                         stall = false;
                         Daemon::spawn_stalled(run, &world.runtime)
                             .finish()
                             .map(|(stderr, code)| (Vec::new(), stderr, code))
                     } else {
-                        if daemon {
+                        if daemon.is_some() {
                             world.runtime.record(&mut run);
                         }
                         run_bounded(run, &world.out)

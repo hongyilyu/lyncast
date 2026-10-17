@@ -16,11 +16,11 @@ The daemon claims `$XDG_RUNTIME_DIR/lyncast.sock` in three moves:
 
 The kernel releases the lock when the process exits, however it exits. A `Quit` command also removes the socket. The lock file stays, because removing it would let a second daemon lock a new file while the first still holds the old one.
 
-If the daemon cannot start the thread that writes its warnings, the one that accepts connections, or the one that writes the visits, it prints `lyncast: not started: <error>` and exits 1. The warnings thread is the first that the daemon starts, so [the session of a daemon that can start no thread](#a-stderr-that-does-not-drain-holds-up-no-start-no-quit-and-no-exit) shows its failure alone. No session can fail a later thread alone, so that each later thread that cannot start fails the start with the same line is read in source: each starts through `thread::Builder`, and the start hands its error to `not_started` in `crates/lyncast/src/daemon/serve.rs`.
+If the daemon cannot start the thread that writes its warnings, the one that accepts connections, the one that writes the visits, or the one that writes the clips, it prints `lyncast: not started: <error>` and exits 1. The warnings thread is the first that the daemon starts, so [the session of a daemon that can start no thread](#a-stderr-that-does-not-drain-holds-up-no-start-no-quit-and-no-exit) shows its failure alone. No session can fail a later thread alone, so that each later thread that cannot start fails the start with the same line is read in source: each starts through `thread::Builder`, and the start hands its error to `not_started` in `crates/lyncast/src/daemon/serve.rs`.
 
 Without `XDG_RUNTIME_DIR`, the daemon and every client print `lyncast: XDG_RUNTIME_DIR is not set` and exit 1, as Wayland clients refuse to run without it. A socket path holds at most 107 bytes, so the tests put `XDG_RUNTIME_DIR` under `/tmp`, as `scripts/test-env.sh` does.
 
-The daemon reads its environment once, at start. The app scan reads `XDG_DATA_HOME`, `XDG_DATA_DIRS`, `PATH`, the locale variables, and `XDG_CURRENT_DESKTOP` there, with `HOME` in place of an unset `XDG_DATA_HOME`, and Reload Apps scans again with the same values. The visits use the same data home, and Open Config reads `XDG_CONFIG_HOME`, or `HOME` in its place, from the same start. A client's environment changes nothing but the socket path.
+The daemon reads its environment once, at start. The app scan reads `XDG_DATA_HOME`, `XDG_DATA_DIRS`, `PATH`, the locale variables, and `XDG_CURRENT_DESKTOP` there, with `HOME` in place of an unset `XDG_DATA_HOME`, and Reload Apps scans again with the same values. The visits and the [clipboard history](clipboard-and-paste.md#clips-keeps-the-rows-in-memory-and-in-sqlite) use the same data home. Open Config and the read of `config.toml` use `XDG_CONFIG_HOME`, or `HOME` in its place, from the same start. A client's environment changes nothing but the socket path.
 
 ## One thread writes the warnings
 
@@ -35,6 +35,7 @@ Each command connects, sends one request, prints the reply, and exits:
 | `lyncast toggle` | `toggle` | the new summon state, `open` or `closed` |
 | `lyncast status` | `status` | the summon state |
 | `lyncast query <text> --json` | `query` | one JSON object per row, as [ranking](ranking.md#lyncast-query-prints-one-json-object-per-row) describes |
+| `lyncast clip list --json` | `clips` | one JSON object per clip, as [clipboard and paste](clipboard-and-paste.md#lyncast-clip-list-shows-the-history) describes |
 | `lyncast activate <key>` | `activate` | one line that says what happened |
 
 `activate` takes these options:
@@ -58,7 +59,7 @@ The exit code is part of the contract:
 
 An `activate` request carries a key, the chord or verb, the confirmation, and the query. The daemon does this:
 
-1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, and a calculator row from evaluating the key's text again. If the state has no such row, the request fails, for example with `no app nope.desktop` or `calc:10/0 has no answer`. Clips come in plan step 6, so until then every clip key fails with `no clip <id>`.
+1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from evaluating the key's text again. If the state has no such row, the request fails, for example with `no app nope.desktop`, `no clip 9`, or `calc:10/0 has no answer`.
 2. It takes the item from the subject's `Actions`: `on(chord)` for a chord, or `pick(verb)` for a verb. If `pick` finds nothing, the request fails with `<key> has no action <verb>`.
 3. If the item runs a command that confirms, and the request is not confirmed, the daemon replies with a confirmation request and runs nothing. Log Out, Reboot, and Power Off confirm. The CLI prints `lyncast: Reboot? Run again with --yes to confirm.` and exits 1.
 4. It runs the item. Copy items need the clipboard, which comes in plan step 6. Until then they fail with `not copied: no Wayland compositor`. Items that start a program go to the runner.
@@ -72,7 +73,7 @@ An `activate` request carries a key, the chord or verb, the confirmation, and th
 | `CopyAnswer(query)` | `copied <answer>`, from plan step 6 |
 | `CopyClip(clip)` | `copied clip <id>`, from plan step 6 |
 | `CopyPath(app)` | `copied <path>`, from plan step 6 |
-| `Pin(clip)`, `Unpin(clip)`, `Delete(clip)` | `pinned clip <id>`, `unpinned clip <id>`, `deleted clip <id>`, from plan step 6 |
+| `Pin(clip)`, `Unpin(clip)`, `Delete(clip)` | `pinned clip <id>`, `unpinned clip <id>`, `deleted clip <id>` |
 
 Starting a program, Open Config, and Reload Apps run on a worker thread, and the daemon answers other requests while they run. Their reply comes when the work ends. If the worker thread cannot start, the request fails at once with `not run: <error>`, nothing is recorded, and Quit does not wait for it. Two Reload Apps can overlap, and their scans can end in either order. Each scan has a number in the order it started. A scan's apps replace the index only when that scan started after the one the index came from, so a scan that ends after a newer one changes nothing.
 
@@ -83,7 +84,7 @@ The commands run like this:
 | Clipboard History | opens the summon. Plan step 7 shows the clipboard screen. |
 | Open Config | creates `$XDG_CONFIG_HOME/lyncast/config.toml` if it is missing, then runs `xdg-open <path>` |
 | Reload Apps | scans the apps again |
-| Quit lyncast | stops taking requests, waits for the work in flight and the last write of the visits, gives up the lock, replies, and exits 0 |
+| Quit lyncast | stops taking requests, waits for the work in flight and the last writes of the visits and the clips, gives up the lock, replies, and exits 0 |
 | Lock Screen | `loginctl lock-session` |
 | Suspend | `systemctl suspend` |
 | Log Out | `niri msg action quit --skip-confirmation` |
@@ -96,10 +97,10 @@ Quit goes in this order:
 
 1. It removes the socket, so no new client connects. A request that still arrives, on a connection opened before, gets `failed` with `the daemon is quitting` at once while steps 2 and 3 wait. One that arrives during step 4 waits until the process exits, up to 2 s, the 1 s for the warnings and the 1 s for the replies, and then gets that reply or finds the connection closed. Either way it runs nothing.
 2. It waits for the work in flight, such as a program the runner is starting, and sends each reply to its client. So a client exits 1 only when its program did not start.
-3. It waits for the last write of the visits and gives up the lock. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit.
+3. It waits for the last writes of the visits and the clips and gives up the lock. The writer of the clips gives up SQLite's lock when it ends. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit and clip.
 4. It waits up to 1 s for its warnings to reach stderr and replies. Then it waits up to 1 s more for its replies, Quit's among them, to be written, and exits 0. The exit closes every connection, so it would cut off a reply that is still being written.
 
-Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 7 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time.
+Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 7 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time, and finds `clips.sqlite3` locked.
 
 Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. Plan step 7's palette host has to follow the same steps.
 
@@ -124,7 +125,7 @@ The card row's key is `calc:<raw query>`, its kind is `calculator`, and its titl
 
 ## Visits persist in ranking.json
 
-The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. The write creates the temporary file with mode 0600, because the search terms are what the user typed, so the file is private even in a data directory that others may list. It never writes through an entry that is already at that name: the name is the daemon's own, so such an entry is the leftover of a process that had the same ID and died, and the write removes it, a symlink rather than its target, and creates the file once more. A write that fails removes the temporary file it created, because no later daemon has its name. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
+The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. The write creates the temporary file with mode 0600, as the clipboard history's files are, because the search terms are what the user typed, so the file is private even in a data directory that others may list. It never writes through an entry that is already at that name: the name is the daemon's own, so such an entry is the leftover of a process that had the same ID and died, and the write removes it, a symlink rather than its target, and creates the file once more. A write that fails removes the temporary file it created, because no later daemon has its name. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
 
 The file is one JSON object. Each member is a key with its visit, in key order:
 
@@ -158,6 +159,7 @@ Requests:
 | `{"request":"toggle"}` | |
 | `{"request":"status"}` | |
 | `{"request":"query","text":...}` | the query as typed |
+| `{"request":"clips"}` | |
 | `{"request":"activate","key":...,"via":...,"confirmed":...,"query":...}` | `via` is `{"chord":"enter"}` or `{"verb":"pin"}` |
 
 Replies:
@@ -166,6 +168,7 @@ Replies:
 |---|---|
 | `{"reply":"summon","state":...}` | `open` or `closed` |
 | `{"reply":"rows","rows":[...]}` | the rows, each as `query --json` prints it |
+| `{"reply":"clips","clips":[...]}` | the clips, each as `clip list --json` prints it |
 | `{"reply":"done","message":...}` | the success line |
 | `{"reply":"confirm","title":...}` | the command's title |
 | `{"reply":"failed","reason":...}` | the reason, without the `lyncast: ` prefix |
@@ -216,12 +219,12 @@ Exec=8x8
 
 A `session` block is a terminal transcript against one environment:
 
-- A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
-- Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
+- A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`, whose values may hold `$TREE` and `$RUNTIME`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
+- Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
-- `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, as the `THREAD` constant in `crates/lyncast/src/daemon/store.rs` spells it. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
+- `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, and the one that writes the clips `clips`, as the `THREAD` constants in `crates/lyncast/src/daemon/store.rs` and `crates/lyncast/src/clip/db.rs` spell them. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
 - `$ hold-connections <n>` opens n connections to the newest daemon, one at a time, that each send `{"request":"status"` and no newline. It returns once each has a thread of its own, one that the daemon did not have before the connection, waiting in `recvfrom` to read the rest. The test sends each a space every second, so the 5 s that the daemon waits for each byte never run out, until the block ends. A connection that the daemon answers instead is opened again, because the connection with which the test waited for the socket can still hold its place for a moment. `$ half-connection` opens one more such connection, which the test feeds too and closes only when the block ends. It prints the reply line that the daemon sends it, or nothing once a new thread of the daemon waits to read it. `$ close-connection` closes the newest connection of `hold-connections` and returns once the thread that read it has ended.
 - `$ deny-threads` gives the newest daemon an `RLIMIT_NPROC` of 0 from then on, as `no-threads` gives the next one, so each thread that it starts fails, and `$ allow-threads` gives it back the limit it had. A kernel that exempts the user skips the rest of the block, as with `no-threads`.
 
@@ -419,7 +422,7 @@ exit: 2
 
 ### Copies fail until the clipboard exists
 
-A calculator key is evaluated again. A clip key names no clip until plan step 6.
+A calculator key is evaluated again, and a clip key that names no clip fails.
 
 ```session
 $ lyncast daemon --headless
@@ -653,6 +656,7 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ ls data/lyncast
+clips.sqlite3
 ranking.json.bad
 $ test -d data/lyncast/ranking.json.bad && echo directory
 directory
@@ -730,6 +734,7 @@ ran cmd:quit
 $ stat -c '%F %a' data/lyncast/ranking.json
 regular file 600
 $ ls data/lyncast
+clips.sqlite3
 ranking.json
 $ lyncast daemon --headless
 $ ln -s ../../other data/lyncast/ranking.json.$DAEMON.tmp
@@ -757,7 +762,7 @@ kept
 
 ### A slow write holds up nothing but Quit
 
-Here the test holds the writer still, as a disk that stops answering would, so the write after Lock Screen waits, and the daemon still answers while no `ranking.json` is there. A shell line makes `ranking.json` a directory, which the rename cannot replace, and the test lets the writer go on a second later, while Quit waits for the write. The write then fails, and its warning reaches stderr before Quit replies. The failed write removes its temporary file, so only the directory is left.
+Here the test holds the writer still, as a disk that stops answering would, so the write after Lock Screen waits, and the daemon still answers while no `ranking.json` is there. A shell line makes `ranking.json` a directory, which the rename cannot replace, and the test lets the writer go on a second later, while Quit waits for the write. The write then fails, and its warning reaches stderr before Quit replies. The failed write removes its temporary file, so only the directory and the clipboard history are left.
 
 ```session
 $ mkdir -p data/lyncast
@@ -777,6 +782,7 @@ ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/ranking.json: not saved: Is a directory (os error 21)
 $ ls data/lyncast
+clips.sqlite3
 ranking.json
 ```
 
@@ -910,6 +916,8 @@ A `wire` block sends each `>` line, with a newline, to a daemon started as a ses
 < {"reply":"summon","state":"open"}
 > {"request":"query","text":"fire"}
 < {"reply":"rows","rows":[{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}]}
+> {"request":"clips"}
+< {"reply":"clips","clips":[]}
 > {"request":"activate","key":"cmd:reboot","via":{"chord":"enter"},"confirmed":false,"query":""}
 < {"reply":"confirm","title":"Reboot"}
 > {"request":"activate","key":"cmd:reboot","via":{"verb":"run"},"confirmed":true,"query":"reb"}
