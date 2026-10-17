@@ -5,11 +5,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
@@ -59,6 +58,9 @@ impl Millis {
 /// The most bytes the file may hold, as the daemon reads it or writes it. Real ones hold a few
 /// kilobytes.
 const MAX_FILE_BYTES: u64 = 64 << 20;
+
+/// The writer thread's name, by which the `freeze-thread` fixtures find it.
+const THREAD: &str = "visits";
 
 /// The error for a file over [`MAX_FILE_BYTES`], read or written.
 fn too_large() -> String {
@@ -139,14 +141,16 @@ impl Store {
             wake: Condvar::new(),
         });
         let writer = Arc::clone(&shared);
-        thread::Builder::new().spawn(move || {
-            while let Some(bytes) = writer.next() {
-                if let Err(error) = write(&path, &bytes) {
-                    warn(&path, &format!("not saved: {error}"));
+        thread::Builder::new()
+            .name(THREAD.to_owned())
+            .spawn(move || {
+                while let Some(bytes) = writer.next() {
+                    if let Err(error) = write(&path, &bytes) {
+                        warn(&path, &format!("not saved: {error}"));
+                    }
                 }
-            }
-            ended();
-        })?;
+                ended();
+            })?;
         Ok(Store { shared })
     }
 
@@ -207,27 +211,13 @@ fn read(path: &Path) -> Result<BTreeMap<String, Stored>, String> {
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
-/// Writes `bytes` to a temporary file in the same directory and renames it over the file, so a
-/// crash leaves the old file or the new one. Two daemons with their own runtime directories hold
-/// their own locks and can share a data home, so the temporary name carries the process ID, and
-/// neither writes into the other's file. Bytes over [`MAX_FILE_BYTES`] are not written, because
-/// the daemon would not read them back.
+/// Writes `bytes` over the file. Bytes over [`MAX_FILE_BYTES`] are not written, because the
+/// daemon would not read them back.
 fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(io::Error::other(too_large()));
     }
-    fs::create_dir_all(path.parent().expect("ranking.json is in a directory"))?;
-    let temporary = path.with_extension(format!("json.{}.tmp", process::id()));
-    let written = File::create(&temporary).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    });
-    // No later daemon has this process's name, so a failed write removes its own file.
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
+    files::write_private(path, bytes)
 }
 
 /// Renames `path` to `bad` in one step that fails with `AlreadyExists` rather than replace `bad`,

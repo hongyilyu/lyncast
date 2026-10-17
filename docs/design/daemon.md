@@ -120,7 +120,7 @@ The card row's key is `calc:<raw query>`, its kind is `calculator`, and its titl
 
 ## Visits persist in ranking.json
 
-The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. A write that fails removes its temporary file, because no later daemon has its name. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
+The daemon owns one `Visits`. It loads `$XDG_DATA_HOME/lyncast/ranking.json` at start. After every recorded visit it leaves a copy of the visits in one slot, in place of any copy that one writer thread has not taken yet. The writer takes the newest copy, writes it to `ranking.json.<pid>.tmp` in the same directory, where `<pid>` is the daemon's process ID, and renames that over the file, so a crash leaves the old file or the new one. The write creates the temporary file with mode 0600, because the search terms are what the user typed, so the file is private even in a data directory that others may list. It never writes through an entry that is already at that name: the name is the daemon's own, so such an entry is the leftover of a process that had the same ID and died, and the write removes it, a symlink rather than its target, and creates the file once more. A write that fails removes the temporary file it created, because no later daemon has its name. Two daemons with their own `XDG_RUNTIME_DIR` hold their own locks and can share a data home, so the process ID keeps each out of the other's temporary file, and each rename puts one daemon's whole copy in place. The daemon keeps answering while a write waits on the disk, and at most one copy waits in the slot meanwhile. Quit waits for the last write. `XDG_DATA_HOME` resolves as it does for the app scan: an absolute `XDG_DATA_HOME`, else `$HOME/.local/share`. With neither, the daemon keeps visits in memory only.
 
 The file is one JSON object. Each member is a key with its visit, in key order:
 
@@ -166,7 +166,7 @@ Replies:
 
 ## The fixtures
 
-The tests in `crates/lyncast/tests/daemon.rs` read the blocks below. Each `session` and `wire` block gets a fresh directory, `$TREE`, with every `desktop` and `executable` block written under it, and its own `XDG_RUNTIME_DIR`, `$RUNTIME`, a fresh directory under `/tmp`. The tests run the real binary with only the `env` block's variables and `$TREE` as the working directory. The test removes a block's `$TREE` once the block passes.
+The tests in `crates/lyncast/tests/daemon.rs` read the blocks below. Each `session` and `wire` block gets a fresh directory, `$TREE`, with every `desktop` and `executable` block written under it, and its own `XDG_RUNTIME_DIR`, `$RUNTIME`, a fresh directory under `/tmp`. The tests run the real binary with only the `env` block's variables and `$TREE` as the working directory. Every daemon, client, and shell line that the tests start runs under a umask of 022, the case that the decision log's rows on modes reproduced, so a mode that the daemon leaves to the umask shows in a fixture whatever the developer's umask is. The test removes a block's `$TREE` once the block passes.
 
 ```env
 HOME=$TREE/home
@@ -213,6 +213,7 @@ A `session` block is a terminal transcript against one environment:
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+- `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, as the `THREAD` constant in `crates/lyncast/src/daemon/store.rs` spells it. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
 
 At the end of a block the test stops any daemon still running.
 
@@ -477,7 +478,7 @@ $ wc -c < config/lyncast/config.toml
 
 ### Visits rank Suggestions and survive a restart
 
-An activation records a visit, so Firefox leads Suggestions. Quit removes the socket, writes `ranking.json`, and keeps the lock file, and a new daemon loads the visits. The times in the file come from the clock, so `sed` masks their digits. `f` finds Firefox alone, because an `f` inside a word, as in Power Off and Open Config, scores 2, below the 2.5 that a one-letter query needs ([ranking](ranking.md#frizbee-scores-with-tinycasts-points)).
+An activation records a visit, so Firefox leads Suggestions. Quit removes the socket, writes `ranking.json`, and keeps the lock file, and a new daemon loads the visits. The data directory that the daemon created has mode 0700, and `ranking.json` mode 0600. The times in the file come from the clock, so `sed` masks their digits. `f` finds Firefox alone, because an `f` inside a word, as in Power Off and Open Config, scores 2, below the 2.5 that a one-letter query needs ([ranking](ranking.md#frizbee-scores-with-tinycasts-points)).
 
 ```session
 $ lyncast daemon --headless
@@ -494,6 +495,9 @@ daemon.stderr
 daemon.stdout
 lyncast.lock
 runs
+$ stat -c %a data/lyncast data/lyncast/ranking.json
+700
+600
 $ sed -E 's/[0-9]+/N/g' data/lyncast/ranking.json
 {"app:firefox.desktop":{"anchor":N,"last_opened":N,"terms":["fir"]}}
 $ lyncast daemon --headless
@@ -515,7 +519,7 @@ $ lyncast query f --json
 
 ### Stored visits load as the rules say
 
-A member whose key no longer parses is dropped, and the stored terms are folded again, deduplicated, and cut to three. Log Out's anchor is in 2255, so its visit is warm and Log Out leads `lo`. The next write puts the five members in key order, not the order they were stored in, and keeps Log Out's times as they were stored. With five members, a write in another order is unlikely to match by chance.
+A member whose key no longer parses is dropped, and the stored terms are folded again, deduplicated, and cut to three. Log Out's anchor is in 2255, so its visit is warm and Log Out leads `lo`. The next write puts the five members in key order, not the order they were stored in, and keeps Log Out's times as they were stored. With five members, a write in another order is unlikely to match by chance. The data directory was there before the daemon, so it keeps its mode, and the file the write leaves has mode 0600.
 
 ```session
 $ mkdir -p data/lyncast
@@ -531,6 +535,8 @@ record: ["loginctl","lock-session"]
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
+$ stat -c %a data/lyncast/ranking.json
+600
 $ grep -o '"cmd:[a-z-]*":' data/lyncast/ranking.json
 "cmd:lock-screen":
 "cmd:log-out":
@@ -698,25 +704,70 @@ $ wc -c < data/lyncast/ranking.json
 67108864
 ```
 
+### The write creates its own temporary file
+
+The write never reuses an entry at its temporary file's name. Here the first daemon finds a file of mode 0644 there, and the second a symlink to `other`. Each write removes the entry and creates its own file, so `ranking.json` comes out a regular file of mode 0600 both times, and `other` keeps what it held. The third daemon finds a directory there, which the write cannot remove, so that write fails and leaves the directory, which it did not create.
+
+```session
+$ mkdir -p data/lyncast && echo kept > other
+$ lyncast daemon --headless
+$ touch data/lyncast/ranking.json.$DAEMON.tmp && chmod 644 data/lyncast/ranking.json.$DAEMON.tmp
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ stat -c '%F %a' data/lyncast/ranking.json
+regular file 600
+$ ls data/lyncast
+ranking.json
+$ lyncast daemon --headless
+$ ln -s ../../other data/lyncast/ranking.json.$DAEMON.tmp
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat other
+kept
+$ stat -c '%F %a' data/lyncast/ranking.json
+regular file 600
+$ lyncast daemon --headless
+$ mkdir data/lyncast/ranking.json.$DAEMON.tmp
+$ lyncast activate cmd:lock-screen
+ran cmd:lock-screen
+record: ["loginctl","lock-session"]
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/ranking.json: not saved: Is a directory (os error 21)
+$ test -d data/lyncast/ranking.json.$DAEMON.tmp && echo kept
+kept
+```
+
 ### A slow write holds up nothing but Quit
 
-Here the daemon's temporary file is a FIFO, so the write after Lock Screen waits until something reads it, and the daemon still answers. The shell line starts a reader a second later, while Quit waits for the write. A FIFO cannot be synced, so the write then fails, and its warning reaches stderr before Quit replies.
+Here the test holds the writer still, as a disk that stops answering would, so the write after Lock Screen waits, and the daemon still answers while no `ranking.json` is there. A shell line makes `ranking.json` a directory, which the rename cannot replace, and the test lets the writer go on a second later, while Quit waits for the write. The write then fails, and its warning reaches stderr before Quit replies. The failed write removes its temporary file, so only the directory is left.
 
 ```session
 $ mkdir -p data/lyncast
 $ lyncast daemon --headless
-$ mkfifo data/lyncast/ranking.json.$DAEMON.tmp
+$ freeze-thread visits
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
 record: ["loginctl","lock-session"]
 $ lyncast status
 closed
-$ (sleep 1; timeout 5 cat data/lyncast/ranking.json.$DAEMON.tmp) > /dev/null 2>&1 &
+$ test -e data/lyncast/ranking.json || echo missing
+missing
+$ mkdir data/lyncast/ranking.json
+$ thaw-thread 1s
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
-lyncast: $TREE/data/lyncast/ranking.json: not saved: Invalid argument (os error 22)
+lyncast: $TREE/data/lyncast/ranking.json: not saved: Is a directory (os error 21)
 $ ls data/lyncast
+ranking.json
 ```
 
 ### One daemon owns the socket
