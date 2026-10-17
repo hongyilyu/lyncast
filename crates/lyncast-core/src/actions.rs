@@ -79,6 +79,11 @@ pub enum Chord {
     CtrlEnter,
 }
 
+impl Chord {
+    /// Every chord, in declaration order.
+    pub const ALL: [Chord; 2] = [Chord::Enter, Chord::CtrlEnter];
+}
+
 /// A menu item's name without its row's ids. A menu pick sends one, and [`Actions::pick`] checks it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Verb {
