@@ -1,32 +1,43 @@
-//! Reads the fixture blocks of docs/design/ranking.md, the only copy of ranking's fixtures.
-//! `tests/ranking.rs`, `tests/desktop.rs`, and the binary's `tests/query.rs` share it.
+//! Reads the fixture blocks of a design doc, the only copy of its fixtures. lyncast-core's
+//! `tests/ranking.rs` and `tests/desktop.rs` read docs/design/ranking.md, as does the binary's
+//! `tests/query.rs`.
 
 #![allow(dead_code)]
 
 use std::fs;
 use std::path::Path;
 
-/// Every fixture kind ranking.md may hold.
-pub const KINDS: [&str; 14] = [
-    "fold",
-    "score",
-    "rank",
-    "frecency",
-    "terms",
-    "entry",
-    "parsed",
-    "exec",
-    "env",
-    "desktop",
-    "executable",
-    "symlink",
-    "fifo",
-    "cli",
-];
+/// One design doc and the fence info strings it may hold.
+pub struct Doc {
+    /// The file in `docs/design`.
+    pub file: &'static str,
+    /// Every fixture kind the doc may hold.
+    pub kinds: &'static [&'static str],
+    /// The info strings a prose fence may carry. Any other first word fails the read, so a
+    /// misspelled kind cannot drop its block.
+    pub prose: &'static [&'static str],
+}
 
-/// The info strings a prose fence may carry. Any other first word fails the read, so a
-/// misspelled kind cannot drop its block.
-const PROSE: [&str; 4] = ["", "rust", "sh", "text"];
+pub const RANKING: Doc = Doc {
+    file: "ranking.md",
+    kinds: &[
+        "fold",
+        "score",
+        "rank",
+        "frecency",
+        "terms",
+        "entry",
+        "parsed",
+        "exec",
+        "env",
+        "desktop",
+        "executable",
+        "symlink",
+        "fifo",
+        "cli",
+    ],
+    prose: &["", "rust", "sh", "text"],
+};
 
 /// One fixture block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,102 +60,123 @@ impl Block {
     }
 }
 
-pub fn ranking_doc() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design/ranking.md");
-    fs::read_to_string(&path).expect("docs/design/ranking.md is readable")
-}
-
-/// Every block of `kind` in `doc`, in order. Panics where [`read`] fails.
-pub fn blocks(doc: &str, kind: &str) -> Vec<Block> {
-    read(doc)
-        .unwrap_or_else(|error| panic!("ranking.md: {error}"))
-        .into_iter()
-        .filter(|block| block.kind == kind)
-        .collect()
-}
-
-/// Every fixture block in `doc`. Fences follow CommonMark: up to 3 spaces of indent, a run of
-/// 3 or more backticks or tildes, and a closing run of the same character at least as long,
-/// with only spaces and tabs after it. Fails on a fence whose first word is neither a fixture
-/// kind nor a prose language, on a fence naming a kind that is not an unindented ``` (indented,
-/// longer, or tildes), on any fence in a list item or blockquote, on a fence naming a kind inside
-/// an open block, on a block that never closes, on a carriage return, and on a line outside a
-/// block that starts with `<`, which CommonMark may read as the start of an HTML block, where a
-/// fence is not a fence.
-pub fn read(doc: &str) -> Result<Vec<Block>, String> {
-    if let Some(at) = doc.find('\r') {
-        let n = doc[..at].matches('\n').count() + 1;
-        return Err(format!(
-            "line {n}: a carriage return, which CommonMark reads as a line ending"
-        ));
+impl Doc {
+    /// The doc's text.
+    pub fn text(&self) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/design")
+            .join(self.file);
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", self.file))
     }
-    let mut blocks = Vec::new();
-    let mut open: Option<Open> = None;
-    for (n, line) in doc.lines().enumerate() {
-        let n = n + 1;
-        if let Some(fence) = &mut open {
-            if fence.closes(line) {
-                blocks.extend(fence.block.take());
-                open = None;
-            } else if names_a_kind(line) {
-                return Err(format!(
-                    "line {n}: {line:?} names a fixture kind inside the block from line {}",
-                    fence.line
-                ));
-            } else if let Some(block) = &mut fence.block {
-                block.lines.push(line.to_owned());
-            }
-            continue;
-        }
-        if line.trim_start_matches(' ').starts_with('<') && !line.starts_with("    ") {
+
+    /// Every block of `kind` in the doc, in order. Panics where [`Doc::read`] fails.
+    pub fn blocks(&self, kind: &str) -> Vec<Block> {
+        self.read(&self.text())
+            .unwrap_or_else(|error| panic!("{}: {error}", self.file))
+            .into_iter()
+            .filter(|block| block.kind == kind)
+            .collect()
+    }
+
+    /// Every fixture block in `doc`. Fences follow CommonMark: up to 3 spaces of indent, a run of
+    /// 3 or more backticks or tildes, and a closing run of the same character at least as long,
+    /// with only spaces and tabs after it. Fails on a fence whose first word is neither a fixture
+    /// kind nor a prose language, on a fence naming a kind that is not an unindented ``` (indented,
+    /// longer, or tildes), on any fence in a list item or blockquote, on a fence naming a kind inside
+    /// an open block, on a block that never closes, on a carriage return, and on a line outside a
+    /// block that starts with `<`, which CommonMark may read as the start of an HTML block, where a
+    /// fence is not a fence.
+    pub fn read(&self, doc: &str) -> Result<Vec<Block>, String> {
+        if let Some(at) = doc.find('\r') {
+            let n = doc[..at].matches('\n').count() + 1;
             return Err(format!(
-                "line {n}: {line:?} starts an HTML block, where CommonMark reads no fence"
+                "line {n}: a carriage return, which CommonMark reads as a line ending"
             ));
         }
-        let Some(fence) = Fence::parse(line) else {
-            if names_a_kind(line) {
+        let mut blocks = Vec::new();
+        let mut open: Option<Open> = None;
+        for (n, line) in doc.lines().enumerate() {
+            let n = n + 1;
+            if let Some(fence) = &mut open {
+                if fence.closes(line) {
+                    blocks.extend(fence.block.take());
+                    open = None;
+                } else if self.names_a_kind(line) {
+                    return Err(format!(
+                        "line {n}: {line:?} names a fixture kind inside the block from line {}",
+                        fence.line
+                    ));
+                } else if let Some(block) = &mut fence.block {
+                    block.lines.push(line.to_owned());
+                }
+                continue;
+            }
+            if line.trim_start_matches(' ').starts_with('<') && !line.starts_with("    ") {
                 return Err(format!(
-                    "line {n}: {line:?} must be an unindented ``` fence"
+                    "line {n}: {line:?} starts an HTML block, where CommonMark reads no fence"
                 ));
             }
-            if let (true, rest) = in_containers(line)
-                && Fence::parse(rest).is_some()
-            {
-                return Err(format!(
-                    "line {n}: {line:?} opens a fence in a list item or blockquote, which the reader does not follow"
-                ));
-            }
-            continue;
-        };
-        let mut words = fence.info.split_whitespace().map(str::to_owned);
-        let kind = words.next().unwrap_or_default();
-        let block = if KINDS.contains(&kind.as_str()) {
-            if (fence.indent, fence.mark, fence.len) != (0, '`', 3) {
-                return Err(format!(
-                    "line {n}: {line:?} must be an unindented ``` fence"
-                ));
-            }
-            Some(Block {
-                kind,
-                args: words.collect(),
-                lines: Vec::new(),
+            let Some(fence) = Fence::parse(line) else {
+                if self.names_a_kind(line) {
+                    return Err(format!(
+                        "line {n}: {line:?} must be an unindented ``` fence"
+                    ));
+                }
+                if let (true, rest) = in_containers(line)
+                    && Fence::parse(rest).is_some()
+                {
+                    return Err(format!(
+                        "line {n}: {line:?} opens a fence in a list item or blockquote, which the reader does not follow"
+                    ));
+                }
+                continue;
+            };
+            let mut words = fence.info.split_whitespace().map(str::to_owned);
+            let kind = words.next().unwrap_or_default();
+            let block = if self.kinds.contains(&kind.as_str()) {
+                if (fence.indent, fence.mark, fence.len) != (0, '`', 3) {
+                    return Err(format!(
+                        "line {n}: {line:?} must be an unindented ``` fence"
+                    ));
+                }
+                Some(Block {
+                    kind,
+                    args: words.collect(),
+                    lines: Vec::new(),
+                    line: n,
+                })
+            } else if self.prose.contains(&kind.as_str()) {
+                None
+            } else {
+                return Err(format!("line {n}: {line:?} is not a fixture kind"));
+            };
+            open = Some(Open {
+                mark: fence.mark,
+                len: fence.len,
                 line: n,
-            })
-        } else if PROSE.contains(&kind.as_str()) {
-            None
-        } else {
-            return Err(format!("line {n}: {line:?} is not a fixture kind"));
-        };
-        open = Some(Open {
-            mark: fence.mark,
-            len: fence.len,
-            line: n,
-            block,
-        });
+                block,
+            });
+        }
+        match open {
+            Some(fence) => Err(format!("line {}: the block never closes", fence.line)),
+            None => Ok(blocks),
+        }
     }
-    match open {
-        Some(fence) => Err(format!("line {}: the block never closes", fence.line)),
-        None => Ok(blocks),
+
+    /// The line opens a fence whose first word is a fixture kind once its indent, blockquote
+    /// markers, and list markers are gone. CommonMark renders such a fence as a fixture, so a
+    /// reader that skipped it would drop the block.
+    fn names_a_kind(&self, line: &str) -> bool {
+        let rest = in_containers(line).1;
+        let Some(mark) = rest.chars().next().filter(|&c| matches!(c, '`' | '~')) else {
+            return false;
+        };
+        let info = rest.trim_start_matches(mark);
+        rest.len() - info.len() >= 3
+            && info
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| self.kinds.contains(&word))
     }
 }
 
@@ -191,22 +223,6 @@ impl Open {
             close.mark == self.mark && close.len >= self.len && close.info.is_empty()
         })
     }
-}
-
-/// The line opens a fence whose first word is a fixture kind once its indent, blockquote
-/// markers, and list markers are gone. CommonMark renders such a fence as a fixture, so a reader
-/// that skipped it would drop the block.
-fn names_a_kind(line: &str) -> bool {
-    let rest = in_containers(line).1;
-    let Some(mark) = rest.chars().next().filter(|&c| matches!(c, '`' | '~')) else {
-        return false;
-    };
-    let info = rest.trim_start_matches(mark);
-    rest.len() - info.len() >= 3
-        && info
-            .split_whitespace()
-            .next()
-            .is_some_and(|word| KINDS.contains(&word))
 }
 
 /// The line without its indent, blockquote markers, and list markers, and whether it had a

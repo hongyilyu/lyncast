@@ -19,13 +19,13 @@ use std::time::{Duration, Instant};
 /// Writes every `desktop <path>` and `executable <path>` block under `tree`, from scratch, makes
 /// each `symlink <path> -> <target>` block a link to `target` as written, and makes each
 /// `fifo <path>` block a FIFO. A `desktop` block may give `mode=<octal>` after its path.
-fn materialize(doc: &str, tree: &Path) {
+fn materialize(tree: &Path) {
     match fs::remove_dir_all(tree) {
         Err(error) if error.kind() != ErrorKind::NotFound => panic!("{tree:?}: {error}"),
         _ => {}
     }
     for kind in ["desktop", "executable"] {
-        for block in doc::blocks(doc, kind) {
+        for block in doc::RANKING.blocks(kind) {
             let (relative, mode) = match block.args.as_slice() {
                 [relative] => (relative, (kind == "executable").then_some(0o755)),
                 [relative, mode] if kind == "desktop" => {
@@ -47,7 +47,7 @@ fn materialize(doc: &str, tree: &Path) {
             }
         }
     }
-    for block in doc::blocks(doc, "symlink") {
+    for block in doc::RANKING.blocks("symlink") {
         let [relative, arrow, target] = block.args.as_slice() else {
             panic!(
                 "line {}: a symlink block reads <path> -> <target>",
@@ -63,7 +63,7 @@ fn materialize(doc: &str, tree: &Path) {
         fs::create_dir_all(path.parent().expect("a path under the tree")).unwrap();
         symlink(target, &path).unwrap();
     }
-    for block in doc::blocks(doc, "fifo") {
+    for block in doc::RANKING.blocks("fifo") {
         let [relative] = block.args.as_slice() else {
             panic!("line {}: a fifo block names one path", block.line);
         };
@@ -115,8 +115,8 @@ fn raw_bytes(text: &str) -> Vec<u8> {
 }
 
 /// The `env` block's `NAME=value` lines, with `$TREE` replaced.
-fn environment(doc: &str, tree: &Path) -> Vec<(String, String)> {
-    let blocks = doc::blocks(doc, "env");
+fn environment(tree: &Path) -> Vec<(String, String)> {
+    let blocks = doc::RANKING.blocks("env");
     let [block] = blocks.as_slice() else {
         panic!("ranking.md needs one env block, not {}", blocks.len());
     };
@@ -192,7 +192,7 @@ fn command_line(command: &str, tree: &Path) -> CommandLine {
 /// its entry hide for a second reason.
 #[test]
 fn every_tree_file_is_in_the_table() {
-    let doc = doc::ranking_doc();
+    let doc = doc::RANKING.text();
     let table: BTreeSet<String> = doc
         .lines()
         .skip_while(|line| *line != "| File | Proves |")
@@ -209,7 +209,7 @@ fn every_tree_file_is_in_the_table() {
         .collect();
     let files: BTreeSet<String> = ["desktop", "executable", "symlink", "fifo"]
         .into_iter()
-        .flat_map(|kind| doc::blocks(&doc, kind))
+        .flat_map(|kind| doc::RANKING.blocks(kind))
         .map(|block| block.args[0].clone())
         .collect();
     assert_eq!(files, table);
@@ -218,8 +218,8 @@ fn every_tree_file_is_in_the_table() {
 /// Each `executable` block is a program that some `desktop` block's `Exec` or `TryExec` names.
 #[test]
 fn every_executable_is_a_program_some_entry_names() {
-    let doc = doc::ranking_doc();
-    let named: BTreeSet<String> = doc::blocks(&doc, "desktop")
+    let named: BTreeSet<String> = doc::RANKING
+        .blocks("desktop")
         .iter()
         .flat_map(|block| &block.lines)
         .filter_map(|line| match line.strip_prefix("Exec=") {
@@ -228,7 +228,7 @@ fn every_executable_is_a_program_some_entry_names() {
         })
         .map(str::to_owned)
         .collect();
-    for block in doc::blocks(&doc, "executable") {
+    for block in doc::RANKING.blocks("executable") {
         let program = Path::new(&block.args[0])
             .file_name()
             .and_then(|name| name.to_str());
@@ -243,9 +243,8 @@ fn every_executable_is_a_program_some_entry_names() {
 
 #[test]
 fn query_prints_the_doc_rows() {
-    let doc = doc::ranking_doc();
     let tree = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ranking-tree");
-    materialize(&doc, &tree);
+    materialize(&tree);
     // The Notes fixture's `\x{E9}` is the byte 0xE9, so the file it proves its row with is not
     // UTF-8.
     let notes = fs::read(tree.join("home/applications/notes.desktop")).unwrap();
@@ -269,8 +268,8 @@ fn query_prints_the_doc_rows() {
             "{command} holds no raw 0xFF"
         );
     }
-    let env = environment(&doc, &tree);
-    let blocks = doc::blocks(&doc, "cli");
+    let env = environment(&tree);
+    let blocks = doc::RANKING.blocks("cli");
     for command in [
         "$ lyncast query firef --json",
         "$ lyncast query fi --json",
