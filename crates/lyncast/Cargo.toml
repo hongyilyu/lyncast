@@ -20,3 +20,9 @@ wl-clipboard-rs = "=0.9.4"
 # connection on stderr themselves, and the daemon reports it in its own words.
 wayland-backend = { version = "0.3", features = ["log"] }
 wayland-client = { version = "0.31", features = ["log"] }
+# The versions bench/probe measured, pinned exactly. The binary needs only the Wayland backend.
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "wayland", "runtime_shaders"] }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

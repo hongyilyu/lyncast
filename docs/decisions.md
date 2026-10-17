@@ -205,6 +205,15 @@ These entries were made on 2026-10-17, for plan step 6. Evidence for the measure
 | Source stays empty until plan step 8 brings the niri IPC client and its fake socket. | Lead | Tier 2 has no niri, and Source cannot change a test's outcome before then. |
 | Tier 2 tests seed and read the clipboard through the test binary run again as a helper process with its own environment. | Measured | 20 of 20 runs at `--test-threads=4`, with no `unsafe` `set_var` and nothing left over across 375 environments. |
 
+## Palette
+
+Full design: [design/palette.md](design/palette.md). These entries were made on 2026-10-17. "Lead default, pending Hongyi" marks a preference call the lead made so work could continue.
+
+| Decision | Who | Evidence |
+|---|---|---|
+| The binary's `Cargo.lock` took its GPUI packages from `bench/probe/Cargo.lock`, so they keep the versions notes/05 measured. | Measured | After the merge, one `cargo fetch` added the 22 crates of gpui's `test-support` and changed no version that either lock held. The same steps gave the same lock twice (2026-10-17). |
+| `cargo test` builds the `lyncast` binary with gpui's `test-support`, because the binary's dev-dependency turns it on and cargo unifies features. The Tier 2 tests run that build. | Lead | A build outside a test still uses the platform's own scheduler (`gpui-pre` 0.3.9 `src/executor.rs:69-81`, read in source). A palette crate of its own would avoid the unification, at the cost of a library target for types the binary owns. |
+
 ## Stack
 
 | Decision | Who | Evidence |

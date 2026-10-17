@@ -11,6 +11,7 @@ mod daemon;
 #[path = "../../lyncast-core/tests/doc/mod.rs"]
 mod doc;
 mod files;
+mod palette;
 mod permit;
 #[cfg(test)]
 #[path = "../tests/common/pipe.rs"]
