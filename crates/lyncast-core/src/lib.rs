@@ -5,6 +5,7 @@
 mod actions;
 pub mod calc;
 mod command;
+pub mod desktop;
 mod fold;
 mod key;
 
