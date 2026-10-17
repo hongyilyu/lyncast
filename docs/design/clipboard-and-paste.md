@@ -165,7 +165,7 @@ The palette closes when the activating keys are released. A held Shift or Alt wo
 
 Three rules govern the close:
 
-- After any successful action, the daemon schedules the close with `cx.defer`, because a nested close fails in GPUI (`gpui-pre` 0.3.9 `src/app.rs:2215`, read in source).
+- After a socket client's successful action, the host schedules the close with `cx.defer`, because GPUI fails `update_window` on a window that is already being updated (`gpui-pre` 0.3.9 `src/app.rs:2201-2215`, read in source). A window's own handler can close it with `remove_window`, which only marks it ([palette](palette.md#a-summon-opens-one-window)).
 - `on_window_closed` clears the summon, so the toggle state follows the real window even when niri closes it.
 - Losing keyboard focus cancels the summon, because under focus-follows-mouse the keyboard can move to another output (read in source).
 

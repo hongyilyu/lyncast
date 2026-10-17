@@ -4,10 +4,12 @@
 //! and [`runtime`] makes the runtime directories, with a Tier 2 compositor in one when a test
 //! asks. [`daemon`] starts daemons in the background and says how the next one starts,
 //! [`frozen`] holds one of a daemon's threads still, and [`session`] runs a block's lines and
-//! compares what each printed.
+//! compares what each printed. [`clipboard`] holds the clipboard verbs, which run the test binary
+//! again as a helper.
 
 #![allow(dead_code)]
 
+pub mod clipboard;
 mod connections;
 mod daemon;
 #[path = "../../../lyncast-core/tests/doc/mod.rs"]

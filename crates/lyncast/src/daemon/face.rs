@@ -5,8 +5,8 @@ use super::{After, Answer, Ask};
 use crate::wire::Summon;
 
 /// What shows the summon. Each host owns one, and it is the only state that says whether the
-/// summon is open. It only does what [`apply`] decides.
-pub(super) trait Face {
+/// summon is open. [`apply`] holds what answers do to it, and `Owner::stop` closes it.
+pub(crate) trait Face {
     fn summon(&self) -> Summon;
     fn open(&mut self);
     /// Closes the open summon: only [`IsOpen::of`] makes the proof.
@@ -15,7 +15,7 @@ pub(super) trait Face {
 
 /// Proof that a face's summon is open, which [`Face::close`] takes, so no face is asked to
 /// close a closed summon.
-pub(super) struct IsOpen(());
+pub(crate) struct IsOpen(());
 
 impl IsOpen {
     pub(super) fn of(face: &dyn Face) -> Option<IsOpen> {
@@ -23,7 +23,8 @@ impl IsOpen {
     }
 }
 
-/// The headless host's summon: a state, with no window.
+/// The summon of a host with no window: the headless host's, and the palette's once GPUI's loop
+/// has ended and taken the windows with it.
 pub(super) struct Windowless(pub(super) Summon);
 
 impl Face for Windowless {

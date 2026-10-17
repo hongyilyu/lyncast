@@ -1,10 +1,10 @@
 //! The session runner. It runs a block's `$ ...` lines in order and compares what each printed
 //! with the lines after it. A `lyncast daemon` line with nothing after it starts a daemon in the
 //! background, which later lines reach, and the block's end kills it. Besides lyncast and
-//! `/bin/sh` lines, a block may hold the runner's own lines: `stall-stderr` and `no-threads`
-//! shape the next daemon, `drain-stderr` and `wait-exit` act on the newest one, `freeze-thread`
-//! and `thaw-thread` hold one of its threads, and [`Connections`] holds connections to it. A doc's
-//! own lines come through [`Verbs`].
+//! `/bin/sh` lines, a block may hold the runner's own lines: `stall-stdout`, `stall-stderr`, and
+//! `no-threads` shape the next daemon, `drain-stdout`, `drain-stderr`, and `wait-exit` act on the
+//! newest one, `freeze-thread` and `thaw-thread` hold one of its threads, and [`Connections`]
+//! holds connections to it. A doc's own lines come through [`Verbs`].
 
 use std::io::{self, Write};
 use std::mem;
@@ -149,6 +149,10 @@ impl Session {
         verbs: &mut Verbs<'_>,
     ) -> Line {
         let ran = match command {
+            "$ stall-stdout" => {
+                self.next.stdout = Output::Stalled;
+                OK
+            }
             "$ stall-stderr" => {
                 self.next.stderr = Output::Stalled;
                 OK
@@ -160,6 +164,12 @@ impl Session {
                 self.next.threads = Threads::None;
                 OK
             }
+            "$ drain-stdout" => match self.daemons.last_mut() {
+                Some(daemon) => daemon
+                    .drain_stdout(&world.runtime)
+                    .map_or_else(failed, |()| OK),
+                None => failed("no daemon to drain"),
+            },
             "$ drain-stderr" => match self.daemons.last_mut().map(Daemon::drain) {
                 Some(Ok(())) => OK,
                 Some(Err(error)) => failed(error),

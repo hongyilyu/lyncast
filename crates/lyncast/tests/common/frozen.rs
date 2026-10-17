@@ -54,8 +54,8 @@ pub(super) struct Holds(Vec<Frozen>);
 
 impl Holds {
     /// Runs a `freeze-thread <name>` line, which holds the newest daemon's thread named `name`, or
-    /// a `thaw-thread [<n>s]` line, which lets the newest held thread go `n` seconds later, and
-    /// gives what it printed, or `None` for any other line.
+    /// a `thaw-thread [<n>s|<n>ms]` line, which lets the newest held thread go that much later,
+    /// and gives what it printed, or `None` for any other line.
     pub(super) fn line(&mut self, line: &str, newest: Option<&Daemon>) -> Option<Ran> {
         let words: Vec<&str> = line.strip_prefix("$ ")?.split(' ').collect();
         Some(match words.as_slice() {
@@ -70,12 +70,15 @@ impl Holds {
             ["thaw-thread", after @ ..] => {
                 let after = match after {
                     [] => Duration::ZERO,
-                    [seconds] => seconds
-                        .strip_suffix('s')
-                        .and_then(|seconds| seconds.parse().ok())
-                        .map(Duration::from_secs)
-                        .unwrap_or_else(|| panic!("not thaw-thread <n>s: {line}")),
-                    _ => panic!("not thaw-thread [<n>s]: {line}"),
+                    [after] => match after.strip_suffix("ms") {
+                        Some(millis) => millis.parse().ok().map(Duration::from_millis),
+                        None => after
+                            .strip_suffix('s')
+                            .and_then(|seconds| seconds.parse().ok())
+                            .map(Duration::from_secs),
+                    }
+                    .unwrap_or_else(|| panic!("not thaw-thread <n>s or <n>ms: {line}")),
+                    _ => panic!("not thaw-thread [<n>s|<n>ms]: {line}"),
                 };
                 match self.0.last() {
                     Some(held) => {

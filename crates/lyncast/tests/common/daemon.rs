@@ -10,6 +10,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::ptr;
+use std::thread;
 
 use super::{Ran, Runtime, fill, poll, run_bounded, umask};
 
@@ -19,46 +20,52 @@ pub struct Daemon {
     child: Child,
     stderr: fs::File,
     filler: usize,
+    stdout: Option<(fs::File, usize)>,
 }
 
 impl Daemon {
     /// Starts `command`, a `lyncast daemon`, in the background with [`Runtime::record`]. Its
     /// stdout and stderr are appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
     pub fn spawn(command: Command, runtime: &Runtime) -> Daemon {
-        let stderr = runtime.log("daemon.stderr");
-        let mut from_here = fs::File::open(runtime.path().join("daemon.stderr")).unwrap();
-        from_here.seek(SeekFrom::End(0)).unwrap();
-        Daemon::spawn_with(command, runtime, Stdio::from(stderr), from_here, 0)
+        Daemon::spawn_with(command, runtime, Output::Logged, Output::Logged)
     }
 
-    /// [`Daemon::spawn`] with a stderr that does not drain: a pipe that the test fills before the
-    /// daemon starts.
-    pub fn spawn_stalled(command: Command, runtime: &Runtime) -> Daemon {
-        let (reader, mut writer) = io::pipe().unwrap();
-        let filler = fill(&mut writer, b'x');
-        let reader = fs::File::from(OwnedFd::from(reader));
-        Daemon::spawn_with(command, runtime, Stdio::from(writer), reader, filler)
-    }
-
-    /// `command` goes once the daemon runs, and with it the test's end of a stderr pipe, so the
-    /// pipe ends when the daemon exits.
-    fn spawn_with(
+    /// [`Daemon::spawn`] with its stdout and stderr going where they say. `command` goes once the
+    /// daemon runs, and with it the writer's end of a stalled pipe, so the pipe ends when the
+    /// daemon exits.
+    pub fn spawn_with(
         mut command: Command,
         runtime: &Runtime,
-        stderr: Stdio,
-        from_here: fs::File,
-        filler: usize,
+        stdout: Output,
+        stderr: Output,
     ) -> Daemon {
+        let (stdout, stalled_stdout) = match stdout {
+            Output::Logged => (Stdio::from(runtime.log("daemon.stdout")), None),
+            Output::Stalled => {
+                let (reader, writer, filler) = stalled();
+                (writer, Some((reader, filler)))
+            }
+        };
+        let (stderr, from_here, filler) = match stderr {
+            Output::Logged => {
+                let log = runtime.log("daemon.stderr");
+                let mut from_here = fs::File::open(runtime.path().join("daemon.stderr")).unwrap();
+                from_here.seek(SeekFrom::End(0)).unwrap();
+                (Stdio::from(log), from_here, 0)
+            }
+            Output::Stalled => {
+                let (reader, writer, filler) = stalled();
+                (writer, reader, filler)
+            }
+        };
         runtime.record(&mut command);
         umask(&mut command);
-        command
-            .stdin(Stdio::null())
-            .stdout(runtime.log("daemon.stdout"))
-            .stderr(stderr);
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
         Daemon {
             child: command.spawn().expect("lyncast runs"),
             stderr: from_here,
             filler,
+            stdout: stalled_stdout,
         }
     }
 
@@ -98,6 +105,19 @@ impl Daemon {
         poll(|| self.exited()).and_then(|status| status.code())
     }
 
+    /// Reads what fills a stalled stdout, and from then on appends what the daemon writes to
+    /// stdout to `daemon.stdout`.
+    pub fn drain_stdout(&mut self, runtime: &Runtime) -> io::Result<()> {
+        let (mut reader, filler) = self
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("the daemon's stdout was not stalled"))?;
+        reader.read_exact(&mut vec![0; filler])?;
+        let mut log = runtime.log("daemon.stdout");
+        thread::spawn(move || io::copy(&mut reader, &mut log));
+        Ok(())
+    }
+
     pub fn drain(&mut self) -> io::Result<()> {
         let mut filler = vec![0; self.filler];
         self.stderr.read_exact(&mut filler)?;
@@ -128,13 +148,20 @@ impl Drop for Daemon {
     }
 }
 
-/// Where a daemon's stderr goes.
+/// A pipe that the test has filled: the test's end, the writer's end, and how many bytes fill it.
+fn stalled() -> (fs::File, Stdio, usize) {
+    let (reader, mut writer) = io::pipe().unwrap();
+    let filler = fill(&mut writer, b'x');
+    (fs::File::from(OwnedFd::from(reader)), writer.into(), filler)
+}
+
+/// Where a daemon's stdout or stderr goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {
-    /// Appended to its log in the runtime directory, as [`Daemon::spawn`] does.
+    /// Appended to its log in the runtime directory, `daemon.stdout` or `daemon.stderr`.
     #[default]
     Logged,
-    /// A pipe that the test fills before the daemon starts, as [`Daemon::spawn_stalled`] does.
+    /// A pipe that the test fills before the daemon starts, so it does not drain.
     Stalled,
 }
 
@@ -151,26 +178,24 @@ pub enum Threads {
 /// daemon gets it.
 #[derive(Debug, Default)]
 pub struct NextDaemon {
+    pub stdout: Output,
     pub stderr: Output,
     pub threads: Threads,
 }
 
 impl NextDaemon {
-    /// Starts `command`, a `lyncast daemon`, in the background, as [`Daemon::spawn`] does.
+    /// Starts `command`, a `lyncast daemon`, in the background, as [`Daemon::spawn_with`] does.
     pub fn spawn(self, mut command: Command, runtime: &Runtime) -> Daemon {
         self.limit(&mut command);
-        match self.stderr {
-            Output::Logged => Daemon::spawn(command, runtime),
-            Output::Stalled => Daemon::spawn_stalled(command, runtime),
-        }
+        Daemon::spawn_with(command, runtime, self.stdout, self.stderr)
     }
 
     /// Runs `command`, a `lyncast daemon`, until it exits, with [`Runtime::record`], and gives
-    /// what it printed, or `None` when it runs over. A stalled stderr gives what the daemon wrote
-    /// after what filled it, and its stdout goes to `daemon.stdout`. Otherwise the daemon runs as
-    /// [`run_bounded`] runs a command.
+    /// what it printed, or `None` when it runs over. With an output stalled, it gives what the
+    /// daemon wrote to stderr, after what filled a stalled one, and none of its stdout. Otherwise
+    /// the daemon runs as [`run_bounded`] runs a command.
     pub fn run(self, mut command: Command, runtime: &Runtime, out: &Path) -> Option<Ran> {
-        if self.stderr == Output::Stalled {
+        if self.stdout == Output::Stalled || self.stderr == Output::Stalled {
             let mut daemon = self.spawn(command, runtime);
             return daemon
                 .finish()

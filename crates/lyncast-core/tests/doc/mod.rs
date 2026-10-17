@@ -58,6 +58,12 @@ pub const CLIPBOARD: Doc = Doc {
     prose: &["", "rust"],
 };
 
+pub const PALETTE: Doc = Doc {
+    file: "palette.md",
+    kinds: &["env", "desktop", "executable", "summon", "geometry"],
+    prose: &["", "text"],
+};
+
 /// One fixture block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
