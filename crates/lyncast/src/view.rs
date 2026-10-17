@@ -1,61 +1,71 @@
 //! The JSON view that `lyncast query --json` prints: one compact object per row and line, with
-//! the fields in declaration order. The wire spellings of kinds, sections, verbs, and chords
+//! the fields in declaration order. The daemon sends the same objects in its `rows` reply, and
+//! the client prints them as they came. The wire spellings of kinds, sections, verbs, and chords
 //! live here, and serde stays out of lyncast-core.
 
 use std::io::{self, Write};
 
 use lyncast_core::{Actions, Chord, Kind, Row, Section, Verb};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
-struct RowView<'a> {
+/// One row as `query --json` prints it.
+#[derive(Serialize, Deserialize)]
+pub struct RowView {
     key: String,
     /// The row's position in the flat list, counted across sections.
     index: usize,
-    kind: &'static str,
-    section: &'static str,
-    title: &'a str,
-    actions: Vec<ActionView<'a>>,
+    kind: String,
+    section: String,
+    title: String,
+    actions: Vec<ActionView>,
 }
 
-#[derive(Serialize)]
-struct ActionView<'a> {
+#[derive(Serialize, Deserialize)]
+struct ActionView {
     verb: String,
-    label: &'a str,
+    label: String,
     /// Every chord that runs this item, in `Chord::ALL` order.
-    chords: Vec<&'static str>,
+    chords: Vec<String>,
+}
+
+/// The view of each row, numbered in order.
+pub fn rows(rows: &[Row]) -> Vec<RowView> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let key = row.subject.key();
+            RowView {
+                key: key.to_string(),
+                index,
+                kind: kind_name(key.kind()).to_owned(),
+                section: section_name(row.section).to_owned(),
+                title: row.title.clone(),
+                actions: action_views(&row.subject.actions()),
+            }
+        })
+        .collect()
 }
 
 /// Writes one line per row.
-pub fn write_rows(out: &mut impl Write, rows: &[Row]) -> io::Result<()> {
-    for (index, row) in rows.iter().enumerate() {
-        let key = row.subject.key();
-        let actions = row.subject.actions();
-        let view = RowView {
-            key: key.to_string(),
-            index,
-            kind: kind_name(key.kind()),
-            section: section_name(row.section),
-            title: &row.title,
-            actions: action_views(&actions),
-        };
-        serde_json::to_writer(&mut *out, &view)?;
+pub fn write_rows(out: &mut impl Write, rows: &[RowView]) -> io::Result<()> {
+    for row in rows {
+        serde_json::to_writer(&mut *out, row)?;
         out.write_all(b"\n")?;
     }
     Ok(())
 }
 
 /// The Actions menu in order, default first.
-fn action_views(actions: &Actions) -> Vec<ActionView<'_>> {
+fn action_views(actions: &Actions) -> Vec<ActionView> {
     actions
         .iter()
         .map(|(_, item)| ActionView {
             verb: verb_name(&item.verb()),
-            label: item.label(),
+            label: item.label().to_owned(),
             chords: Chord::ALL
                 .into_iter()
                 .filter(|&chord| actions.on(chord) == item)
-                .map(chord_name)
+                .map(|chord| chord_name(chord).to_owned())
                 .collect(),
         })
         .collect()

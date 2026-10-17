@@ -164,3 +164,143 @@ Replies:
 | `{"reply":"confirm","title":...}` | the command's title |
 | `{"reply":"failed","reason":...}` | the reason, without the `lyncast: ` prefix |
 
+## The fixtures
+
+The tests in `crates/lyncast/tests/daemon.rs` read the blocks below. Each `session` and `wire` block gets a fresh directory, `$TREE`, with every `desktop` and `executable` block written under it, and its own `XDG_RUNTIME_DIR`, `$RUNTIME`, a fresh directory under `/tmp`. The tests run the real binary with only the `env` block's variables and `$TREE` as the working directory. The test removes a block's `$TREE` once the block passes.
+
+```env
+HOME=$TREE/home
+XDG_DATA_HOME=$TREE/data
+XDG_CONFIG_HOME=$TREE/config
+XDG_DATA_DIRS=$TREE/share
+XDG_RUNTIME_DIR=$RUNTIME
+XDG_CURRENT_DESKTOP=niri
+LANG=C
+PATH=$TREE/bin
+```
+
+The tree holds one app with one Desktop Action:
+
+```desktop share/applications/firefox.desktop
+[Desktop Entry]
+Type=Application
+Name=Firefox
+Exec=firefox %u
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=firefox --new-window %u
+```
+
+```executable bin/firefox
+#!/bin/sh
+```
+
+A `session` block is a terminal transcript against one environment:
+
+- A line that starts with `$ ` is a command. Words split as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and a command may set variables before `lyncast`.
+- `$ lyncast daemon ...` with no expected lines after it starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
+- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
+
+At the end of a block the test stops any daemon still running.
+
+### Each request round-trips
+
+`toggle` and `status` share the summon state.
+
+```session
+$ lyncast daemon --headless
+$ lyncast status
+closed
+$ lyncast toggle
+open
+$ lyncast status
+open
+$ lyncast toggle
+closed
+```
+
+A query goes to the daemon, which ranks with the environment it read at start, so a client's `XDG_DATA_DIRS` hides nothing. The fresh install's empty list is Suggestions, Clipboard History then the apps alphabetically, and then Commands.
+
+```session
+$ lyncast daemon --headless
+$ lyncast query fire --json
+{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+$ XDG_DATA_DIRS=$TREE/nowhere lyncast query fire --json
+{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+$ lyncast query "" --json
+{"key":"cmd:clipboard-history","index":0,"kind":"command","section":"suggestions","title":"Clipboard History","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"app:firefox.desktop","index":1,"kind":"app","section":"suggestions","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+{"key":"cmd:lock-screen","index":2,"kind":"command","section":"commands","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:log-out","index":3,"kind":"command","section":"commands","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:open-config","index":4,"kind":"command","section":"commands","title":"Open Config","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:power-off","index":5,"kind":"command","section":"commands","title":"Power Off","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:quit","index":6,"kind":"command","section":"commands","title":"Quit lyncast","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reboot","index":7,"kind":"command","section":"commands","title":"Reboot","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":8,"kind":"command","section":"commands","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:suspend","index":9,"kind":"command","section":"commands","title":"Suspend","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+```
+
+### One daemon owns the socket
+
+A second daemon finds the lock taken. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails.
+
+```session
+$ lyncast toggle
+stderr: lyncast: no daemon is listening on $RUNTIME/lyncast.sock
+exit: 1
+$ lyncast status
+stderr: lyncast: no daemon is listening on $RUNTIME/lyncast.sock
+exit: 1
+$ lyncast query fire --json
+stderr: lyncast: no daemon is listening on $RUNTIME/lyncast.sock
+exit: 1
+$ lyncast daemon --headless
+$ lyncast daemon --headless
+stderr: lyncast: a daemon is already running
+exit: 1
+$ env -u XDG_RUNTIME_DIR lyncast status
+stderr: lyncast: XDG_RUNTIME_DIR is not set
+exit: 1
+$ env -u XDG_RUNTIME_DIR lyncast daemon --headless
+stderr: lyncast: XDG_RUNTIME_DIR is not set
+exit: 1
+$ lyncast daemon
+stderr: error: the following required arguments were not provided:
+stderr:   --headless
+stderr: 
+stderr: Usage: lyncast daemon --headless
+stderr: 
+stderr: For more information, try '--help'.
+exit: 2
+```
+
+### The socket speaks one JSON line each way
+
+A `wire` block sends each `>` line, with a newline, to a daemon started as a session starts one, each on a connection of its own. It expects the `<` line after it as the reply.
+
+```wire
+> {"request":"status"}
+< {"reply":"summon","state":"closed"}
+> {"request":"toggle"}
+< {"reply":"summon","state":"open"}
+> {"request":"query","text":"fire"}
+< {"reply":"rows","rows":[{"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}]}
+> not json
+< {"reply":"failed","reason":"bad request: expected ident at line 1 column 2"}
+```
+
+A `wire unterminated` block sends each `>` line twice, each time on a new connection. The first time it has no newline, and the test closes its half of the connection after it. The second time it is padded with spaces to 1 MiB, and `not json` and a newline follow. Both get the `<` reply. A toggle that ran would have replied with the summon state.
+
+```wire unterminated
+> {"request":"toggle"}
+< {"reply":"failed","reason":"bad request: no newline in the first 1 MiB"}
+```
+
+A `wire full` block pads each `>` line with spaces to 1 MiB with its newline, the most a request line may hold, and expects the `<` line as a `wire` block does.
+
+```wire full
+> {"request":"status"}
+< {"reply":"summon","state":"closed"}
+```

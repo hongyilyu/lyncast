@@ -1,191 +1,17 @@
 //! `lyncast query` end to end. The test writes the `desktop`, `executable`, `symlink`, and `fifo`
-//! blocks of docs/design/ranking.md under a fresh directory, runs the real binary with only the
-//! `env` block's variables, and compares stdout byte for byte with each `cli` block.
+//! blocks of docs/design/ranking.md under a fresh directory. For each `cli` block it starts a
+//! daemon with only the `env` block's variables, as the block's command line changes them, and
+//! compares the client's stdout byte for byte with the block.
 
-#[path = "../../lyncast-core/tests/doc/mod.rs"]
-mod doc;
+mod common;
 
 use std::collections::BTreeSet;
-use std::ffi::{CString, OsString};
 use std::fs;
-use std::io::ErrorKind;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Stdio;
 
-/// Writes every `desktop <path>` and `executable <path>` block under `tree`, from scratch, makes
-/// each `symlink <path> -> <target>` block a link to `target` as written, and makes each
-/// `fifo <path>` block a FIFO. A `desktop` block may give `mode=<octal>` after its path.
-fn materialize(tree: &Path) {
-    match fs::remove_dir_all(tree) {
-        Err(error) if error.kind() != ErrorKind::NotFound => panic!("{tree:?}: {error}"),
-        _ => {}
-    }
-    for kind in ["desktop", "executable"] {
-        for block in doc::RANKING.blocks(kind) {
-            let (relative, mode) = match block.args.as_slice() {
-                [relative] => (relative, (kind == "executable").then_some(0o755)),
-                [relative, mode] if kind == "desktop" => {
-                    let mode = mode
-                        .strip_prefix("mode=")
-                        .map(|m| u32::from_str_radix(m, 8));
-                    let Some(Ok(mode)) = mode else {
-                        panic!("line {}: not mode=<octal>", block.line);
-                    };
-                    (relative, Some(mode))
-                }
-                _ => panic!("line {}: a {kind} block names one path", block.line),
-            };
-            let path = tree.join(relative);
-            fs::create_dir_all(path.parent().expect("a path under the tree")).unwrap();
-            fs::write(&path, raw_bytes(&format!("{}\n", block.lines.join("\n")))).unwrap();
-            if let Some(mode) = mode {
-                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-            }
-        }
-    }
-    for block in doc::RANKING.blocks("symlink") {
-        let [relative, arrow, target] = block.args.as_slice() else {
-            panic!(
-                "line {}: a symlink block reads <path> -> <target>",
-                block.line
-            );
-        };
-        assert!(
-            arrow == "->" && block.lines.is_empty(),
-            "line {}: a symlink block reads <path> -> <target> and holds no lines",
-            block.line
-        );
-        let path = tree.join(relative);
-        fs::create_dir_all(path.parent().expect("a path under the tree")).unwrap();
-        symlink(target, &path).unwrap();
-    }
-    for block in doc::RANKING.blocks("fifo") {
-        let [relative] = block.args.as_slice() else {
-            panic!("line {}: a fifo block names one path", block.line);
-        };
-        assert!(
-            block.lines.is_empty(),
-            "line {}: a fifo block holds no lines",
-            block.line
-        );
-        let path = tree.join(relative);
-        fs::create_dir_all(path.parent().expect("a path under the tree")).unwrap();
-        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
-        // SAFETY: `c_path` is a NUL-terminated string that lives through the call.
-        assert_eq!(
-            unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) },
-            0,
-            "{c_path:?}"
-        );
-    }
-}
-
-/// The text's bytes, with each exact `\x{HH}` written as the byte `HH`, so a desktop file can
-/// hold a byte that is not UTF-8.
-fn raw_bytes(text: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("\\x{") {
-        out.extend_from_slice(&rest.as_bytes()[..at]);
-        let after = &rest[at + 3..];
-        match after.get(..3).and_then(|hex| {
-            let digits = hex.strip_suffix('}')?;
-            digits
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
-                .then_some(())?;
-            u8::from_str_radix(digits, 16).ok()
-        }) {
-            Some(byte) => {
-                out.push(byte);
-                rest = &after[3..];
-            }
-            None => {
-                out.extend_from_slice(b"\\x{");
-                rest = after;
-            }
-        }
-    }
-    out.extend_from_slice(rest.as_bytes());
-    out
-}
-
-/// The `env` block's `NAME=value` lines, with `$TREE` replaced.
-fn environment(tree: &Path) -> Vec<(String, String)> {
-    let blocks = doc::RANKING.blocks("env");
-    let [block] = blocks.as_slice() else {
-        panic!("ranking.md needs one env block, not {}", blocks.len());
-    };
-    let tree = tree.to_str().expect("a UTF-8 target dir");
-    block
-        .lines
-        .iter()
-        .map(|line| {
-            let (name, value) = line
-                .split_once('=')
-                .unwrap_or_else(|| panic!("not NAME=value: {line:?}"));
-            (name.to_owned(), value.replace("$TREE", tree))
-        })
-        .collect()
-}
-
-/// One `cli` command line.
-struct CommandLine {
-    /// The `env -u NAME` variables, removed from the env block.
-    unset: Vec<String>,
-    /// The `NAME=value` words, which override the env block after the removals.
-    vars: Vec<(String, OsString)>,
-    args: Vec<String>,
-}
-
-/// A `$ [env -u NAME ...] [NAME=value ...] lyncast ...` line. A value may hold `$TREE` and
-/// `\x{HH}`, and `""` is an empty argument.
-fn command_line(command: &str, tree: &Path) -> CommandLine {
-    let mut words: &[&str] = &command
-        .strip_prefix("$ ")
-        .unwrap_or_else(|| panic!("a cli block starts with `$ `: {command:?}"))
-        .split(' ')
-        .collect::<Vec<_>>();
-    let mut unset = Vec::new();
-    if let ["env", rest @ ..] = words {
-        words = rest;
-        while let ["-u", name, rest @ ..] = words {
-            unset.push((*name).to_owned());
-            words = rest;
-        }
-    }
-    let program = words
-        .iter()
-        .position(|&word| word == "lyncast")
-        .unwrap_or_else(|| panic!("a cli block runs lyncast: {command:?}"));
-    let tree = tree.to_str().expect("a UTF-8 target dir");
-    let vars = words[..program]
-        .iter()
-        .map(|word| {
-            let (name, value) = word
-                .split_once('=')
-                .unwrap_or_else(|| panic!("not NAME=value before lyncast: {command:?}"));
-            let value = OsString::from_vec(raw_bytes(&value.replace("$TREE", tree)));
-            (name.to_owned(), value)
-        })
-        .collect();
-    let args = words[program + 1..]
-        .iter()
-        .map(|word| {
-            let arg = doc::unquote(word);
-            assert!(
-                !arg.contains('"'),
-                "a quoted argument with a space: {command:?}"
-            );
-            arg.to_owned()
-        })
-        .collect();
-    CommandLine { unset, vars, args }
-}
+use common::{Daemon, Runtime, command_line, doc, environment, lyncast, materialize, run_bounded};
 
 /// The `desktop`, `executable`, `symlink`, and `fifo` blocks are the files that the "Each file
 /// proves one rule" table lists, so a lost block fails, even an `executable` whose loss only lets
@@ -243,8 +69,12 @@ fn every_executable_is_a_program_some_entry_names() {
 
 #[test]
 fn query_prints_the_doc_rows() {
+    let doc = doc::RANKING.text();
+    let fixtures = doc::RANKING
+        .read(&doc)
+        .unwrap_or_else(|error| panic!("ranking.md: {error}"));
     let tree = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ranking-tree");
-    materialize(&tree);
+    materialize(&fixtures, &tree);
     // The Notes fixture's `\x{E9}` is the byte 0xE9, so the file it proves its row with is not
     // UTF-8.
     let notes = fs::read(tree.join("home/applications/notes.desktop")).unwrap();
@@ -268,7 +98,7 @@ fn query_prints_the_doc_rows() {
             "{command} holds no raw 0xFF"
         );
     }
-    let env = environment(&tree);
+    let env = environment(&fixtures, &[("$TREE", &tree)]);
     let blocks = doc::RANKING.blocks("cli");
     for command in [
         "$ lyncast query firef --json",
@@ -312,20 +142,25 @@ fn query_prints_the_doc_rows() {
             .split_first()
             .expect("a cli block has a command");
         let line = command_line(command, &tree);
-        let mut run = Command::new(env!("CARGO_BIN_EXE_lyncast"));
-        run.args(line.args)
-            .env_clear()
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&tree);
-        // env(1) unsets before it sets, so `env -u PATH PATH=` runs with an empty `PATH`.
-        for name in line.unset {
-            run.env_remove(name);
-        }
-        run.envs(line.vars);
-        let Some((stdout, stderr, code)) = run_bounded(run, &out_dir) else {
+        let runtime = Runtime::new();
+        let mut daemon = line.command(["daemon", "--headless"], &env);
+        daemon
+            .current_dir(&tree)
+            .env("XDG_RUNTIME_DIR", runtime.path());
+        let daemon = match Daemon::start(daemon, &runtime) {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                failures.push(format!("line {}: {command}\n  {error}", block.line));
+                break;
+            }
+        };
+        // The client reads nothing from its environment but the socket path.
+        let Some((stdout, stderr, code)) = run_bounded(lyncast(&runtime, &line.args), &out_dir)
+        else {
             failures.push(format!("line {}: {command}\n  ran over 10 s", block.line));
             break;
         };
+        drop(daemon);
         let want: String = rows.iter().map(|row| format!("{row}\n")).collect();
         let got = (
             String::from_utf8_lossy(&stdout).into_owned(),
@@ -348,34 +183,14 @@ fn query_prints_the_doc_rows() {
     );
 }
 
-/// Runs `command` for at most 10 s, so a scan that blocks, as on a FIFO, fails its block and does
-/// not hang the test. Its stdout and stderr go to files under `dir`, which never block it. `None`
-/// when it ran over.
-fn run_bounded(mut command: Command, dir: &Path) -> Option<(Vec<u8>, Vec<u8>, Option<i32>)> {
-    let [stdout, stderr] = ["stdout", "stderr"].map(|name| dir.join(name));
-    command
-        .stdout(fs::File::create(&stdout).unwrap())
-        .stderr(fs::File::create(&stderr).unwrap());
-    let mut child = command.spawn().expect("lyncast runs");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let code = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status.code();
-        }
-        if Instant::now() > deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            return None;
-        }
-        thread::sleep(Duration::from_millis(1));
-    };
-    Some((fs::read(stdout).unwrap(), fs::read(stderr).unwrap(), code))
-}
-
 /// A write that fails exits 1, even when the error message cannot be written either, and a usage
-/// error keeps clap's 2.
+/// error keeps clap's 2. The query reaches a daemon, so only the write can fail.
 #[test]
 fn a_failed_write_exits_1() {
+    let runtime = Runtime::new();
+    let mut daemon = lyncast(&runtime, ["daemon", "--headless"]);
+    daemon.env("XDG_DATA_DIRS", runtime.path());
+    let _daemon = Daemon::start(daemon, &runtime).unwrap();
     let full = || {
         fs::OpenOptions::new()
             .write(true)
@@ -383,8 +198,7 @@ fn a_failed_write_exits_1() {
             .expect("/dev/full opens")
     };
     let run = |args: &[&str], stdout_full: bool, stderr_full: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lyncast"));
-        command.args(args).env_clear().stdin(Stdio::null());
+        let mut command = lyncast(&runtime, args);
         command.stdout(if stdout_full {
             Stdio::from(full())
         } else {
@@ -397,8 +211,14 @@ fn a_failed_write_exits_1() {
         });
         command.status().expect("lyncast runs").code()
     };
+    assert_eq!(
+        run(&["query", "", "--json"], false, false),
+        Some(0),
+        "the query reaches the daemon"
+    );
     assert_eq!(run(&["query", "", "--json"], true, false), Some(1));
     assert_eq!(run(&["query", "", "--json"], true, true), Some(1));
+    assert_eq!(run(&["status"], true, false), Some(1));
     assert_eq!(run(&["--help"], true, false), Some(1));
     assert_eq!(run(&["--version"], true, false), Some(1));
     assert_eq!(run(&["query", "--help"], true, false), Some(1));

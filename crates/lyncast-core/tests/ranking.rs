@@ -208,6 +208,22 @@ fn the_reader_follows_commonmark_fences() {
     }
 }
 
+/// Each doc reads its own fixture kinds and prose fences, so daemon.md's `json` prose fence
+/// reads there, and a ranking kind such as `cli` does not.
+#[test]
+fn each_doc_reads_its_own_fences() {
+    let json = "```json\n{}\n```\n";
+    assert_eq!(doc::DAEMON.read(json), Ok(Vec::new()));
+    assert_eq!(
+        doc::RANKING.read(json),
+        Err("line 1: \"```json\" is not a fixture kind".to_owned())
+    );
+    assert_eq!(
+        doc::DAEMON.read("```cli\n$ lyncast status\n```\n"),
+        Err("line 1: \"```cli\" is not a fixture kind".to_owned())
+    );
+}
+
 /// Each line reads `input => case-kept | lowercased`, and either side may write `\u{XXXX}`.
 #[test]
 fn fold_fixtures() {

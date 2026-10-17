@@ -1,16 +1,19 @@
-//! The lyncast binary. Until step 5 it has one subcommand: `query` scans the desktop entries,
-//! ranks them in lyncast-core with no visits and the system clock, and prints one JSON object
-//! per row.
+//! The lyncast binary. `lyncast daemon --headless` runs the daemon, which scans the desktop
+//! entries, owns the socket, and builds the root list in lyncast-core. The other subcommands
+//! are clients that send it one request each and print the reply (docs/design/daemon.md).
 
 mod apps;
+mod client;
+mod daemon;
 mod view;
+mod wire;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use lyncast_core::rank::{Index, Timestamp, Visits};
+
+use wire::{Reply, Request};
 
 #[derive(Parser)]
 #[command(name = "lyncast", version, about = "A fast, small launcher for niri.")]
@@ -21,6 +24,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run the daemon, which scans the apps and answers on $XDG_RUNTIME_DIR/lyncast.sock.
+    Daemon {
+        /// Run without the palette. Required until the palette exists.
+        #[arg(long, required = true)]
+        headless: bool,
+    },
+    /// Open the summon if it is closed, or close it, and print the new state.
+    Toggle,
+    /// Print the summon state, open or closed.
+    Status,
     /// Print the root list for a query, one row per line.
     // clap reads `-h` as help even with `allow_hyphen_values`, so only `--help` is help here.
     #[command(disable_help_flag = true)]
@@ -38,14 +51,26 @@ enum Cmd {
     },
 }
 
-/// Exits 0 on success, 1 when stdout cannot be written, and 2 on a usage error.
+/// Exits 0 on success, 1 when the request fails or stdout cannot be written, and 2 on a usage
+/// error.
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => return clap_exit(&error),
     };
-    match cli.command {
-        Cmd::Query { text, .. } => query(&text),
+    let done = match cli.command {
+        Cmd::Daemon { .. } => daemon::run(),
+        Cmd::Toggle => summon(&Request::Toggle),
+        Cmd::Status => summon(&Request::Status),
+        Cmd::Query { text, .. } => query(text),
+    };
+    match done {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            // eprintln! panics when stderr fails too, which would exit 101.
+            let _ = writeln!(io::stderr(), "lyncast: {reason}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -59,24 +84,25 @@ fn clap_exit(error: &clap::Error) -> ExitCode {
     ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
 }
 
-fn query(text: &str) -> ExitCode {
-    let index = Index::new(apps::scan(&apps::Vars::read()));
-    let rows = index.rows(text, &Visits::default(), now());
-    let mut out = io::stdout().lock();
-    match view::write_rows(&mut out, &rows).and_then(|()| out.flush()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            // eprintln! panics when stderr fails too, which would exit 101.
-            let _ = writeln!(io::stderr(), "lyncast: {error}");
-            ExitCode::FAILURE
-        }
+/// `toggle` and `status` print the summon state.
+fn summon(request: &Request) -> Result<(), String> {
+    match client::send(request)? {
+        Reply::Summon { state } => print(|out| writeln!(out, "{state}")),
+        reply => Err(client::refusal(reply)),
     }
 }
 
-/// The one clock read per query. A clock before 1970 reads as the epoch.
-fn now() -> Timestamp {
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    Timestamp(i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+fn query(text: String) -> Result<(), String> {
+    match client::send(&Request::Query { text })? {
+        Reply::Rows { rows } => print(|out| view::write_rows(out, &rows)),
+        reply => Err(client::refusal(reply)),
+    }
+}
+
+/// Writes to stdout and flushes it, so a failed write is the command's failure.
+fn print(write: impl FnOnce(&mut io::StdoutLock<'_>) -> io::Result<()>) -> Result<(), String> {
+    let mut out = io::stdout().lock();
+    write(&mut out)
+        .and_then(|()| out.flush())
+        .map_err(|error| error.to_string())
 }
