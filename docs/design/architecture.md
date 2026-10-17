@@ -17,7 +17,7 @@ The clipboard also needs a resident process. Wayland clipboard data disappears w
 The window sits on the Overlay layer with exclusive keyboard focus, because niri hides the Top layer behind fullscreen windows. Three more pieces complete the [process model](../decisions.md#process-model):
 
 - `lyncast toggle` is a thin client. A niri bind such as `Mod+Space` runs it, and it sends one request over a Unix socket. Wayland has no global hotkeys, so the compositor has to start the client.
-- `--headless` runs the core, the clipboard watcher, and the socket without GPUI. Tests use it.
+- `lyncast daemon --headless` runs the core, the clipboard watcher, and the socket without GPUI. Tests use it. [daemon.md](daemon.md) describes the daemon and its socket.
 - The GPUI app runs with `QuitMode::Explicit`. By default GPUI quits on Linux when the last window closes (`gpui-pre` 0.3.9 `src/app.rs:3180-3187`). Every dismiss closes the last window, so the process would exit and drop its selection.
 
 Inside the daemon, a separate capture thread owns the `wl-clipboard-rs` `Watcher`, because `Watcher::next_event` blocks with no timeout. The thread sends each new entry to the daemon over a channel.
@@ -94,8 +94,9 @@ pub enum Outcome { Card(Answer), Error(String), Silent } // calc::evaluate
 pub enum Via { Chord(Chord), Menu(Verb) }
 pub enum Request {
 	Toggle,
+	Status,
 	Query { text: String },
-	Activate { key: Key, via: Via, confirmed: bool },
+	Activate { key: Key, via: Via, confirmed: bool, query: String },
 }
 ```
 
@@ -137,7 +138,7 @@ Before the first keystroke the palette shows two sections, as Raycast does ([dec
 - **Suggestions** holds the top 5 apps and commands by frecency. On a fresh install, with no usage yet, it shows Clipboard History and then the first apps alphabetically.
 - **Commands** lists every built-in command that Suggestions does not hold, alphabetically.
 
-Each row shows its kind, Command or Application, on the right. The commands are Clipboard History, Open Config, Reload Apps, Quit lyncast, Lock Screen (`loginctl lock-session`), Suspend, Log Out (`niri msg action quit`), Reboot, and Power Off. Typing searches commands like apps, so `clip` finds Clipboard History.
+Each row shows its kind, Command or Application, on the right. The commands are Clipboard History, Open Config, Reload Apps, Quit lyncast, Lock Screen (`loginctl lock-session`), Suspend, Log Out (`niri msg action quit --skip-confirmation`), Reboot, and Power Off. Typing searches commands like apps, so `clip` finds Clipboard History.
 
 Log Out, Reboot, and Power Off ask for confirmation. The daemon answers the first `Activate` with a confirmation reply, the palette asks, and the second `Activate` carries `confirmed: true`. The CLI spells it `lyncast activate cmd:reboot --yes`.
 
@@ -153,7 +154,7 @@ A summon goes through these steps:
 1. A niri bind runs `lyncast toggle`, which sends `Request::Toggle`.
 2. If no summon is open, the daemon opens a new layer-shell window. If one is open, the toggle closes it.
 3. Each keystroke runs the input box and redraws the rows.
-4. The activating keys, or a pick in the Actions menu, send `Request::Activate { key, via, confirmed }`. The daemon rebuilds the row's `Subject` from the key and current state, takes the item for the chord or the picked verb from its `Actions`, and runs it. If the action fails, the window stays open.
+4. The activating keys, or a pick in the Actions menu, send `Request::Activate { key, via, confirmed, query }`. The daemon rebuilds the row's `Subject` from the key and current state, takes the item for the chord or the picked verb from its `Actions`, and runs it. If the action fails, the window stays open.
 5. After a successful action, the daemon schedules the close with `cx.defer`. A close from inside the window's own handler fails in GPUI (`src/app.rs:2215`), because GPUI takes a window out of its slot while it updates ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source).
 6. The palette closes when the activating keys are released. Once paste exists, a held Shift or Alt would otherwise merge with the injected Ctrl+V.
 7. `on_window_closed` clears the summon. The hook also sees a close that niri starts when an output goes away, so the toggle state follows the real window (notes/07, read in source).
@@ -169,8 +170,9 @@ Every palette action also exists as a CLI command over the same socket protocol.
 The CLI maps onto the requests:
 
 - `lyncast toggle` sends `Toggle`.
+- `lyncast status` sends `Status` and prints `open` or `closed`.
 - `lyncast query <text> --json` prints one JSON object per row, with its key, index, kind, section, title, and actions. Until step 5 it ranks in-process ([ranking](ranking.md#lyncast-query-prints-one-json-object-per-row)). The query accepts a leading hyphen (`allow_hyphen_values`), because clap rejected `lyncast query -5+3`. A query that is an option's name, `--json` or `--help`, or `--` itself needs `lyncast query --json -- <text>` ([notes/08](../research/notes/08-calc-engine-workflow.md), measured).
-- `lyncast activate <key>` runs a row's action. In the notes/07 design, `lyncast activate 'calc:2+3*4'` prints `copied 14`.
+- `lyncast activate <key>` runs a row's action, chosen with `--chord` or `--verb`. `--yes` confirms, and `--query` passes the search text. In the notes/07 design, `lyncast activate 'calc:2+3*4'` prints `copied 14`.
 
 The exit codes are part of the contract:
 
@@ -179,7 +181,7 @@ The exit codes are part of the contract:
 - `2` means a usage error, because clap uses 2 for every usage error (notes/08, read in source).
 - `3` will mean a stale rate snapshot, once currency exists. It has its own code so a test cannot pass on a usage error.
 
-The socket path, the wire format, and how the CLI names a chord other than Enter are undecided. So is the command that starts the daemon outside tests.
+[daemon.md](daemon.md) gives the socket path, the wire format, the CLI's options and output, and the command that starts the daemon.
 
 ## New features plug into tables and modules
 

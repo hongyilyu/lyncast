@@ -4,7 +4,7 @@ The dev box has no display, so every lyncast test drives the CLI and checks what
 
 ## Tests assert literal output
 
-Each test runs `lyncast` and compares stdout, stderr, and the exit code with literal strings. Every palette action also exists as a CLI command over the same socket protocol, so a CLI test takes the palette's path. `lyncast --headless` runs the core, the clipboard watcher, and the socket without GPUI.
+Each test runs `lyncast` and compares stdout, stderr, and the exit code with literal strings. Every palette action also exists as a CLI command over the same socket protocol, so a CLI test takes the palette's path. `lyncast daemon --headless` runs the core, the clipboard watcher, and the socket without GPUI, and `lyncast daemon --record <file>` makes it record each program it would start instead of starting it ([daemon](daemon.md#the-runner-starts-programs-and-tests-swap-in-a-recorder)).
 
 MIME types are the exception. Their order differed between two probe runs, so tests check membership ([notes/07](../research/notes/07-paste-seam-workflow.md), measured). A failed action exits 1 with the reason on stderr (notes/07). A usage error exits 2, and a stale rate snapshot will exit 3 ([decision log](../decisions.md#calculator-engine)).
 
@@ -118,7 +118,7 @@ The design and reviews add these cases:
 - **Close after copy.** After `lyncast toggle` and `lyncast activate clip:1`, a status query prints `closed`, `read_text()` still returns the entry, and a second toggle opens one window. The case catches a nested close and a missing `QuitMode::Explicit`, which would quit and clear the selection.
 - **Close after launch.** Activating an app row closes the window. The reviewed Launch arm never closed it.
 
-The close cases run the GPUI daemon under anvil, not `--headless`.
+The close cases run the GPUI daemon under anvil, not `lyncast daemon --headless`.
 
 `read_text()` right after `copied clip 1` can flake, because wl-clipboard-rs reports success before it serves (notes/07, read in source). The notes do not say what Tier 2 expects for a clip's Source, which comes from niri IPC.
 
