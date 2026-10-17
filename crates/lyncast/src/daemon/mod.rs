@@ -7,6 +7,7 @@ mod serve;
 pub use serve::run;
 
 use lyncast_core::rank::{Index, Timestamp, Visits};
+use lyncast_core::root;
 
 use crate::view;
 use crate::wire::{Reply, Request, Summon};
@@ -37,7 +38,7 @@ impl Daemon {
             }
             Request::Status => Reply::Summon { state: self.summon },
             Request::Query { text } => Reply::Rows {
-                rows: view::rows(&self.index.rows(&text, &Visits::default(), now)),
+                rows: view::rows(&root::rows(&self.index, &Visits::default(), &text, now)),
             },
         }
     }

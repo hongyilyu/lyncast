@@ -179,7 +179,7 @@ LANG=C
 PATH=$TREE/bin
 ```
 
-The tree holds one app with one Desktop Action:
+The tree holds Firefox, with one Desktop Action, and 8x8, an app named like a product:
 
 ```desktop share/applications/firefox.desktop
 [Desktop Entry]
@@ -194,6 +194,17 @@ Exec=firefox --new-window %u
 ```
 
 ```executable bin/firefox
+#!/bin/sh
+```
+
+```desktop share/applications/8x8.desktop
+[Desktop Entry]
+Type=Application
+Name=8x8
+Exec=8x8
+```
+
+```executable bin/8x8
 #!/bin/sh
 ```
 
@@ -231,15 +242,36 @@ $ XDG_DATA_DIRS=$TREE/nowhere lyncast query fire --json
 {"key":"app:firefox.desktop","index":0,"kind":"app","section":"results","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
 $ lyncast query "" --json
 {"key":"cmd:clipboard-history","index":0,"kind":"command","section":"suggestions","title":"Clipboard History","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"app:firefox.desktop","index":1,"kind":"app","section":"suggestions","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
-{"key":"cmd:lock-screen","index":2,"kind":"command","section":"commands","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:log-out","index":3,"kind":"command","section":"commands","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:open-config","index":4,"kind":"command","section":"commands","title":"Open Config","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:power-off","index":5,"kind":"command","section":"commands","title":"Power Off","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:quit","index":6,"kind":"command","section":"commands","title":"Quit lyncast","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:reboot","index":7,"kind":"command","section":"commands","title":"Reboot","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:reload-apps","index":8,"kind":"command","section":"commands","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
-{"key":"cmd:suspend","index":9,"kind":"command","section":"commands","title":"Suspend","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"app:8x8.desktop","index":1,"kind":"app","section":"suggestions","title":"8x8","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+{"key":"app:firefox.desktop","index":2,"kind":"app","section":"suggestions","title":"Firefox","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"launch-action:new-window","label":"New Window","chords":[]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+{"key":"cmd:lock-screen","index":3,"kind":"command","section":"commands","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:log-out","index":4,"kind":"command","section":"commands","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:open-config","index":5,"kind":"command","section":"commands","title":"Open Config","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:power-off","index":6,"kind":"command","section":"commands","title":"Power Off","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:quit","index":7,"kind":"command","section":"commands","title":"Quit lyncast","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reboot","index":8,"kind":"command","section":"commands","title":"Reboot","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:reload-apps","index":9,"kind":"command","section":"commands","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+{"key":"cmd:suspend","index":10,"kind":"command","section":"commands","title":"Suspend","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
+```
+
+### The calculator card comes first
+
+The card is the one Answer row, with its `card` object, and ranking's rows follow it, so `8x8` shows 64 and then the app. A bare negated number is no card, and an answer with no words, such as one that is not whole, has a `null` target badge.
+
+```session
+$ lyncast daemon --headless
+$ lyncast query 2+3*4 --json
+{"key":"calc:2+3*4","index":0,"kind":"calculator","section":"answer","title":"14","card":{"expression":"2 + 3 × 4","source_badge":"Sum","display":"14","copy":"14","target_badge":"Fourteen"},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
+$ lyncast query -5+3 --json
+{"key":"calc:-5+3","index":0,"kind":"calculator","section":"answer","title":"-2","card":{"expression":"−5 + 3","source_badge":"Sum","display":"-2","copy":"-2","target_badge":"Minus Two"},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
+$ lyncast query -(2+3) --json
+{"key":"calc:-(2+3)","index":0,"kind":"calculator","section":"answer","title":"-5","card":{"expression":"−(2 + 3)","source_badge":"Negation","display":"-5","copy":"-5","target_badge":"Minus Five"},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
+$ lyncast query --5 --json
+$ lyncast query 8x8 --json
+{"key":"calc:8x8","index":0,"kind":"calculator","section":"answer","title":"64","card":{"expression":"8 × 8","source_badge":"Product","display":"64","copy":"64","target_badge":"Sixty-Four"},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
+{"key":"app:8x8.desktop","index":1,"kind":"app","section":"results","title":"8x8","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
+$ lyncast query 123456789012345+0.5 --json
+{"key":"calc:123456789012345+0.5","index":0,"kind":"calculator","section":"answer","title":"123,456,789,012,345.5","card":{"expression":"123,456,789,012,345 + 0.5","source_badge":"Sum","display":"123,456,789,012,345.5","copy":"123456789012345.5","target_badge":null},"actions":[{"verb":"copy","label":"Copy Answer","chords":["enter","ctrl-enter"]}]}
 ```
 
 ### One daemon owns the socket
