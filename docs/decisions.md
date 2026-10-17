@@ -40,7 +40,7 @@ All entries below were made on 2026-10-14 unless they say otherwise.
 | One resident GPUI process. Each summon opens a new layer-shell window and each dismiss closes it, because GPUI on Linux cannot hide a window. | Measured | Warm summon 45 ms vs 137 ms for spawn-per-summon, on lavapipe. [notes/05-probe-summon-latency.md](research/notes/05-probe-summon-latency.md) |
 | The window is a wlr-layer-shell surface on the Overlay layer with exclusive keyboard focus. | Lead | niri hides the Top layer behind fullscreen windows. [notes/03-wayland-niri-integration.md](research/notes/03-wayland-niri-integration.md) |
 | A thin `lyncast toggle` client talks to the daemon over a Unix socket. A niri bind runs it. | Lead | Wayland has no global hotkeys. |
-| `--headless` runs the core, the clipboard watcher, and the socket without GPUI, for tests. | Lead | |
+| `lyncast daemon --headless` runs the core, the clipboard watcher, and the socket without GPUI, for tests. | Lead | |
 | Every palette action also exists as a CLI command over the same socket protocol. | Lead | Makes CLI integration tests exercise the real path. |
 | The GPUI app runs with `QuitMode::Explicit`. | Lead | GPUI quits when the last window closes on Linux by default (`gpui-pre` 0.3.9 `src/app.rs:3180-3187`), which would drop the clipboard selection. |
 
