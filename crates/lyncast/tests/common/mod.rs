@@ -9,7 +9,8 @@ pub mod doc;
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
@@ -158,6 +159,14 @@ pub struct CommandLine {
 }
 
 impl CommandLine {
+    /// The value this line gives `name`, if it sets one.
+    pub fn var(&self, name: &str) -> Option<&OsStr> {
+        self.vars
+            .iter()
+            .find(|(set, _)| set == name)
+            .map(|(_, value)| value.as_os_str())
+    }
+
     /// `lyncast` with `args` and only `env`'s variables, as this line changes them.
     pub fn command<S: AsRef<OsStr>>(
         &self,
@@ -180,8 +189,9 @@ impl CommandLine {
 }
 
 /// A `$ [env -u NAME ...] [NAME=value ...] lyncast ...` line, or `None` for a line that runs
-/// another program. A value may hold `$TREE` and `\x{HH}`, and `""` is an empty argument.
-pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
+/// another program. A value may hold each `$NAME` in `paths` and `\x{HH}`, and `""` is an empty
+/// argument.
+pub fn command_line(command: &str, paths: &[(&str, &Path)]) -> Option<CommandLine> {
     let mut words: &[&str] = &command
         .strip_prefix("$ ")
         .unwrap_or_else(|| panic!("a command line starts with `$ `: {command:?}"))
@@ -203,7 +213,7 @@ pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
         .iter()
         .map(|word| {
             let (name, value) = word.split_once('=').expect("a word with =");
-            let value = OsString::from_vec(raw_bytes(&substitute(value, &[("$TREE", tree)])));
+            let value = OsString::from_vec(raw_bytes(&substitute(value, paths)));
             (name.to_owned(), value)
         })
         .collect();
@@ -291,6 +301,15 @@ impl Runtime {
         self.0.join("runs")
     }
 
+    /// `name` in the directory, opened to append, as a daemon's stdout or stderr.
+    fn log(&self, name: &str) -> fs::File {
+        fs::File::options()
+            .create(true)
+            .append(true)
+            .open(self.path().join(name))
+            .unwrap()
+    }
+
     /// Adds `--record` and [`Runtime::runs`] to a `lyncast daemon` command that names no
     /// `--record` of its own, so no test daemon starts a real program, even one that a test
     /// expects to fail.
@@ -332,39 +351,79 @@ pub fn ask(runtime: &Runtime, args: &[&str]) -> (String, String, Option<i32>) {
 
 /// A daemon that a test started in the background. Dropping it kills it, so a test that fails
 /// leaves no daemon running.
-pub struct Daemon(Child);
+pub struct Daemon {
+    child: Child,
+    /// What the daemon writes to stderr: `daemon.stderr` from where this daemon started writing,
+    /// still open once the runtime directory has gone, or the pipe of a stderr that does not
+    /// drain.
+    stderr: fs::File,
+    /// The bytes that fill a stderr that does not drain, ahead of what the daemon writes.
+    filler: usize,
+}
 
 impl Daemon {
     /// Starts `command`, a `lyncast daemon`, in the background with [`Runtime::record`]. Its
     /// stdout and stderr are appended to `daemon.stdout` and `daemon.stderr` in `runtime`.
-    pub fn spawn(mut command: Command, runtime: &Runtime) -> Daemon {
-        let log = |name: &str| {
-            fs::File::options()
-                .create(true)
-                .append(true)
-                .open(runtime.path().join(name))
-                .unwrap()
-        };
+    pub fn spawn(command: Command, runtime: &Runtime) -> Daemon {
+        let stderr = runtime.log("daemon.stderr");
+        let mut from_here = fs::File::open(runtime.path().join("daemon.stderr")).unwrap();
+        from_here.seek(SeekFrom::End(0)).unwrap();
+        Daemon::spawn_with(command, runtime, Stdio::from(stderr), from_here, 0)
+    }
+
+    /// [`Daemon::spawn`] with a stderr that does not drain: a pipe that is full before the daemon
+    /// starts, so each write the daemon makes to stderr waits until [`Daemon::drain`].
+    pub fn spawn_stalled(command: Command, runtime: &Runtime) -> Daemon {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let filler = fill(&mut writer);
+        let reader = fs::File::from(OwnedFd::from(reader));
+        Daemon::spawn_with(command, runtime, Stdio::from(writer), reader, filler)
+    }
+
+    /// Starts `command` with `stderr`. `command` goes once the daemon runs, and with it the test's
+    /// end of a stderr pipe, so the pipe ends when the daemon exits.
+    fn spawn_with(
+        mut command: Command,
+        runtime: &Runtime,
+        stderr: Stdio,
+        from_here: fs::File,
+        filler: usize,
+    ) -> Daemon {
         runtime.record(&mut command);
         command
             .stdin(Stdio::null())
-            .stdout(log("daemon.stdout"))
-            .stderr(log("daemon.stderr"));
-        Daemon(command.spawn().expect("lyncast runs"))
+            .stdout(runtime.log("daemon.stdout"))
+            .stderr(stderr);
+        Daemon {
+            child: command.spawn().expect("lyncast runs"),
+            stderr: from_here,
+            filler,
+        }
     }
 
     /// Spawns `command` and waits, as [`poll`] does, until the socket accepts. Fails when the
     /// daemon exits first, or when the wait runs out.
     pub fn start(command: Command, runtime: &Runtime) -> Result<Daemon, String> {
-        let mut daemon = Daemon::spawn(command, runtime);
+        Daemon::spawn(command, runtime).serving(runtime, &runtime.socket())
+    }
+
+    /// [`Daemon::start`] for a daemon whose socket is `socket`, because it has an
+    /// `XDG_RUNTIME_DIR` of its own. Its stdout and stderr still go to `runtime`.
+    pub fn start_on(command: Command, runtime: &Runtime, socket: &Path) -> Result<Daemon, String> {
+        Daemon::spawn(command, runtime).serving(runtime, socket)
+    }
+
+    /// Waits, as [`poll`] does, until the daemon's socket, `socket`, accepts. Fails when the
+    /// daemon exits first, or when the wait runs out.
+    pub fn serving(mut self, runtime: &Runtime, socket: &Path) -> Result<Daemon, String> {
         let accepted = poll(|| {
-            if UnixStream::connect(runtime.socket()).is_ok() {
+            if UnixStream::connect(socket).is_ok() {
                 return Some(Ok(()));
             }
-            daemon.exited().map(Err)
+            self.exited().map(Err)
         });
         match accepted {
-            Some(Ok(())) => Ok(daemon),
+            Some(Ok(())) => Ok(self),
             Some(Err(status)) => {
                 let stderr = runtime.path().join("daemon.stderr");
                 let printed = fs::read_to_string(stderr).unwrap_or_default();
@@ -378,7 +437,7 @@ impl Daemon {
 
     /// How the daemon exited, or `None` while it runs.
     pub fn exited(&mut self) -> Option<ExitStatus> {
-        self.0.try_wait().unwrap()
+        self.child.try_wait().unwrap()
     }
 
     /// Waits, as [`poll`] does, for the daemon to exit by itself, and gives its exit code.
@@ -386,15 +445,59 @@ impl Daemon {
         poll(|| self.exited()).and_then(|status| status.code())
     }
 
-    pub fn id(&self) -> u32 {
-        self.0.id()
+    /// Reads what fills a stderr that does not drain, so the daemon's writes to it go through.
+    pub fn drain(&mut self) -> io::Result<()> {
+        let mut filler = vec![0; self.filler];
+        self.stderr.read_exact(&mut filler)?;
+        self.filler = 0;
+        Ok(())
     }
+
+    /// Waits, as [`poll`] does, for the daemon to exit by itself, and gives what it wrote to
+    /// stderr and its exit code. `None` when it runs over.
+    pub fn finish(&mut self) -> Option<(Vec<u8>, Option<i32>)> {
+        let status = poll(|| self.exited())?;
+        let mut stderr = Vec::new();
+        self.stderr.read_to_end(&mut stderr).unwrap();
+        Some((stderr, status.code()))
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+/// Fills `pipe` until it takes no more, and gives how many bytes that took. The pipe's end still
+/// blocks afterwards, for the daemon that inherits it.
+fn fill(pipe: &mut io::PipeWriter) -> usize {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fcntl on a descriptor the pipe owns, which lives through each call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let mut filled = 0;
+    // Big writes fill the pipe's pages, and single bytes the room that a big write leaves.
+    for chunk in [vec![b'x'; 4096], vec![b'x']] {
+        loop {
+            match pipe.write(&chunk) {
+                Ok(written) => filled += written,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("filling a pipe: {error}"),
+            }
+        }
+    }
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+    filled
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -444,10 +547,14 @@ impl World {
         )
     }
 
-    /// The `$ ...` line as a command in this world, and the arguments of a line that runs
-    /// lyncast. Any other line runs through `/bin/sh`.
-    pub fn command(&self, line: &str) -> (Command, Option<Vec<String>>) {
-        let Some(lyncast) = command_line(line, &self.tree) else {
+    /// The `$ ...` line as a command in this world, and the line itself when it runs lyncast.
+    /// Any other line runs through `/bin/sh`.
+    pub fn command(&self, line: &str) -> (Command, Option<CommandLine>) {
+        let paths = [
+            ("$TREE", self.tree.as_path()),
+            ("$RUNTIME", self.runtime.path()),
+        ];
+        let Some(lyncast) = command_line(line, &paths) else {
             let mut command = Command::new("/bin/sh");
             command
                 .arg("-c")
@@ -461,7 +568,7 @@ impl World {
         };
         let mut command = lyncast.command(&lyncast.args, &self.env);
         command.current_dir(&self.tree);
-        (command, Some(lyncast.args))
+        (command, Some(lyncast))
     }
 
     /// The bytes the recorder file holds now. A recorder that is not a file holds none.
@@ -503,6 +610,8 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
     let mut failures = Vec::new();
     // Kept to the end of the block, which kills any still running.
     let mut daemons: Vec<Daemon> = Vec::new();
+    // The next daemon gets a stderr that does not drain.
+    let mut stall = false;
     let mut rest = block.lines.as_slice();
     while let [command, after @ ..] = rest {
         let printed = after
@@ -514,29 +623,63 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
             .map(|line| world.substitute(line))
             .collect();
         rest = &after[printed..];
-        let (mut run, args) = world.command(command);
-        if args.is_none()
-            && let Some(newest) = daemons.last()
-        {
-            run.env("DAEMON", newest.id().to_string());
-        }
-        let daemon = args.is_some_and(|args| args.first().is_some_and(|arg| arg == "daemon"));
-        if daemon && want.is_empty() {
-            // Daemon::start adds --record itself.
-            match Daemon::start(run, &world.runtime) {
-                Ok(daemon) => daemons.push(daemon),
-                Err(error) => {
-                    failures.push(format!("line {}: {command}\n  {error}", block.line));
-                    break;
-                }
-            }
-            continue;
-        }
-        if daemon {
-            world.runtime.record(&mut run);
-        }
         let before = world.recorded().len();
-        let Some((stdout, stderr, code)) = run_bounded(run, &world.out) else {
+        let ran = match command.as_str() {
+            "$ stall-stderr" => {
+                stall = true;
+                Some((Vec::new(), Vec::new(), Some(0)))
+            }
+            "$ drain-stderr" => Some(match daemons.last_mut().map(Daemon::drain) {
+                Some(Ok(())) => (Vec::new(), Vec::new(), Some(0)),
+                Some(Err(error)) => (Vec::new(), format!("{error}\n").into_bytes(), Some(1)),
+                None => (Vec::new(), b"no daemon to drain\n".to_vec(), Some(1)),
+            }),
+            "$ wait-exit" => {
+                let daemon = daemons.last_mut().expect("wait-exit follows a daemon");
+                daemon
+                    .finish()
+                    .map(|(stderr, code)| (Vec::new(), stderr, code))
+            }
+            _ => {
+                let (mut run, lyncast) = world.command(command);
+                if lyncast.is_none()
+                    && let Some(newest) = daemons.last()
+                {
+                    run.env("DAEMON", newest.id().to_string());
+                }
+                let daemon = lyncast
+                    .as_ref()
+                    .filter(|line| line.args.first().is_some_and(|arg| arg == "daemon"));
+                if let Some(line) = daemon
+                    && want.is_empty()
+                {
+                    let socket = line.var("XDG_RUNTIME_DIR").map_or_else(
+                        || world.runtime.socket(),
+                        |dir| Path::new(dir).join("lyncast.sock"),
+                    );
+                    // Daemon::spawn adds --record itself.
+                    let started = if stall {
+                        Daemon::spawn_stalled(run, &world.runtime)
+                    } else {
+                        Daemon::spawn(run, &world.runtime)
+                    };
+                    stall = false;
+                    match started.serving(&world.runtime, &socket) {
+                        Ok(daemon) => daemons.push(daemon),
+                        Err(error) => {
+                            failures.push(format!("line {}: {command}\n  {error}", block.line));
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if daemon.is_some() {
+                    world.runtime.record(&mut run);
+                }
+                run_bounded(run, &world.out)
+            }
+        };
+        let Some((stdout, stderr, code)) = ran else {
             failures.push(format!(
                 "line {}: {command}\n  ran over the test's time budget",
                 block.line

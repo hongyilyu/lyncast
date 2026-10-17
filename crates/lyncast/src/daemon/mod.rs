@@ -15,6 +15,7 @@ use std::time::Duration;
 use lyncast_core::rank::{Index, Timestamp, Visits};
 use lyncast_core::{ActionItem, Command, Key, Subject, root};
 
+use crate::clip::Clips;
 use crate::vars::Vars;
 use crate::view::{self, Spelled};
 use crate::wire::{Reply, Request, Summon, Via};
@@ -46,6 +47,7 @@ pub struct Daemon {
     /// Where the visits persist. `None` when they stay in memory, and also once the writer has
     /// ended after Quit, so nothing is left to write.
     store: Option<Store>,
+    clips: Clips,
     summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
@@ -78,6 +80,12 @@ pub enum Work {
     Scan { vars: Arc<Vars>, number: u64 },
 }
 
+/// A thread that writes to the disk. Each ends only once Quit has begun and no job is out.
+pub enum Writer {
+    Visits,
+    Clips,
+}
+
 /// What finished work brings back.
 pub enum Done {
     Ran,
@@ -93,7 +101,13 @@ pub struct Success {
 }
 
 impl Daemon {
-    pub fn new(vars: Vars, index: Index, visits: Visits, store: Option<Store>) -> Daemon {
+    pub fn new(
+        vars: Vars,
+        index: Index,
+        visits: Visits,
+        store: Option<Store>,
+        clips: Clips,
+    ) -> Daemon {
         Daemon {
             vars: Arc::new(vars),
             index,
@@ -101,6 +115,7 @@ impl Daemon {
             indexed: 0,
             visits,
             store,
+            clips,
             summon: Summon::Closed,
             jobs: 0,
             quitting: false,
@@ -124,6 +139,9 @@ impl Daemon {
             Request::Status => Reply::Summon { state: self.summon },
             Request::Query { text } => Reply::Rows {
                 rows: view::rows(&root::rows(&self.index, &self.visits, &text, now)),
+            },
+            Request::Clips => Reply::Clips {
+                clips: view::clips(&self.clips.rows()),
             },
             Request::Activate {
                 key,
@@ -166,15 +184,17 @@ impl Daemon {
         reply
     }
 
-    /// Quit has begun, no job is out, and the writer of the visits has ended after its last
-    /// write.
+    /// Quit has begun, no job is out, and each writer has ended after its last write.
     pub fn stopped(&self) -> bool {
-        self.idle() && self.store.is_none()
+        self.idle() && self.store.is_none() && self.clips.ended()
     }
 
-    /// The writer of the visits has ended. It ends only once Quit has begun and no job is out.
-    pub fn writer_ended(&mut self) {
-        self.store = None;
+    /// A writer has ended. Each ends only once Quit has begun and no job is out.
+    pub fn writer_ended(&mut self, writer: Writer) {
+        match writer {
+            Writer::Visits => self.store = None,
+            Writer::Clips => self.clips.writer_ended(),
+        }
     }
 
     /// Quit has begun and no job is out, so nothing records a visit again.
@@ -182,13 +202,15 @@ impl Daemon {
         self.quitting && self.jobs == 0
     }
 
-    /// Once the daemon is idle, the writer can end after its last write.
+    /// Once the daemon is idle, the writers can end after their last writes.
     fn settle(&self) {
-        if self.idle()
-            && let Some(store) = &self.store
-        {
+        if !self.idle() {
+            return;
+        }
+        if let Some(store) = &self.store {
             store.close();
         }
+        self.clips.close();
     }
 
     /// Rebuilds the row from current state, takes the item that `via` names from its actions,
@@ -244,8 +266,17 @@ impl Daemon {
             ActionItem::CopyPath(_) | ActionItem::CopyAnswer(_) | ActionItem::CopyClip(_) => {
                 failed("not copied: no Wayland compositor".to_owned())
             }
-            ActionItem::Pin(id) | ActionItem::Unpin(id) | ActionItem::Delete(id) => {
-                failed(format!("no clip {}", id.0))
+            ActionItem::Pin(id) => {
+                self.clips.pin(*id, now);
+                self.changed(format!("pinned clip {}", id.0))
+            }
+            ActionItem::Unpin(id) => {
+                self.clips.unpin(*id, now);
+                self.changed(format!("unpinned clip {}", id.0))
+            }
+            ActionItem::Delete(id) => {
+                self.clips.delete(*id);
+                self.changed(format!("deleted clip {}", id.0))
             }
             ActionItem::Run(command) => self.command(*command, success(format!("ran {key}")), now),
         }
@@ -290,8 +321,8 @@ impl Daemon {
     }
 
     /// The subject of the row a key names, from current state: an app from the index, a command
-    /// from its key, and a calculator row from the answer to the key's text, as the root list
-    /// finds it. Clips come in plan step 6.
+    /// from its key, a clip from the history, and a calculator row from the answer to the key's
+    /// text, as the root list finds it.
     fn rebuild(&self, key: &Key) -> Result<Subject, String> {
         match key {
             Key::App(id) => match self.index.app(id) {
@@ -299,7 +330,13 @@ impl Daemon {
                 None => Err(format!("no app {}", id.0)),
             },
             Key::Command(command) => Ok(Subject::Command(*command)),
-            Key::Clip(id) => Err(format!("no clip {}", id.0)),
+            Key::Clip(id) => match self.clips.get(*id) {
+                Some(row) => Ok(Subject::Clip {
+                    id: *id,
+                    pinned: row.pinned,
+                }),
+                None => Err(format!("no clip {}", id.0)),
+            },
             Key::Calc(query) => match root::answer(query) {
                 Some(_) => Ok(Subject::Calc {
                     query: query.clone(),
@@ -307,6 +344,12 @@ impl Daemon {
                 None => Err(format!("{key} has no answer")),
             },
         }
+    }
+
+    /// The reply to a change to a clip, which records no visit and closes the summon.
+    fn changed(&mut self, message: String) -> Handled {
+        self.summon = Summon::Closed;
+        Handled::Reply(Reply::Done { message })
     }
 
     /// Records the visit, sets the summon, hands the visits to the writer, and gives the success
@@ -332,6 +375,7 @@ mod doc;
 mod tests {
     use std::path::Path;
 
+    use lyncast_core::clip::Retention;
     use lyncast_core::desktop::{self, Session, Verdict};
     use lyncast_core::{AppId, Chord};
 
@@ -391,6 +435,7 @@ mod tests {
             Index::new(Vec::new()),
             Visits::default(),
             None,
+            Clips::open(None, Retention::DEFAULT, Timestamp(0), || {}).unwrap(),
         );
         let (older, older_success) = reload(&mut daemon);
         let (newer, newer_success) = reload(&mut daemon);

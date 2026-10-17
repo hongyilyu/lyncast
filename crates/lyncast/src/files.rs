@@ -1,9 +1,9 @@
-//! Reads a file only when it is a regular file of at most a given size, after symlinks. The
-//! scan reads desktop entries this way, and the daemon reads `ranking.json`.
+//! Reads a file only when it is a regular file of at most a given size, after symlinks, and
+//! creates the directories the daemon keeps its data in so that only the user can open them.
 
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
 /// Why [`read_regular`] read nothing.
@@ -48,4 +48,14 @@ fn check(metadata: &Metadata, max: u64) -> Result<(), Unread> {
         return Err(Unread::TooLarge);
     }
     Ok(())
+}
+
+/// Creates `dir` and each parent it lacks with mode 0700, as the XDG Base Directory spec asks for
+/// a data home, so no other user can list or open what lyncast keeps there. A directory that is
+/// already there keeps its mode.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
 }

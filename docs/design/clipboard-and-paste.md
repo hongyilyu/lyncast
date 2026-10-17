@@ -101,6 +101,295 @@ If the write fails, the palette stays open, shows the reason, and keeps the row.
 
 Source is filled from plan step 8, which brings the niri IPC client. Until then it is empty.
 
+## The fixtures
+
+The tests in `crates/lyncast/tests/clipboard.rs` read the `env` and `session` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, and shell lines through `/bin/sh`. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks.
+
+```env
+HOME=$TREE/home
+XDG_DATA_HOME=$TREE/data
+XDG_CONFIG_HOME=$TREE/config
+XDG_DATA_DIRS=$TREE/share
+XDG_RUNTIME_DIR=$RUNTIME
+XDG_CURRENT_DESKTOP=niri
+LANG=C
+PATH=$TREE/bin
+```
+
+A `session` block runs with no compositor, as Tier 1 does. Its shell lines add rows to `clips.sqlite3` with `sqlite3` while no daemon runs, because a running daemon holds the file's lock. A row's columns are its id, kind, type, size, text, the SHA-256 of what it holds in hex, preview, creation time, last use, pin, and sequence number.
+
+### Without a compositor the history still answers
+
+With no `WAYLAND_DISPLAY`, no capture thread runs and a copy fails, but the stored rows load and change. The first daemon creates the database, which only the user may open, in a directory that only the user may list. The rows load as the database keeps them, with their kinds and previews: a link, an email, a file list's paths, and an image without a preview. Pins come first in the order they were pinned, and an unpinned row goes back to the place its pin gave it. A pin, an unpin, and a delete close the summon and record no visit, so no `ranking.json` appears. The changes reach the database, so the next daemon shows the same list.
+
+```session
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate clip:1 --verb pin
+stderr: lyncast: no clip 1
+exit: 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ stat -c %a data/lyncast data/lyncast/clips.sqlite3
+700
+600
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'link', 'text/plain;charset=utf-8', 23, ' https://example.org/a ', '90eec24f494163b854df68f6fcb8feab4755335c0c73119a27c7ee52974cea47', ' https://example.org/a ', 0, unixepoch() * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'email', 'text/plain;charset=utf-8', 14, 'me@example.org', '855c94f3498940b241d6b5e78bb6f9293b941953b2799f8b925bd25180571d77', 'me@example.org', 0, unixepoch() * 1000, 0, 3)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (4, 'files', 'text/uri-list', 38, 'file:///etc/hostname' || char(10) || 'file:///tmp/a%20b', '34584a5c97220e11a055a677ac6f7554c88cc378dd609350fa15c13d8b19f772', '/etc/hostname' || char(10) || '/tmp/a b', 0, unixepoch() * 1000, 0, 4)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (5, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 5)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ lyncast toggle
+open
+$ lyncast activate clip:3 --verb pin
+pinned clip 3
+$ lyncast status
+closed
+$ lyncast activate clip:1 --verb pin
+pinned clip 1
+$ lyncast clip list --json
+{"id":3,"kind":"email","pinned":true,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+$ lyncast toggle
+open
+$ lyncast activate clip:3 --verb unpin
+unpinned clip 3
+$ lyncast status
+closed
+$ lyncast activate clip:1 --verb pin
+stderr: lyncast: clip:1 has no action pin
+exit: 1
+$ lyncast toggle
+open
+$ lyncast activate clip:5 --verb delete
+deleted clip 5
+$ lyncast status
+closed
+$ lyncast activate clip:5
+stderr: lyncast: no clip 5
+exit: 1
+$ lyncast activate clip:2
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast activate calc:2+3
+stderr: lyncast: not copied: no Wayland compositor
+exit: 1
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, seq from clips"
+1|1|7
+2|0|2
+3|0|6
+4|0|4
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+```
+
+### Old rows expire at start
+
+Row 1 was last used 91 days ago, row 2 89 days ago, and row 3 is a pin last used in 1970. With `retention-days = 0` every row stays. A config that does not parse warns, and the default of 90 days removes row 1. Unpinning row 3 starts its age again, so with `retention-days = 1` the next start removes row 2 and keeps row 3.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, (unixepoch() - 91 * 86400) * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 6, 'recent', '034a7e52c5c9534b709dc1dba403868399b0949f7c1933a67325c22077ffc221', 'recent', 0, (unixepoch() - 89 * 86400) * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'text', 'text/plain;charset=utf-8', 6, 'pinned', '3fab5c181bd28a09b64397df76ae2bfaf1eac182979b5fdb7a342858004f36af', 'pinned', 0, 0, 1, 3)"
+$ mkdir -p config/lyncast && printf '[clipboard]\nretention-days = 0\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf '[clipboard]\nretention-days = "ninety"\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: invalid type: string "ninety", expected u32 at line 2 column 18; using the defaults
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
+$ lyncast activate clip:3 --verb unpin
+unpinned clip 3
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ printf 'theme = "dark"\n\n[clipboard]\nretention-days = 1\n' > config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id from clips"
+3
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: invalid type: string "ninety", expected u32 at line 2 column 18; using the defaults
+```
+
+The daemon reads `config.toml` only when it is a regular file of at most 1 MiB after symlinks, and it never opens a FIFO there, so a FIFO cannot hold up the start. A FIFO, a directory, a symlink to nothing, and a file over 1 MiB each warn, and the daemon starts with the defaults.
+
+```session
+$ mkdir -p config/lyncast && mkfifo config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm config/lyncast/config.toml && mkdir config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rmdir config/lyncast/config.toml && ln -s missing.toml config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm config/lyncast/config.toml && truncate -s 1048577 config/lyncast/config.toml
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/config/lyncast/config.toml: not a regular file; using the defaults
+lyncast: $TREE/config/lyncast/config.toml: not a regular file; using the defaults
+lyncast: $TREE/config/lyncast/config.toml: No such file or directory (os error 2); using the defaults
+lyncast: $TREE/config/lyncast/config.toml: over 1 MiB; using the defaults
+```
+
+A `retention` line gives a row's last use in days before now, whether it is pinned, and `retention-days`, and says whether the row expires. The core predicate reads these lines, and the store applies the same predicate at start and after each insert.
+
+```retention
+used 89d ago, unpinned, keep 90 => kept
+used 90d ago, unpinned, keep 90 => kept
+used 91d ago, unpinned, keep 90 => expired
+used 400d ago, pinned, keep 90 => kept
+used 400d ago, unpinned, keep 0 => kept
+used 2d ago, unpinned, keep 1 => expired
+```
+
+### A database the daemon cannot use stays as it is
+
+A file that SQLite cannot read, a FIFO, a symlink to nothing, and a file whose largest id leaves no next one each leave the rows in memory. The daemon never opens the FIFO, writes over the file, or creates the symlink's target. SQLite opens the journal beside the file itself, after the daemon's check, so a FIFO there holds the load, and after 5 s the daemon starts with its rows in memory and leaves the file as it was.
+
+```session
+$ mkdir -p data/lyncast && echo not a database > data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat data/lyncast/clips.sqlite3
+not a database
+$ rm data/lyncast/clips.sqlite3 && mkfifo data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/clips.sqlite3 && ln -s missing.sqlite3 data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ ls data/lyncast
+clips.sqlite3
+$ rm data/lyncast/clips.sqlite3
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775807, 'text', 'text/plain;charset=utf-8', 3, 'max', '9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6', 'max', 0, unixepoch() * 1000, 0, 1)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ mkfifo data/lyncast/clips.sqlite3-journal
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ rm data/lyncast/clips.sqlite3-journal
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, preview from clips"
+9223372036854775807|max
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: file is not a database; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: not a regular file; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: No such file or directory (os error 2); the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: no clip id is left after 9223372036854775807; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: not loaded within 5 s; the clips stay in memory
+```
+
+### A second daemon finds the history locked
+
+A second daemon with its own `XDG_RUNTIME_DIR` and the same data home keeps its clips in memory. Once the first daemon quits, the next one loads the database.
+
+```session
+$ lyncast daemon --headless
+$ mkdir $RUNTIME/two
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast daemon --headless
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+$ XDG_RUNTIME_DIR=$RUNTIME/two lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ lyncast daemon --headless
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cat $RUNTIME/daemon.stderr
+lyncast: $TREE/data/lyncast/clips.sqlite3: database is locked; the clips stay in memory
+```
+
+### A text's kind and a file list's paths
+
+A `kind` line gives a whole text and the kind it shows as. A `uris` line gives one line of a `text/uri-list` or `x-special/gnome-copied-files` list and the local path it names, or nothing after `=>` when it names none. Either side may write `\u{XXXX}` for a character.
+
+```kind
+alpha => text
+https://example.org/a => link
+http://example.org => link
+\u{20}https://example.org/a\u{A} => link
+https://example.org/a b => text
+https:// => text
+ftp://example.org => text
+me@example.org => email
+\u{9}me@example.org\u{A} => email
+me@example => text
+@example.org => text
+me@.org => text
+me@example. => text
+me@you@example.org => text
+me @example.org => text
+```
+
+```uris
+file:///etc/hostname => /etc/hostname
+file://localhost/etc/hostname => /etc/hostname
+file:///etc/hostname\u{D} => /etc/hostname
+file:///tmp/a%20b => /tmp/a b
+file:///tmp/%FF => /tmp/\u{FFFD}
+file:///tmp/a%2 => /tmp/a%2
+file:///tmp/a%zz => /tmp/a%zz
+file:///tmp/a%+1 => /tmp/a%+1
+file://example.org/etc/hostname =>
+file:/etc/hostname =>
+https://example.org/a =>
+# a comment =>
+copy =>
+```
+
 ## The daemon owns the selection and must stay alive
 
 smithay forwards each paste read to the client that set the selection. When that client destroys its source or exits, smithay clears the selection, and niri keeps no copy (read in source). A probe saw the selection empty when the copier exited (measured).

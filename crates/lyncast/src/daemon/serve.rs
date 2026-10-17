@@ -19,9 +19,12 @@ use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
 use super::store::Store;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, Writer, quitting};
 use crate::apps;
+use crate::clip::Clips;
+use crate::config;
 use crate::vars::Vars;
+use crate::warning;
 use crate::wire::{self, Reply, Request};
 
 /// The lock's file name in `$XDG_RUNTIME_DIR`.
@@ -31,8 +34,10 @@ const LOCK: &str = "lyncast.lock";
 /// or reads slowly is still served.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long Quit waits for the replies to be written before the process exits.
-const QUIT_WRITE: Duration = Duration::from_secs(1);
+/// How long the start waits for its warnings to reach stderr before it binds the socket, so a
+/// client that the socket answers finds them there, and how long Quit waits for its warnings and
+/// its replies before the process exits.
+const LAST_WRITES: Duration = Duration::from_secs(1);
 
 /// The most bytes a request line may hold, with its newline.
 const MAX_REQUEST: u64 = 1 << 20;
@@ -42,8 +47,8 @@ enum Event {
     Request(Request, ReplyTo),
     /// A worker thread's job ended.
     Finished(Success, Result<Done, String>, ReplyTo),
-    /// The writer of the visits ended, after Quit.
-    WriterEnded,
+    /// A writer ended, after Quit.
+    WriterEnded(Writer),
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -77,24 +82,38 @@ impl Unwritten {
 }
 
 /// Claims the socket and serves until a Quit command. The lock comes first, so a second daemon
-/// fails before it scans or reads `ranking.json`, and only the lock holder removes a stale
-/// socket and binds. `record` swaps the runner for a recorder that writes to that file.
+/// fails before it scans or reads `ranking.json` and `clips.sqlite3`, and only the lock holder
+/// removes a stale socket and binds. `record` swaps the runner for a recorder that writes to that
+/// file.
 pub fn run(record: Option<PathBuf>) -> Result<(), String> {
+    warning::start().map_err(not_started)?;
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
     let vars = Vars::read();
+    let config = config::read(vars.config_home().as_deref().map(Path::new));
     let index = Index::new(apps::scan(&vars));
     let (events, inbox) = mpsc::channel();
-    let writer = events.clone();
-    let ended = move || {
-        let _ = writer.send(Event::WriterEnded);
+    let ended = |writer: Writer| {
+        let events = events.clone();
+        move || {
+            let _ = events.send(Event::WriterEnded(writer));
+        }
     };
-    let (visits, store) = match vars.data_home() {
-        Some(dir) => Store::open(Path::new(&dir), ended).map_err(not_started)?,
+    let data_home = vars.data_home().map(PathBuf::from);
+    let (visits, store) = match &data_home {
+        Some(dir) => Store::open(dir, ended(Writer::Visits)).map_err(not_started)?,
         None => (Visits::default(), None),
     };
-    let daemon = Daemon::new(vars, index, visits, store);
+    let clips = Clips::open(
+        data_home.as_deref(),
+        config.retention,
+        now(),
+        ended(Writer::Clips),
+    )
+    .map_err(not_started)?;
+    let daemon = Daemon::new(vars, index, visits, store, clips);
     let socket = runtime.join(wire::SOCKET);
+    warning::flush(Instant::now() + LAST_WRITES);
     let listener = bind(&socket)?;
     let host = Host {
         events,
@@ -197,8 +216,10 @@ fn serve(
     } else {
         mem::forget(claim.lock);
     }
+    let deadline = Instant::now() + LAST_WRITES;
+    warning::flush(deadline);
     host.unwritten.send(reply_to, reply);
-    host.unwritten.wait(Instant::now() + QUIT_WRITE);
+    host.unwritten.wait(deadline);
     Ok(())
 }
 
@@ -224,7 +245,7 @@ impl Host {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
-            Event::WriterEnded => daemon.writer_ended(),
+            Event::WriterEnded(writer) => daemon.writer_ended(writer),
         }
         None
     }
