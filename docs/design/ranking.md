@@ -651,16 +651,18 @@ lyncast keeps TinyCast's learned ranking. Each visited entry has a frecency anch
 
 ```
 score(t) = max(1, e^(λ·(anchor − t)))       λ = ln 2 per 10 days
-a visit:  anchor = t + ln(score(t) + 100) / λ, so the score rises by 100
+a visit:  anchor = t + ln(min(score(t), MAX) + 100) / λ, so the score rises by 100
 ```
 
 The anchor is stored instead of the score, because a later anchor is always a higher score. Ranking compares anchors and never computes the exponential. An anchor at or before now scores 1, the same as an entry never opened. Anchors are whole milliseconds since the Unix epoch, so step 5 can store them exactly.
 
-Search terms are stored folded, lowercased, and trimmed. An empty query records no term. Terms steer rules 3, 4, 7, and 8 only while the score is above 1 and the entry was opened in the last 17 days.
+An anchor more than 10,240 days ahead, which a clock set back can leave, scores infinity, because e^(λ·10,240 days) is 2^1024. A visit counts that score as `MAX`, the largest `f64`, so the new anchor is 10,240 days ahead, about 28 years, and the entry leads Suggestions for about that long. The time arithmetic saturates, so no anchor overflows. A stored anchor stays as it is until the entry's next visit.
+
+Search terms are stored folded, lowercased, and trimmed. An empty query records no term, and neither does a query whose fold is over 1,024 bytes. That cap bounds the stored fold at the number of bytes that ranking reads of a raw query, so the stored visits stay small. Terms steer rules 3, 4, 7, and 8 only while the score is above 1 and the entry was opened in the last 17 days.
 
 The clock is always an argument. `lyncast-core` never reads it, and the binary passes the system time. Nothing persists in step 4, because nothing records a visit before `activate` exists. Step 5's daemon owns one `Visits` and writes it to `$XDG_DATA_HOME/lyncast/ranking.json` ([decision log](../decisions.md#app-index-and-ranking)).
 
-`visits` lists the times of visits with an empty query, as offsets from a fixed clock, and `at` is when the score is read. One visit puts the anchor ln(101)/λ ahead, about 66.6 days.
+`visits` lists the times of visits with an empty query, as offsets from a fixed clock, and `at` is when the score is read. A line may start with `anchor`, the anchor stored before the visits. One visit puts the anchor ln(101)/λ ahead, about 66.6 days. A visit to an anchor 20,000 days ahead puts it 10,240 days ahead, so 10 days before that the score is 2.
 
 ```frecency
 visits 0 | at 0 => 101.000
@@ -669,16 +671,18 @@ visits 0 | at 66d => 1.041
 visits 0 | at 67d => 1.000
 visits 0, 0 | at 0 => 201.000
 visits 0, 10d | at 20d => 75.250
+anchor 20000d | visits 0 | at 10230d => 2.000
 ```
 
-The queries are recorded on one entry in order, and the line ends with its terms, most recent first.
+The queries are recorded on one entry in order, and the line ends with its terms, most recent first. A quoted word followed by `*N` stands for N copies of the word.
 
 ```terms
 "Fire" "fire" "FIREFOX" "ｆｉｒｅ" "" "web" "mail" => mail | web | fire
 "Fire" "web" "fire" => fire | web
+"web" "x"*1024 "y"*1025 => "x"*1024 | web
 ```
 
-A repeated term moves to the front and keeps one place, so the second line holds two terms. `Fire` and `fire` fold to one term.
+A repeated term moves to the front and keeps one place, so the second line holds two terms. `Fire` and `fire` fold to one term. The third line keeps the term of 1,024 bytes and drops the one of 1,025.
 
 ## The empty query shows Suggestions, then Commands
 
@@ -769,7 +773,7 @@ The binary looks in `$XDG_DATA_HOME/applications` (default `~/.local/share/appli
 
 A desktop-file ID is the path under `applications/` with `/` replaced by `-`. It keeps `.desktop`, so `mozilla/firefox.desktop` is `mozilla-firefox.desktop` and its key is `app:mozilla-firefox.desktop`.
 
-The first file for an ID decides for that ID, as the spec says. The name decides before the file is read, so a later directory's file with the same ID is never read, even when the first file cannot be read, does not parse, or hides its entry. This is how `Hidden=true` in `~/.local/share/applications` deletes a system entry. GLib 2.82.2 masks the same way (measured on the dev box, 2026-10-16). Each of these in the user's directory hid the system entry with the same ID: a file with a line that is not `key=value`, one with no `[Desktop Entry]` group, one with `Hidden=true`, one whose Exec program is missing, an empty file, an unreadable file, a broken symlink, a symlink to `/dev/zero`, and a directory with a `.desktop` name. The binary reads a file only when it is a regular file after symlinks and holds at most 1 MiB, so a link to a device cannot make the scan read without bound, and a FIFO cannot block it. GLib opens a file before it checks that it is regular. So it skips a device such as `/dev/zero`, but it blocks on a FIFO until a writer opens it. GLib also reads a longer file, so a desktop file over 1 MiB shows in GLib and only takes its ID in lyncast (measured, 2026-10-16). A byte that is not UTF-8 reads as U+FFFD, so a bad byte in one translation does not hide the user's entry. GLib loads such a file too and fails only the key that holds the byte.
+The first file for an ID decides for that ID, as the spec says. The name decides before the file is read, so a later directory's file with the same ID is never read, even when the first file cannot be read, does not parse, or hides its entry. This is how `Hidden=true` in `~/.local/share/applications` deletes a system entry. GLib 2.82.2 masks the same way (measured on the dev box, 2026-10-16). Each of these in the user's directory hid the system entry with the same ID: a file with a line that is not `key=value`, one with no `[Desktop Entry]` group, one with `Hidden=true`, one whose Exec program is missing, an empty file, an unreadable file, a broken symlink, a symlink to `/dev/zero`, and a directory with a `.desktop` name. The binary reads a file only when it is a regular file after symlinks and holds at most 1 MiB, so a link to a device cannot make the scan read without bound. It checks the path before it opens the file and opens no FIFO and no device, because opening a device can change it, as opening a serial port resets the board on it. It opens the file without waiting for a FIFO's writer and checks the file it opened, so a FIFO swapped in while the scan runs cannot block it either. GLib opens a file before it checks that it is regular. So it skips a device such as `/dev/zero`, but it blocks on a FIFO until a writer opens it. GLib also reads a longer file, so a desktop file over 1 MiB shows in GLib and only takes its ID in lyncast (measured, 2026-10-16). A byte that is not UTF-8 reads as U+FFFD, so a bad byte in one translation does not hide the user's entry. GLib loads such a file too and fails only the key that holds the byte.
 
 `lyncast_core::desktop::parse` turns one file's text into a verdict. It checks the first six of these in this order, the binary checks the last two, and the first that applies hides the entry:
 
@@ -1410,7 +1414,7 @@ Each row is one compact JSON object on its own line, with its fields in this ord
 
 Verbs are `launch`, `launch-action:<id>`, `copy-path`, `copy`, `pin`, `unpin`, `delete`, and `run`. Chords are `enter` and `ctrl-enter`. Both chords run the default item in the MVP. The binary owns these spellings, in `view.rs`, and serializes with `serde_json`. `lyncast-core` has no serde.
 
-The test writes each `desktop` and `executable` block below under a fresh directory, `$TREE`, in `CARGO_TARGET_TMPDIR`. It makes each `symlink` block a symlink to its target as written, and each `fifo` block a FIFO. An `executable` file gets mode 0755, and a `desktop` file keeps 0644, so `bin/firefox-aurora` has no execute bit. A `desktop` block may give `mode=` and an octal mode after its path. For each `cli` block it starts a daemon, `lyncast daemon --headless`, with only the `env` block's variables, unset by any `env -u NAME` and then overridden by any `NAME=value` words before `lyncast` on the command line, with `$TREE` as its working directory, and with a fresh `XDG_RUNTIME_DIR` under `/tmp`. The daemon scans in that environment. The test then runs the block's `lyncast query` against it and compares stdout byte for byte with the block, and it expects empty stderr and exit 0. A run over 10 s fails its block and ends the test, so a scan that blocks cannot hang it. The table lists every `desktop`, `executable`, `symlink`, and `fifo` block, and each `executable` is a program that some `desktop` block's `Exec` or `TryExec` names.
+The test writes each `desktop` and `executable` block below under a fresh directory, `$TREE`, in `CARGO_TARGET_TMPDIR`. It makes each `symlink` block a symlink to its target as written, and each `fifo` block a FIFO. An `executable` file gets mode 0755, and a `desktop` file keeps 0644, so `bin/firefox-aurora` has no execute bit. A `desktop` block may give `mode=` and an octal mode after its path. For each `cli` block it starts a daemon, `lyncast daemon --headless`, with only the `env` block's variables, unset by any `env -u NAME` and then overridden by any `NAME=value` words before `lyncast` on the command line, with `$TREE` as its working directory, and with a fresh `XDG_RUNTIME_DIR` under `/tmp`. The daemon scans in that environment. The test then runs the block's `lyncast query` against it and compares stdout byte for byte with the block, and it expects empty stderr and exit 0. A run over 60 s fails its block and ends the test, so a scan that blocks cannot hang it. The table lists every `desktop`, `executable`, `symlink`, and `fifo` block, and each `executable` is a program that some `desktop` block's `Exec` or `TryExec` names.
 
 ```env
 XDG_DATA_HOME=$TREE/home
@@ -1471,7 +1475,7 @@ The empty `LANGUAGE` counts as unset, so `LANG` decides. `$TREE/local` does not 
 | `usr/applications/masked-folder.desktop` | the system entry that the directory masks |
 | `home/applications/masked-program.desktop` | a user entry whose Exec program is missing hides, and it masks `usr/applications/masked-program.desktop` |
 | `usr/applications/masked-program.desktop` | the system entry that the user's entry masks |
-| `home/applications/masked-fifo.desktop` | a FIFO, which the scan does not open, still masks `usr/applications/masked-fifo.desktop` |
+| `home/applications/masked-fifo.desktop` | a FIFO, which the scan neither opens nor reads, still masks `usr/applications/masked-fifo.desktop` |
 | `usr/applications/masked-fifo.desktop` | the system entry that the FIFO masks |
 | `home/applications/masked-tryexec.desktop` | a user entry whose `TryExec` is missing hides, and it masks `usr/applications/masked-tryexec.desktop` |
 | `usr/applications/masked-tryexec.desktop` | the system entry that the user's entry masks |
@@ -2073,7 +2077,7 @@ $ PATH= lyncast query workdir --json
 {"key":"app:workdir-shell.desktop","index":1,"kind":"app","section":"results","title":"Workdir Shell","actions":[{"verb":"launch","label":"Open","chords":["enter","ctrl-enter"]},{"verb":"copy-path","label":"Copy Path to .desktop","chords":[]}]}
 ```
 
-Each user file named `masked-*` takes its ID from a system entry, so `masked` finds nothing. `masked-device.desktop` is a link to `/dev/zero`, and `masked-fifo.desktop` is a FIFO. The binary opens neither, because it reads only a regular file of at most 1 MiB. `masked-link.desktop` is a broken link, and `masked-folder.desktop` is a directory, which the walk does not enter. `masked-program.desktop` parses, but its Exec program is missing, and `masked-tryexec.desktop` names a `TryExec` that is missing. This user cannot read `masked-unreadable.desktop`. GLib 2.82.2's `g_app_info_get_all` lists none of these IDs either, once a writer opens the FIFO it blocks on.
+Each user file named `masked-*` takes its ID from a system entry, so `masked` finds nothing. `masked-device.desktop` is a link to `/dev/zero`, and `masked-fifo.desktop` is a FIFO. The binary opens neither, because it opens only a path that is a regular file of at most 1 MiB. `masked-link.desktop` is a broken link, and `masked-folder.desktop` is a directory, which the walk does not enter. `masked-program.desktop` parses, but its Exec program is missing, and `masked-tryexec.desktop` names a `TryExec` that is missing. This user cannot read `masked-unreadable.desktop`. GLib 2.82.2's `g_app_info_get_all` lists none of these IDs either, once a writer opens the FIFO it blocks on.
 
 ```cli
 $ lyncast query masked --json
@@ -2166,8 +2170,8 @@ The tests read every fenced block whose info string starts with a fixture kind. 
 | `score` | `query \| text => N shows`, `N below`, `exact`, or `∅` | `lyncast-core/tests/ranking.rs` |
 | `fold` | `input => frizbee's form \| lowercased` | `lyncast-core/tests/ranking.rs` |
 | `rank rule=N`, `rank empty-list`, `rank keywords`, `rank separators`, `rank whitespace` | one scenario per block | `lyncast-core/tests/ranking.rs` |
-| `frecency` | `visits <offsets> \| at <offset> => <score>` | `lyncast-core/tests/ranking.rs` |
-| `terms` | `"query" ... => term \| term \| term` | `lyncast-core/tests/ranking.rs` |
+| `frecency` | `[anchor <offset> \| ]visits <offsets> \| at <offset> => <score>` | `lyncast-core/tests/ranking.rs` |
+| `terms` | `"query" ... => term \| term \| term`, where a quoted word may take `*N` | `lyncast-core/tests/ranking.rs` |
 | `entry locale=... desktop=...`, then `parsed` | a file's text, then its verdict | `lyncast-core/tests/desktop.rs` |
 | `exec`, `exec no-icon` | `value => argv` or `value => error: ExecError` | `lyncast-core/tests/desktop.rs` |
 | `env`, `desktop <path> [mode=<octal>]`, `executable <path>`, `symlink <path> -> <target>`, `fifo <path>`, `cli` | the CLI tree, its environment, and the expected stdout | `lyncast/tests/query.rs` |

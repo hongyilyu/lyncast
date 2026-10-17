@@ -4,6 +4,7 @@
 
 mod runner;
 mod serve;
+mod store;
 
 pub use serve::run;
 
@@ -17,9 +18,17 @@ use lyncast_core::{ActionItem, Command, Key, Subject, root};
 use crate::apps::Vars;
 use crate::view::{self, Spelled};
 use crate::wire::{Reply, Request, Summon, Via};
+use store::Store;
 
 /// The reason every request gets once Quit has begun.
-pub const QUITTING: &str = "the daemon is quitting";
+const QUITTING: &str = "the daemon is quitting";
+
+/// The reply to anything that arrives once Quit has begun.
+pub fn quitting() -> Reply {
+    Reply::Failed {
+        reason: QUITTING.to_owned(),
+    }
+}
 
 /// How long a host waits after Quit for the daemon to stop.
 pub const QUIT_WAIT: Duration = Duration::from_secs(5);
@@ -34,6 +43,9 @@ pub struct Daemon {
     scans: u64,
     indexed: u64,
     visits: Visits,
+    /// Where the visits persist. `None` when they stay in memory, and also once the writer has
+    /// ended after Quit, so nothing is left to write.
+    store: Option<Store>,
     summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
@@ -81,13 +93,14 @@ pub struct Success {
 }
 
 impl Daemon {
-    pub fn new(vars: Vars, index: Index) -> Daemon {
+    pub fn new(vars: Vars, index: Index, visits: Visits, store: Option<Store>) -> Daemon {
         Daemon {
             vars: Arc::new(vars),
             index,
             scans: 0,
             indexed: 0,
-            visits: Visits::default(),
+            visits,
+            store,
             summon: Summon::Closed,
             jobs: 0,
             quitting: false,
@@ -98,8 +111,7 @@ impl Daemon {
     /// every request fails with [`QUITTING`].
     pub fn handle(&mut self, request: Request, now: Timestamp) -> Handled {
         if self.quitting {
-            let reason = QUITTING.to_owned();
-            return Handled::Reply(Reply::Failed { reason });
+            return Handled::Reply(quitting());
         }
         let reply = match request {
             Request::Toggle => {
@@ -138,7 +150,7 @@ impl Daemon {
         now: Timestamp,
     ) -> Reply {
         self.jobs -= 1;
-        match done {
+        let reply = match done {
             Ok(done) => {
                 if let Done::Scanned { number, index } = done
                     && number > self.indexed
@@ -149,12 +161,34 @@ impl Daemon {
                 self.succeed(success, Summon::Closed, now)
             }
             Err(reason) => Reply::Failed { reason },
-        }
+        };
+        self.settle();
+        reply
     }
 
-    /// Quit has begun, and no job is out.
+    /// Quit has begun, no job is out, and the writer of the visits has ended after its last
+    /// write.
     pub fn stopped(&self) -> bool {
+        self.idle() && self.store.is_none()
+    }
+
+    /// The writer of the visits has ended. It ends only once Quit has begun and no job is out.
+    pub fn writer_ended(&mut self) {
+        self.store = None;
+    }
+
+    /// Quit has begun and no job is out, so nothing records a visit again.
+    fn idle(&self) -> bool {
         self.quitting && self.jobs == 0
+    }
+
+    /// Once the daemon is idle, the writer can end after its last write.
+    fn settle(&self) {
+        if self.idle()
+            && let Some(store) = &self.store
+        {
+            store.close();
+        }
     }
 
     /// Rebuilds the row from current state, takes the item that `via` names from its actions,
@@ -227,6 +261,7 @@ impl Daemon {
             // Quit records no visit, so it never leads Suggestions.
             Command::Quit => {
                 self.quitting = true;
+                self.settle();
                 return Handled::Quit(Reply::Done {
                     message: success.message,
                 });
@@ -274,10 +309,14 @@ impl Daemon {
         }
     }
 
-    /// Records the visit, sets the summon, and gives the success line.
+    /// Records the visit, sets the summon, hands the visits to the writer, and gives the success
+    /// line.
     fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Reply {
         self.visits.record(success.key, &success.query, now);
         self.summon = summon;
+        if let Some(store) = &self.store {
+            store.save(&self.visits);
+        }
         Reply::Done {
             message: success.message,
         }
@@ -347,7 +386,12 @@ mod tests {
             panic!("{path} shows");
         };
         let name = app.name().to_owned();
-        let mut daemon = Daemon::new(Vars::default(), Index::new(Vec::new()));
+        let mut daemon = Daemon::new(
+            Vars::default(),
+            Index::new(Vec::new()),
+            Visits::default(),
+            None,
+        );
         let (older, older_success) = reload(&mut daemon);
         let (newer, newer_success) = reload(&mut daemon);
         let scanned = |number, apps| {

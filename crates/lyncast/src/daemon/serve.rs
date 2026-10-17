@@ -7,6 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::mem;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -14,10 +15,11 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lyncast_core::rank::{Index, Timestamp};
+use lyncast_core::rank::{Index, Timestamp, Visits};
 
 use super::runner::Runner;
-use super::{Daemon, Done, Handled, Job, QUIT_WAIT, QUITTING, Success};
+use super::store::Store;
+use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
 use crate::apps::{self, Vars};
 use crate::wire::{self, Reply, Request};
 
@@ -38,6 +40,8 @@ enum Event {
     Request(Request, ReplyTo),
     /// A worker thread's job ended.
     Finished(Success, Result<Done, String>, ReplyTo),
+    /// The writer of the visits ended, after Quit.
+    WriterEnded,
 }
 
 /// Where a request's reply goes: the connection thread that read it, which says when the reply
@@ -71,15 +75,23 @@ impl Unwritten {
 }
 
 /// Claims the socket and serves until a Quit command. The lock comes first, so a second daemon
-/// fails before it scans, and only the lock holder removes a stale socket and binds. `record`
-/// swaps the runner for a recorder that writes to that file.
+/// fails before it scans or reads `ranking.json`, and only the lock holder removes a stale
+/// socket and binds. `record` swaps the runner for a recorder that writes to that file.
 pub fn run(record: Option<PathBuf>) -> Result<(), String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
     let vars = Vars::read();
     let index = Index::new(apps::scan(&vars));
     let (events, inbox) = mpsc::channel();
-    let daemon = Daemon::new(vars, index);
+    let writer = events.clone();
+    let ended = move || {
+        let _ = writer.send(Event::WriterEnded);
+    };
+    let (visits, store) = match vars.data_home() {
+        Some(dir) => Store::open(Path::new(&dir), ended).map_err(not_started)?,
+        None => (Visits::default(), None),
+    };
+    let daemon = Daemon::new(vars, index, visits, store);
     let socket = runtime.join(wire::SOCKET);
     let listener = bind(&socket)?;
     let host = Host {
@@ -136,8 +148,8 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
 }
 
 /// The owner loop. It serves until a Quit command, and then stops in the order
-/// docs/design/daemon.md gives: no new connections, the work in flight, the reply. The daemon
-/// keeps answering while it stops.
+/// docs/design/daemon.md gives: no new connections, the work in flight, the last write, the
+/// reply. The daemon keeps answering while it stops.
 fn serve(
     mut daemon: Daemon,
     mut host: Host,
@@ -174,9 +186,15 @@ fn serve(
     for event in inbox.try_iter() {
         host.refuse(event);
     }
-    // The lock goes after the work in flight and before the reply, so a daemon started after
-    // the reply can take it.
-    drop(claim.lock);
+    // The lock goes after the last write and before the reply, so a daemon started after the
+    // reply can take it. A daemon that has not stopped may still be writing, so it keeps the lock
+    // until the process exits, and a daemon started in its place never writes ranking.json at
+    // the same time.
+    if daemon.stopped() {
+        drop(claim.lock);
+    } else {
+        mem::forget(claim.lock);
+    }
     host.unwritten.send(reply_to, reply);
     host.unwritten.wait(Instant::now() + QUIT_WRITE);
     Ok(())
@@ -204,6 +222,7 @@ impl Host {
                 self.unwritten
                     .send(reply_to, daemon.finish(success, done, now()));
             }
+            Event::WriterEnded => daemon.writer_ended(),
         }
         None
     }
@@ -212,9 +231,9 @@ impl Host {
     /// daemon. A job's result is not taken either, so its client hears that the daemon is
     /// quitting, even when its program started.
     fn refuse(&mut self, event: Event) {
-        let (Event::Request(_, reply_to) | Event::Finished(_, _, reply_to)) = event;
-        let reason = QUITTING.to_owned();
-        self.unwritten.send(reply_to, Reply::Failed { reason });
+        if let Event::Request(_, reply_to) | Event::Finished(_, _, reply_to) = event {
+            self.unwritten.send(reply_to, quitting());
+        }
     }
 
     /// Runs the job on a worker thread, whose result comes back as an event. A job whose thread
@@ -275,9 +294,7 @@ fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
             let asked = events.send(Event::Request(request, reply_to)).ok();
             asked
                 .and_then(|()| reply_rx.recv().ok())
-                .unwrap_or_else(|| Reply::Failed {
-                    reason: QUITTING.to_owned(),
-                })
+                .unwrap_or_else(quitting)
         }
         Err(reason) => Reply::Failed { reason },
     };

@@ -220,10 +220,15 @@ pub fn command_line(command: &str, tree: &Path) -> Option<CommandLine> {
     Some(CommandLine { unset, vars, args })
 }
 
-/// Calls `ready` every millisecond until it gives a value, for up to 10 s, so a test that waits
-/// for something that never comes fails and does not hang.
+/// How long a test waits for something before it fails. A hang fails at any limit, and 60 s
+/// leaves room for the 64 MiB session in daemon.md, whose save takes about 2.3 s in a debug
+/// build on an idle box and ran over 10 s at a load average of 30 on 32 cores.
+pub const BUDGET: Duration = Duration::from_secs(60);
+
+/// Calls `ready` every millisecond until it gives a value, for up to [`BUDGET`], so a test that
+/// waits for something that never comes fails and does not hang.
 pub fn poll<T>(mut ready: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + BUDGET;
     loop {
         if let Some(value) = ready() {
             return Some(value);
@@ -357,7 +362,9 @@ impl Daemon {
                 let printed = fs::read_to_string(stderr).unwrap_or_default();
                 Err(format!("the daemon exited with {status}: {printed:?}"))
             }
-            None => Err("the daemon ran over 10 s before its socket accepted".to_owned()),
+            None => Err(
+                "the daemon ran over the test's time budget before its socket accepted".to_owned(),
+            ),
         }
     }
 

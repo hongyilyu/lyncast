@@ -157,7 +157,10 @@ fn query_prints_the_doc_rows() {
         // The client reads nothing from its environment but the socket path.
         let Some((stdout, stderr, code)) = run_bounded(lyncast(&runtime, &line.args), &out_dir)
         else {
-            failures.push(format!("line {}: {command}\n  ran over 10 s", block.line));
+            failures.push(format!(
+                "line {}: {command}\n  ran over the test's time budget",
+                block.line
+            ));
             break;
         };
         drop(daemon);
