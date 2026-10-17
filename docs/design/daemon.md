@@ -211,7 +211,7 @@ Exec=8x8
 A `session` block is a terminal transcript against one environment:
 
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, and `RUNTIME` in its environment, so a session can write, change, and read files. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
-- `$ lyncast daemon ...` with no expected lines after it starts the daemon in the background, with `--record $RUNTIME/runs` added and its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
+- Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths.
 
 At the end of a block the test stops any daemon still running.
@@ -721,7 +721,7 @@ $ ls data/lyncast
 
 ### One daemon owns the socket
 
-A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails.
+A second daemon finds the lock taken. A lock file that is not a regular file, such as a FIFO or a link to `/dev/null`, fails the daemon at once. Without a daemon, or without `XDG_RUNTIME_DIR`, every client fails. A daemon line without `--headless` is a usage error, and clap's usage line names the options the line gave, such as the `--record` given here, which the harness then does not add.
 
 ```session
 $ lyncast toggle
@@ -752,11 +752,11 @@ exit: 1
 $ env -u XDG_RUNTIME_DIR lyncast daemon --headless
 stderr: lyncast: XDG_RUNTIME_DIR is not set
 exit: 1
-$ lyncast daemon
+$ lyncast daemon --record runs
 stderr: error: the following required arguments were not provided:
 stderr:   --headless
 stderr: 
-stderr: Usage: lyncast daemon --headless
+stderr: Usage: lyncast daemon --headless --record <FILE>
 stderr: 
 stderr: For more information, try '--help'.
 exit: 2
