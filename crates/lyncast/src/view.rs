@@ -1,15 +1,18 @@
 //! The JSON view that `lyncast query --json` prints: one compact object per row and line, with
 //! the fields in declaration order. The daemon sends the same objects in its `rows` reply, and
 //! the client prints them as they came. The wire spellings of keys, kinds, sections, verbs, and
-//! chords live here, and serde stays out of lyncast-core.
+//! chords live here, and serde stays out of lyncast-core. [`reply`] is the one place a daemon
+//! answer becomes a wire reply.
 
 use std::io::{self, Write};
 
-use lyncast_core::calc::Answer;
+use lyncast_core::calc;
 use lyncast_core::{Actions, Chord, Key, KeyError, Kind, Row, Section, Verb};
 use serde::{Deserialize, Serialize};
 
 use crate::clip;
+use crate::daemon::Answer;
+use crate::wire::Reply;
 
 /// A value that the CLI and the wire spell as `query --json` prints it.
 pub trait Spelled: Sized {
@@ -62,7 +65,23 @@ pub struct ClipView {
     preview: Option<String>,
 }
 
-pub fn clips(rows: &[&clip::Row]) -> Vec<ClipView> {
+/// The wire reply that spells `answer`.
+pub fn reply(answer: Answer) -> Reply {
+    match answer {
+        Answer::Summon(state) => Reply::Summon { state },
+        Answer::Rows(found) => Reply::Rows { rows: rows(&found) },
+        Answer::Clips(found) => Reply::Clips {
+            clips: clips(&found),
+        },
+        Answer::Done { message } => Reply::Done { message },
+        Answer::Confirm(command) => Reply::Confirm {
+            title: command.title().to_owned(),
+        },
+        Answer::Failed(reason) => Reply::Failed { reason },
+    }
+}
+
+fn clips(rows: &[clip::Row]) -> Vec<ClipView> {
     rows.iter()
         .map(|row| ClipView {
             id: row.id.0,
@@ -76,7 +95,7 @@ pub fn clips(rows: &[&clip::Row]) -> Vec<ClipView> {
 }
 
 /// The view of each row, numbered in order.
-pub fn rows(rows: &[Row]) -> Vec<RowView> {
+fn rows(rows: &[Row]) -> Vec<RowView> {
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
@@ -103,7 +122,7 @@ pub fn write_lines<T: Serialize>(out: &mut impl Write, rows: &[T]) -> io::Result
     Ok(())
 }
 
-fn card_view(answer: &Answer) -> CardView {
+fn card_view(answer: &calc::Answer) -> CardView {
     CardView {
         expression: answer.expression().to_owned(),
         source_badge: answer.source_badge().to_owned(),
