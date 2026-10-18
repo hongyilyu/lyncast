@@ -163,7 +163,7 @@ A summon goes through these steps:
 
 A successful launch closes the palette too. While an exclusive Overlay surface stays mapped, niri gives it the keyboard, so the new app would get no keys ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source, niri `src/niri.rs:1378-1394`).
 
-Losing keyboard focus cancels the summon, as TinyCast hides on focus loss. On two monitors with focus-follows-mouse, the palette can lose the keyboard while it is still drawn (notes/07, read in source). Whether the palette sends the request on key press or on key release is undecided.
+Losing keyboard focus cancels the summon once its window has been active, as TinyCast hides on focus loss. On two monitors with focus-follows-mouse, the palette can lose the keyboard while it is still drawn (notes/07, read in source). The palette sends the request as the activating key goes down, and closes after a success once the key is up and no modifier is held ([palette](palette.md#enter-runs-the-selected-row-as-it-goes-down)).
 
 ## The palette and the CLI speak one protocol
 

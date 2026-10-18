@@ -28,7 +28,7 @@ pub use self::{
     frozen::{Frozen, named_thread},
     pipe::fill,
     runtime::Runtime,
-    session::{Printed, Verbs, session, session_with},
+    session::{Printed, Verbs, session, session_later, session_with},
     tree::{environment, materialize, mkfifo, raw_bytes, substitute},
     world::{CommandLine, World, command_line},
 };

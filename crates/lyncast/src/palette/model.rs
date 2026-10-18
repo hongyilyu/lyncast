@@ -1,21 +1,97 @@
 #[cfg(test)]
 use std::fmt::Write;
+use std::mem;
 use std::ops::Range;
 
-use lyncast_core::{Chord, Kind, Row, Section, calc};
+use lyncast_core::{Chord, Key, Kind, Row, Section, calc};
 
 use super::field::Field;
+use crate::daemon::{After, Answer};
+use crate::wire::{Request, Via};
 
 /// What the empty field shows.
 pub const PLACEHOLDER: &str = "Search for apps and commands";
 /// What an empty list shows.
 pub const NO_RESULTS: &str = "No results";
 
+/// The key whose release closes the window after a success.
+const ACTIVATING: &str = "enter";
+
 pub struct Model {
     field: Field,
     rows: Vec<Row>,
     lines: Vec<Line>,
     selected_row: usize,
+    overlay: Option<Overlay>,
+    phase: Phase,
+    was_active: bool,
+}
+
+enum Overlay {
+    Confirm {
+        key: Key,
+        via: Via,
+        title: &'static str,
+    },
+}
+
+enum Phase {
+    Idle,
+    Pending { key: Key, via: Via, released: bool },
+    Closing { released: bool },
+    Failed(String),
+}
+
+pub enum Footer<'m> {
+    /// The selected row's default action, which Enter runs.
+    Hint(String),
+    /// A command that asks first: Enter runs it, and Escape cancels.
+    Confirm(&'static str),
+    Pending,
+    Closing,
+    Failed(&'m str),
+}
+
+/// A key that the footer names, as the view draws its cap.
+#[derive(Clone, Copy)]
+pub enum Cap {
+    Enter,
+    Escape,
+}
+
+impl Cap {
+    pub fn label(self) -> &'static str {
+        match self {
+            Cap::Enter => "↵",
+            Cap::Escape => "esc",
+        }
+    }
+
+    /// How a `palette` block spells the key.
+    #[cfg(test)]
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Cap::Enter => "enter",
+            Cap::Escape => "escape",
+        }
+    }
+}
+
+impl Footer<'_> {
+    /// What the footer names, in order: a label and the key that runs it. The first is what
+    /// Enter runs.
+    pub fn hints(&self) -> Vec<(&str, Cap)> {
+        match self {
+            Footer::Hint(label) => vec![(label, Cap::Enter)],
+            Footer::Confirm(title) => vec![(title, Cap::Enter), ("Cancel", Cap::Escape)],
+            Footer::Pending | Footer::Closing | Footer::Failed(_) => Vec::new(),
+        }
+    }
+}
+
+/// The question that a command that asks first puts in the footer.
+pub fn question(title: &str) -> String {
+    format!("{title}?")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +104,10 @@ pub enum Line {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
+    /// The first press of Enter or Ctrl+Enter.
+    Activate(Chord),
+    /// A held key's repeat of Enter or Escape, which the palette takes and drops.
+    Ignore,
     Up,
     Down,
     Left,
@@ -61,13 +141,16 @@ pub enum Input {
 pub enum Landed {
     /// The root list for the field's text.
     Rows(Vec<Row>),
+    /// The answer to the activation that is out.
+    Answer(Answer),
 }
 
 /// The one thing the view does next.
-#[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     /// Ask the daemon for the root list of this text.
     Query(String),
+    /// Send the daemon this activation.
+    Ask(Request),
     Close,
 }
 
@@ -79,62 +162,84 @@ impl Model {
             rows: Vec::new(),
             lines: Vec::new(),
             selected_row: 0,
+            overlay: None,
+            phase: Phase::Idle,
+            was_active: false,
         };
         (model, Effect::Query(String::new()))
     }
 
+    /// A key press, typed text, or an input method's text. While an activation is out or the
+    /// window is closing, only Escape does something: it closes the window, and the answer
+    /// goes nowhere.
     pub fn input(&mut self, input: Input) -> Option<Effect> {
+        if let Phase::Pending { .. } | Phase::Closing { .. } = self.phase {
+            return matches!(input, Input::Press(Press::Escape)).then_some(Effect::Close);
+        }
         let edited = match input {
-            Input::Press(Press::Up) => {
-                self.selected_row = self.selected_row.saturating_sub(1);
-                false
-            }
-            Input::Press(Press::Down) => {
-                self.selected_row = (self.selected_row + 1).min(self.rows.len().saturating_sub(1));
-                false
-            }
+            Input::Press(Press::Activate(chord)) => return self.activate(Via::Chord(chord)),
+            Input::Press(Press::Ignore) => return None,
             Input::Press(Press::Escape) => return self.escape(),
-            Input::Press(Press::Backspace) => self.field.backspace(),
-            Input::Press(Press::Delete) => self.field.delete(),
-            Input::Press(Press::Left) => {
-                self.field.left();
-                false
-            }
-            Input::Press(Press::Right) => {
-                self.field.right();
-                false
-            }
-            Input::Press(Press::Home) => {
-                self.field.home();
-                false
-            }
-            Input::Press(Press::End) => {
-                self.field.end();
-                false
-            }
-            Input::Replace { utf16, text } => self.field.replace(utf16, &text),
-            Input::Mark {
-                utf16,
-                text,
-                selected,
-            } => self.field.mark(utf16, &text, selected),
             Input::Unmark => {
                 self.field.unmark();
-                false
+                return None;
+            }
+            input => {
+                // Any other key or text ends a failure's footer and a confirmation it does
+                // not answer.
+                self.phase = Phase::Idle;
+                self.overlay = None;
+                self.edit(input)
             }
         };
         edited.then(|| self.query())
     }
 
-    pub fn land(&mut self, landed: Landed) -> Option<Effect> {
+    /// A key's release, by its name. `mods` says whether a modifier is held.
+    pub fn released(&mut self, key: &str, mods: bool) -> Option<Effect> {
+        if key != ACTIVATING {
+            return None;
+        }
+        match &mut self.phase {
+            Phase::Pending { released, .. } => {
+                *released = true;
+                None
+            }
+            Phase::Closing { released } => {
+                *released = true;
+                (!mods).then_some(Effect::Close)
+            }
+            // A release whose press the palette never saw, such as the one niri's bind leaves
+            // as the window maps.
+            Phase::Idle | Phase::Failed(_) => None,
+        }
+    }
+
+    /// The held modifiers changed, and `mods` says whether one is still held.
+    pub fn modifiers(&self, mods: bool) -> Option<Effect> {
+        let up = matches!(self.phase, Phase::Closing { released: true });
+        (up && !mods).then_some(Effect::Close)
+    }
+
+    /// The window turned active or inactive. Only a window that has been active closes when
+    /// it turns inactive.
+    pub fn active(&mut self, active: bool) -> Option<Effect> {
+        let lost = self.was_active && !active;
+        self.was_active |= active;
+        lost.then_some(Effect::Close)
+    }
+
+    /// `mods` says whether a modifier is held as the answer lands.
+    pub fn land(&mut self, landed: Landed, mods: bool) -> Option<Effect> {
         match landed {
             Landed::Rows(rows) => {
                 self.lines = lines(&rows);
                 self.rows = rows;
                 self.selected_row = 0;
+                None
             }
+            Landed::Answer(answer) => self.answered(answer, mods),
         }
-        None
     }
 
     pub fn field(&self) -> &Field {
@@ -165,10 +270,19 @@ impl Model {
             .position(|&line| line == Line::Row(self.selected_row))
     }
 
-    /// What the footer shows: the label of the selected row's default action.
-    pub fn footer(&self) -> Option<String> {
-        let row = self.rows.get(self.selected_row)?;
-        Some(row.subject.actions().on(Chord::Enter).label().to_owned())
+    pub fn footer(&self) -> Option<Footer<'_>> {
+        Some(match &self.phase {
+            Phase::Pending { .. } => Footer::Pending,
+            Phase::Closing { .. } => Footer::Closing,
+            Phase::Failed(reason) => Footer::Failed(reason),
+            Phase::Idle => match &self.overlay {
+                Some(Overlay::Confirm { title, .. }) => Footer::Confirm(title),
+                None => {
+                    let row = self.rows.get(self.selected_row)?;
+                    Footer::Hint(row.subject.actions().on(Chord::Enter).label().to_owned())
+                }
+            },
+        })
     }
 
     /// The text of palette.md's `palette` blocks: the field, the lines with the selected row
@@ -193,9 +307,21 @@ impl Model {
         if self.rows.is_empty() {
             let _ = writeln!(out, "{NO_RESULTS}");
         }
-        if let Some(footer) = self.footer() {
-            let _ = writeln!(out, "footer: {footer}");
+        if let Some(Overlay::Confirm { title, .. }) = &self.overlay {
+            let _ = writeln!(out, "confirm {}", question(title));
         }
+        let _ = match self.footer() {
+            Some(Footer::Pending) => writeln!(out, "footer: pending"),
+            Some(Footer::Closing) => writeln!(out, "footer: closing"),
+            Some(Footer::Failed(reason)) => writeln!(out, "footer: failed: {reason}"),
+            Some(footer) => {
+                let hints: Vec<String> = (footer.hints().iter())
+                    .map(|(label, cap)| format!("{label} ({})", cap.spelling()))
+                    .collect();
+                writeln!(out, "footer: {}", hints.join(" · "))
+            }
+            None => Ok(()),
+        };
         out
     }
 
@@ -204,7 +330,102 @@ impl Model {
         Effect::Query(self.field.text().to_owned())
     }
 
+    fn edit(&mut self, input: Input) -> bool {
+        match input {
+            Input::Press(Press::Up) => {
+                self.selected_row = self.selected_row.saturating_sub(1);
+                false
+            }
+            Input::Press(Press::Down) => {
+                self.selected_row = (self.selected_row + 1).min(self.rows.len().saturating_sub(1));
+                false
+            }
+            Input::Press(Press::Backspace) => self.field.backspace(),
+            Input::Press(Press::Delete) => self.field.delete(),
+            Input::Press(Press::Left) => {
+                self.field.left();
+                false
+            }
+            Input::Press(Press::Right) => {
+                self.field.right();
+                false
+            }
+            Input::Press(Press::Home) => {
+                self.field.home();
+                false
+            }
+            Input::Press(Press::End) => {
+                self.field.end();
+                false
+            }
+            Input::Replace { utf16, text } => self.field.replace(utf16, &text),
+            Input::Mark {
+                utf16,
+                text,
+                selected,
+            } => self.field.mark(utf16, &text, selected),
+            // `input` takes these itself.
+            Input::Unmark | Input::Press(Press::Activate(_) | Press::Ignore | Press::Escape) => {
+                false
+            }
+        }
+    }
+
+    fn activate(&mut self, via: Via) -> Option<Effect> {
+        let (key, via, confirmed) = match self.overlay.take() {
+            Some(Overlay::Confirm { key, via, .. }) => (key, via, true),
+            None => (self.rows.get(self.selected_row)?.subject.key(), via, false),
+        };
+        self.phase = Phase::Pending {
+            key: key.clone(),
+            via: via.clone(),
+            released: false,
+        };
+        let query = self.field.text().to_owned();
+        Some(Effect::Ask(Request::Activate {
+            key,
+            via,
+            confirmed,
+            query,
+        }))
+    }
+
+    fn answered(&mut self, answer: Answer, mods: bool) -> Option<Effect> {
+        let Phase::Pending { key, via, released } = mem::replace(&mut self.phase, Phase::Idle)
+        else {
+            return None;
+        };
+        match answer {
+            Answer::Done {
+                after: After::Close,
+                ..
+            } if released && !mods => return Some(Effect::Close),
+            Answer::Done {
+                after: After::Close,
+                ..
+            } => self.phase = Phase::Closing { released },
+            // The window has no clipboard screen to show.
+            Answer::Done {
+                after: After::ShowClipboard,
+                ..
+            } => {}
+            Answer::Confirm(command) => {
+                let title = command.title();
+                self.overlay = Some(Overlay::Confirm { key, via, title });
+            }
+            Answer::Failed(reason) => self.phase = Phase::Failed(reason),
+            Answer::Summon(_) | Answer::Rows(_) | Answer::Clips(_) => {
+                self.phase = Phase::Failed("unexpected answer".to_owned());
+            }
+        }
+        None
+    }
+
     fn escape(&mut self) -> Option<Effect> {
+        self.phase = Phase::Idle;
+        if self.overlay.take().is_some() {
+            return None;
+        }
         if self.field.clear() {
             return Some(self.query());
         }

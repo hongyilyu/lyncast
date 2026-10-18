@@ -167,7 +167,7 @@ Three rules govern the close:
 
 - After a socket client's successful action, the host schedules the close with `cx.defer`, because GPUI fails `update_window` on a window that is already being updated (`gpui-pre` 0.3.9 `src/app.rs:2201-2215`, read in source). A window's own handler can close it with `remove_window`, which only marks it ([palette](palette.md#a-summon-opens-one-window)).
 - `on_window_closed` clears the summon, so the toggle state follows the real window even when niri closes it.
-- Losing keyboard focus cancels the summon, because under focus-follows-mouse the keyboard can move to another output (read in source).
+- Losing keyboard focus cancels the summon once its window has been active, because under focus-follows-mouse the keyboard can move to another output (read in source). Under anvil a window turns active only with its first key ([palette](palette.md#enter-runs-the-selected-row-as-it-goes-down)).
 
 ## Paste v1 aims at summon and confirms focus from state
 

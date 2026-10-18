@@ -20,8 +20,10 @@ pub const SELECTED: u32 = 0x2e2e33;
 /// The selected card's border.
 pub const ACCENT: u32 = 0x5e8bff;
 pub const CARET: u32 = 0x5e8bff;
-/// The card's badges.
+/// The card's badges and the footer's keys.
 pub const BADGE: u32 = 0x2a2a2e;
+/// Why an activation failed, in the footer.
+pub const FAILED: u32 = 0xff8a80;
 
 pub const FONT: &str = "DejaVu Sans";
 

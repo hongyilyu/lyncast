@@ -38,7 +38,7 @@ pub enum Request {
 }
 
 /// How an activation picks its item: the keys pressed, or a verb from the Actions menu.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     Chord(#[serde(with = "spelled")] Chord),

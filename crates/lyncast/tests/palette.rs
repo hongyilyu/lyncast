@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use common::clipboard::Helpers;
 use common::doc::{self, Block};
-use common::{OK, Ran, World, poll, session_with};
+use common::{OK, Ran, World, poll, run_bounded, session_later};
 
 const TREES: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/palette-trees");
 
@@ -21,8 +21,8 @@ fn every_summon_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        8,
-        "palette.md holds 8 summon blocks, so a lost block fails"
+        10,
+        "palette.md holds 10 summon blocks, so a lost block fails"
     );
     let trees = Path::new(TREES);
     match fs::remove_dir_all(trees) {
@@ -44,9 +44,17 @@ fn every_summon_block_runs_as_the_doc_says() {
 fn run(fixtures: &[Block], block: &Block, tree: PathBuf) -> Vec<String> {
     let world = World::compositor(fixtures, tree);
     let mut helpers = Helpers::new(&world);
-    let failures = session_with(&world, block, &mut |line, newest| {
-        trace(&world, line).or_else(|| helpers.run(line, newest))
-    });
+    let keys = |line: &str| line.starts_with("$ keys ");
+    let failures = session_later(
+        &world,
+        block,
+        &mut |line, newest| {
+            trace(&world, line)
+                .or_else(|| palette(&world, line))
+                .or_else(|| helpers.run(line, newest))
+        },
+        &keys,
+    );
     drop(helpers);
     if failures.is_empty() {
         world.passed();
@@ -78,6 +86,42 @@ fn trace(world: &World, line: &str) -> Option<Ran> {
                 .filter(|held| held.split(' ').nth(2) == Some(want.as_str()))
                 .count();
             (format!("{count}\n").into_bytes(), Vec::new(), Some(0))
+        }
+        _ => return None,
+    })
+}
+
+const X11: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/x11.py");
+
+fn palette(world: &World, line: &str) -> Option<Ran> {
+    let words: Vec<&str> = line.strip_prefix("$ ")?.split(' ').collect();
+    Some(match words.as_slice() {
+        ["keys", specs @ ..] => {
+            let display = fs::read_to_string(world.runtime.path().join("display"))
+                .expect("test-env.sh writes the display");
+            let typed = format!(
+                "$ python3 -I {X11} {} focus keys {}",
+                display.trim(),
+                specs.join(" ")
+            );
+            run_bounded(world.command(&typed).0, &world.out)?
+        }
+        ["wait-summon", state] => {
+            let want = format!("{state}\n");
+            let mut last = Vec::new();
+            let status = || run_bounded(world.command("$ lyncast status").0, &world.out);
+            let waited = poll(|| {
+                let (stdout, _, _) = status()?;
+                if stdout == want.as_bytes() {
+                    return Some(());
+                }
+                last = stdout;
+                None
+            });
+            match waited {
+                Some(()) => OK,
+                None => (last, Vec::new(), Some(1)),
+            }
         }
         _ => return None,
     })
