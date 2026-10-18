@@ -83,6 +83,7 @@ pub(crate) struct Owner {
     runner: Runner,
     copier: Option<Copier>,
     unwritten: Unwritten,
+    changes: u64,
     now: fn() -> Timestamp,
 }
 
@@ -153,6 +154,7 @@ impl Owner {
             runner,
             copier,
             unwritten: Unwritten::default(),
+            changes: 0,
             now,
         }
     }
@@ -160,6 +162,11 @@ impl Owner {
     /// The daemon, for reads that change nothing, such as the clipboard history.
     pub(crate) fn daemon(&self) -> &Daemon {
         &self.daemon
+    }
+
+    /// How many events that are not reads have reached the daemon.
+    pub(crate) fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// The time now, by the clock the owner hands the daemon with each event.
@@ -289,10 +296,14 @@ impl Owner {
         }
     }
 
-    /// Every event reaches the daemon here. While the daemon serves, it gives the stop an event
-    /// asks for, which its caller begins. Once the stop has begun, no event gives another.
+    /// Every event reaches the daemon here, and each that is not a read is counted. While the
+    /// daemon serves, it gives the stop an event asks for, which its caller begins. Once the stop
+    /// has begun, no event gives another.
     #[must_use]
     fn hand(&mut self, face: &mut dyn Face, event: Event) -> Option<Stop> {
+        if !event.is_read() {
+            self.changes += 1;
+        }
         match self.phase {
             Phase::Serving => self.dispatch(face, event),
             Phase::Stopping(_) => {

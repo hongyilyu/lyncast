@@ -367,6 +367,16 @@ fn lock(path: &Path) -> Result<Lock, String> {
     }
 }
 
+impl Event {
+    /// A `query`, `status`, or `clips` request, which changes nothing.
+    pub(super) fn is_read(&self) -> bool {
+        matches!(
+            self,
+            Event::Request(Request::Query { .. } | Request::Status | Request::Clips, _)
+        )
+    }
+}
+
 fn accept(listener: &UnixListener, events: &Events) {
     let places = Permits::new(MAX_CONNECTIONS);
     for stream in listener.incoming() {

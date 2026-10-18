@@ -67,6 +67,12 @@ impl Host {
         self.owner.as_ref().map(Owner::daemon)
     }
 
+    /// How many events that are not reads the daemon has taken. The host notifies when it
+    /// moves.
+    pub fn revision(&self) -> u64 {
+        self.owner.as_ref().map_or(0, Owner::changes)
+    }
+
     /// The zone of the wall clock and the daemon's time now, by the clock the owner reads.
     /// `None` once the stop has finished.
     pub fn wall(&self) -> Option<(Zone, Timestamp)> {
@@ -87,31 +93,46 @@ impl Host {
         request: Request,
         cx: &mut Context<Host>,
     ) -> Option<oneshot::Receiver<Answer>> {
-        let owner = self.owner.as_mut()?;
-        let mut face = WindowFace {
-            summons: &mut self.summons,
-            cx,
-        };
-        Some(owner.ask(&mut face, request))
+        self.with_owner(cx, |owner, face| owner.ask(face, request))
     }
 
     /// Hands the daemon every queued event, and finishes the stop once its wait is over.
     pub fn drain(&mut self, cx: &mut Context<Host>) -> Next {
-        let Some(owner) = self.owner.as_mut() else {
+        let Some(wait) = self.with_owner(cx, |owner, face| owner.take_queued(face)) else {
             return Next::Done(Err("the palette's host has no daemon".to_owned()));
         };
-        let mut face = WindowFace {
-            summons: &mut self.summons,
-            cx,
-        };
-        match owner.take_queued(&mut face) {
+        match wait {
             Wait::Forever => Next::Serve,
             Wait::For(wait) => Next::Wait(wait),
             Wait::Over(over) => {
                 let owner = self.owner.take().expect("the host holds the owner");
+                let mut face = WindowFace {
+                    summons: &mut self.summons,
+                    cx,
+                };
                 Next::Done(owner.finish_blocking(over, &mut face))
             }
         }
+    }
+
+    fn with_owner<R>(
+        &mut self,
+        cx: &mut Context<Host>,
+        hand: impl FnOnce(&mut Owner, &mut dyn Face) -> R,
+    ) -> Option<R> {
+        let owner = self.owner.as_mut()?;
+        let revision = owner.changes();
+        let handed = hand(
+            owner,
+            &mut WindowFace {
+                summons: &mut self.summons,
+                cx,
+            },
+        );
+        if owner.changes() != revision {
+            cx.notify();
+        }
+        Some(handed)
     }
 
     /// `on_window_closed`: a window that leaves `windows` traces `window_closed`, and the open
