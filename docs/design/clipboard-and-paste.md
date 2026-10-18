@@ -238,9 +238,9 @@ These fixes live in the paste v1 spec, not yet in the decision log:
 - One file per backend held only on niri. `detect` walks ordered probes, and the claim shrinks to key injection.
 - Each paste swaps the seat keymap. The spec accepts that, with a fresh anvil per test.
 
-Four had no fix in the log or the spec. Plan step 6 settled three on 2026-10-17 ([decision log](../decisions.md#clipboard-and-paste)):
+Four had no fix in the log or the spec. Plan step 6 settled three on 2026-10-17 ([decision log](../decisions.md#clipboard-and-paste)), and plan step 7 the fourth:
 
-- No test covers Enter, close, and still serving. Both reviews ask for a Tier 2 case, which plan step 7 adds with the palette.
+- No test covered Enter, close, and still serving. Both reviews asked for a Tier 2 case. In palette.md's [Ctrl+V under anvil](palette.md#ctrlv-under-anvil-types-the-clip-the-daemon-saw-last) block, Enter copies a sum's answer, the window closes, and the clipboard still holds the answer, and in [the selection stays when the window closes after a copy](palette.md#the-selection-stays-when-the-window-closes-after-a-copy), a copy closes the window and the clipboard still holds the clip.
 - `deliver` returned before the compositor applied the selection. A copy now waits for its own marked offer, as [a copy waits for the compositor to take it](#a-copy-waits-for-the-compositor-to-take-it) says.
 - Back-to-back seeding races the watcher. A Tier 2 test waits for each seed's row, or for the read of a `seed-read`, before it seeds again.
 - A daemon restart empties the clipboard. The daemon does not offer the newest row again at start.

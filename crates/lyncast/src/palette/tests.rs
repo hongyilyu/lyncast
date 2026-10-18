@@ -118,7 +118,7 @@ fn the_model_never_names_gpui() {
     }
 }
 
-const PALETTE_BLOCKS: usize = 28;
+const PALETTE_BLOCKS: usize = 29;
 
 #[test]
 fn every_palette_block_runs_as_the_doc_says() {

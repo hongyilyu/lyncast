@@ -72,7 +72,7 @@ The screen reads the history again each time the daemon takes an event that is n
 
 Enter copies the selected clip and closes the palette once Enter is up, as any success does. Ctrl+K's menu holds Copy, then Pin or Unpin, then Delete. Pin, Unpin, and Delete close the palette too, as every other success does.
 
-Tab and Ctrl+T do nothing while the menu is open. Like any other key, Tab and Ctrl+T cancel a question.
+Ctrl+V types the clip the daemon saw last into the field that has the caret, as typed text goes: a text's preview, its first 1,024 bytes, or a file list's paths, with each line break as a space. An image types nothing, and so does an empty history. The daemon saw it last when it is the newest capture or copy that the history holds, also a pinned clip that a capture of the same bytes promoted. lyncast never reads the clipboard through GPUI, whose Wayland read waits up to 4 s on the main thread for the app that holds the selection (`gpui-pre-linux` 0.3.9 `src/linux/platform.rs:1267` and `src/linux/wayland/clipboard.rs:89`, read in source), so a password, which the capture thread skips, is not what Ctrl+V types. Ctrl+V's repeats type again, as text does. Tab and Ctrl+T do nothing while the menu is open, and Ctrl+V types into its filter. Like any other key, Tab, Ctrl+T, and Ctrl+V's text cancel a question.
 
 ### The preview pane and the information panel
 
@@ -2585,6 +2585,207 @@ info: Source — · Type Email · Size 14 B · Copied Today at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 ```
 
+### Ctrl+V types the clip the daemon saw last
+
+Ctrl+V types the newest capture's text with its line breaks as spaces, and its repeats type it again: `8x 88x 8` is a product too. The text it types ends Log Out's question, as typed text does. An image types nothing, and a file list types its paths, here into the clipboard screen's filter. A capture of a pinned clip's bytes makes that clip the one Ctrl+V types, though it stays among the pins, and with the menu open, Ctrl+V types into the menu's filter.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press ctrl-v
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ capture text 8x\n8
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press down down down down enter
+root (Search for apps and commands)
+== Suggestions
+  Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+> Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+confirm Log Out?
+footer: Log Out (enter) · Cancel (escape)
+$ press ctrl-v
+root "8x 8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: Copy Answer (enter) · Actions (ctrl-k)
+$ hold ctrl-v
+root "8x 88x 8"
+> = 5,632  (8 × 88 × 8 · Product · Five Thousand Six Hundred Thirty-Two)
+footer: Copy Answer (enter) · Actions (ctrl-k)
+$ press escape
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ capture image 3x2
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press ctrl-v
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ capture files file:///etc/hostname\nfile:///etc/hosts
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press tab ctrl-v
+clipboard "/etc/hostname /etc/hosts" All Types
+== Today
+> files: hostname +1
+preview: files "/etc/hostname\n/etc/hosts"
+info: Source — · Type Files · Path /etc/hostname · Size 38 B · Copied Today at 12:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape down down ctrl-k
+clipboard (Search clipboard history) All Types
+== Today
+  files: hostname +1
+  image: Image
+> text: 8x
+preview: text "8x\n8"
+info: Source — · Type Text · Size 4 B · Copied Today at 12:00
+menu (Search for actions)
+> Copy  (enter)
+  Pin
+  Delete
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down enter
+clipboard (Search clipboard history) All Types
+== Pinned
+> text: 8x
+== Today
+  files: hostname +1
+  image: Image
+preview: text "8x\n8"
+info: Source — · Type Text · Size 4 B · Copied Today at 12:00
+footer: closing
+$ release enter
+closed
+$ capture text 8x\n8
+closed
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  text: 8x
+== Today
+> files: hostname +1
+  image: Image
+preview: files "/etc/hostname\n/etc/hosts"
+info: Source — · Type Files · Path /etc/hostname · Size 38 B · Copied Today at 12:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-k ctrl-v
+clipboard (Search clipboard history) All Types
+== Pinned
+  text: 8x
+== Today
+> files: hostname +1
+  image: Image
+preview: files "/etc/hostname\n/etc/hosts"
+info: Source — · Type Files · Path /etc/hostname · Size 38 B · Copied Today at 12:00
+menu "8x 8"
+No actions
+```
+
 ### The preview shows images, and file lists as images or paths
 
 An image over 32 million pixels shows its size, and an image file that a file list names first shows as an image. A FIFO there is never opened, and a file over 25 MiB is never read. A file that is gone shows why, and any other file shows its paths. An image wider or taller than the pane is drawn scaled down to fit it: 1680 by 200 pixels at 840 by 100, and 200 by 1000 at 96 by 480.
@@ -2945,6 +3146,35 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit
 stderr: lyncast: the time zone did not load within 1 s, so the palette shows times in UTC
+```
+
+### Ctrl+V under anvil types the clip the daemon saw last
+
+`alpha` is seeded after `2+3`, and a copy of `2+3` from the history makes it the clip the daemon saw last, though the capture thread skips lyncast's own write. So Ctrl+V types `2+3` into the field, Enter copies the calculator's answer, and the window closes. That copy is the newest clip, and the clipboard holds it.
+
+```summon
+$ lyncast daemon --trace
+$ seed text/plain;charset=utf-8 2+3
+$ wait-clips 1
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 2
+$ lyncast activate clip:1
+copied clip 1
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 1
+$ keys ctrl+v Return
+$ wait-summon closed
+$ lyncast clip list --json
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"2+3"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+$ paste text/plain;charset=utf-8 got
+$ cat got; echo
+5
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
 ```
 
 ### Quit from the palette stops the daemon

@@ -10,7 +10,8 @@ use super::model::Press;
 /// What a key press means. `None` leaves the key to the input handler, which types its text.
 /// A held key repeats as presses with `is_held`. Only Enter's first press activates, only
 /// Escape's first press takes a step, only Ctrl+K's first press opens or closes the menu, and
-/// only the first press of Tab or Ctrl+T changes the screen or its filter.
+/// only the first press of Tab or Ctrl+T changes the screen or its filter. Ctrl+V types, so its
+/// repeats type again.
 pub fn press(event: &KeyDownEvent) -> Option<Press> {
     let mods = event.keystroke.modifiers;
     let bare = !(mods.control || mods.alt || mods.platform);
@@ -39,6 +40,7 @@ pub fn press(event: &KeyDownEvent) -> Option<Press> {
         "tab" if bare => Press::Tab,
         "t" if ctrl && event.is_held => Press::Ignore,
         "t" if ctrl => Press::CycleKinds,
+        "v" if ctrl => Press::Paste,
         _ => return None,
     })
 }
