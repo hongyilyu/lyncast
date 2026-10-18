@@ -120,7 +120,8 @@ start() {
 	# Every child gets XDG_RUNTIME_DIR=$env_dir, which is how owned() knows it.
 	export XDG_RUNTIME_DIR=$env_dir
 	unset WAYLAND_DISPLAY "${leaks[@]}"
-	Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp \
+	# -fbdir keeps the screen in $env_dir/Xvfb_screen0, an XWD file that screenshots read.
+	Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp -fbdir "$env_dir" \
 		3>"$env_dir/display" >"$env_dir/xvfb.log" 2>&1 </dev/null &
 	pid=$!
 	echo "$pid" >>"$env_dir/pids"

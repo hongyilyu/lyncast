@@ -1491,6 +1491,7 @@ A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdou
 - `$ keys <key>...` types keys into the compositor with `python3 -I scripts/x11.py <display> focus keys <key>...`, on the X display that `$RUNTIME/display` names. Each key is an X keysym name, such as `f` or `Return`, and `ctrl+v` holds Ctrl while it taps `v`. The script gives the X input focus to anvil's window, sends the keys through XTEST, and returns once the X server has handled them.
 - `$ wait-summon <open|closed>` runs `lyncast status` until it prints that state.
 - `$ stall-stdout` gives the next daemon a stdout that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stdout`. `$ drain-stdout` reads what fills it, and from then on what the daemon writes to stdout goes on to `$RUNTIME/daemon.stdout`.
+- `$ shot <name>` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, and two reads in a row agree. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` when every pixel on the box's edge has that color, or `edge mixed`, and `colors` with each color that covers at least 1% of the box, most first. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
 
 anvil reads the keys after `keys` returns, so a `keys` line holds no `record:` lines, and the programs its keys start count on the next line's. That line waits for what the keys do, as `wait-summon closed` waits for the window that a launch closes. Without that focus, anvil gave a GPUI window no key at all, and with it the window turned active at its first key (a GPUI probe under anvil, 2026-10-17). The keys summon block below fails when `x11.py` skips the focus (a deliberate break, 2026-10-17).
 
@@ -1864,6 +1865,24 @@ nothing =>
 ```
 
 `icons_stay_bounded` in `crates/lyncast/src/palette/tests.rs` puts 400 apps with an icon each in the list and moves the selection from the first app to the last. After each step the cache holds the icons of the rows the list has laid out and no others, up to 128. The first app's icon is in the window's atlas once it has loaded. The next summon's window draws the same image. At the end that icon has left the cache and the atlas, and the last app's icon is in both.
+
+### A screenshot under anvil shows the palette
+
+The window shows at the place the `geometry` block gives for anvil's 1280 by 800 output: (1280 − 750) / 2 = 265 from the left, and (800 − 480) / 3, in whole pixels, 106 from the top. Its edge is the border color. The background covers most of it, then the selected row, then the letter squares of the rows with no icon and the footer's keys, then the borders. The block checks no text pixels, which change with the fonts a machine has.
+
+```summon
+$ lyncast daemon --trace
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 1
+$ shot palette
+palette at 265,106 750x480
+edge 3a3a3e
+colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+```
 
 ### The window's size and margins
 

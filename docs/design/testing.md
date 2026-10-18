@@ -13,10 +13,12 @@ MIME types are the exception. Their order differed between two probe runs, so te
 | Tier | Runs under | Proves | Cannot prove |
 |---|---|---|---|
 | 1 | No display, `WAYLAND_DISPLAY` cleared | Logic that needs no compositor, such as promote rules and the no-compositor error | The clipboard or the window |
-| 2 | Xvfb plus smithay `anvil` | The marker MIME, serving, promotion, daemon ownership of the selection, and, with GPUI, summon and close | ext-data-control, niri IPC, niri focus, real GPU timing |
-| 3 | GPUI `TestAppContext` | Actions, keymaps, focus, simulated keystrokes, seeded async work (`SEED`), layout, offscreen pixels | Layer shell, compositor focus, IME, the clipboard between processes, real presentation |
+| 2 | Xvfb plus smithay `anvil` | The marker MIME, serving, promotion, daemon ownership of the selection, and, with GPUI, summon, close, and the palette's pixels | ext-data-control, niri IPC, niri focus, real GPU timing |
+| 3 | GPUI `TestAppContext` | Actions, keymaps, focus, simulated keystrokes, seeded async work (`SEED`), layout | Layer shell, compositor focus, IME, the clipboard between processes, pixels, real presentation |
 
 Tier 1 clears `WAYLAND_DISPLAY` because wayland-client connects whenever it is set ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source). A run inside niri would otherwise copy into the real clipboard. The notes/07 review also unsets `WAYLAND_SOCKET` and uses a temp `XDG_RUNTIME_DIR`. The Tier 3 lists come from [notes/02](../research/notes/02-gpui-on-linux.md), where GPUI's own headless tests passed with no display (measured).
+
+Tier 3 draws no pixels. lyncast builds each `TestAppContext` with no headless renderer, so a test window lays out and paints into a scene and an atlas, and its `draw` renders nothing (`gpui-pre` 0.3.9 `src/platform/test/window.rs:547-573`, read in source). The palette's pixels come from Tier 2, where a `summon` block takes a screenshot under anvil ([palette.md](palette.md#a-screenshot-under-anvil-shows-the-palette)).
 
 ## Tier 2 runs anvil inside Xvfb
 
@@ -39,6 +41,8 @@ export XDG_RUNTIME_DIR=/tmp/lyncast-env.XXXXXX
 export WAYLAND_DISPLAY=wayland-1
 unset WAYLAND_SOCKET DISPLAY NIRI_SOCKET DBUS_SESSION_BUS_ADDRESS
 ```
+
+Xvfb keeps its screen in `$XDG_RUNTIME_DIR/Xvfb_screen0` (`-fbdir`), an XWD file that a Tier 2 test reads for a screenshot. The file holds 1280 by 800 pixels of 32 bits, about 4 MiB under `/tmp` for each environment.
 
 Commands under `run` get the same environment. The `unset` line keeps a child off the caller's Wayland, X, niri, and D-Bus sessions. libwayland tries `WAYLAND_SOCKET` before `WAYLAND_DISPLAY`, a real `NIRI_SOCKET` would launch real apps, and GPUI reads the color scheme and cursor theme from the desktop portal on the session bus (read in source, gpui-pre 0.3.9). anvil gets no `WAYLAND_DISPLAY`, so it opens inside Xvfb even when the script runs inside niri.
 
