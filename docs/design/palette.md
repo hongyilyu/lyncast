@@ -42,6 +42,12 @@ A failure leaves the window open and shows its reason in the footer until the ne
 
 Losing the keyboard focus closes the window, as TinyCast hides on focus loss ([notes/06](../research/notes/06-tinycast-behaviour-spec.md)), but only once the window has been active. The view tells the model whether the window is active as it opens and at each change. Under anvil the window turns active only with the first key that reaches it (a GPUI probe under anvil, 2026-10-17), and GPUI's test platform opens a window inactive (`gpui-pre` 0.3.9 `src/platform/test/window.rs:414-425`, read in source).
 
+## Ctrl+K opens the Actions menu
+
+Ctrl+K opens the selected row's Actions menu over the bottom right of the list, as [architecture.md](architecture.md#ctrlk-opens-the-actions-menu) describes it. The menu lists the row's items from its chord table, default first with the Enter key beside it. While the menu is open, the keys and text go to it. Up and Down move its selection, which stops at both ends. Text goes to the menu's own field, whose placeholder reads `Search for actions`, and the menu keeps the items whose folded label holds the folded text, as ranking folds a query. The menu's field moves its text and clips it as the root field does, and `the_caret_stays_in_the_field` composes and commits 1,024 bytes there too. A new filter selects the first item it keeps.
+
+Opening the menu ends the root field's composition, and the composing text stays as typed. Enter or Ctrl+Enter sends `activate` with the selected item's verb, and the activation goes on as one sent by Enter does: the window closes after a success, a failure shows in the footer, and a command that asks first asks. Escape, Ctrl+K, and Backspace in an empty filter close the menu, and the repeats of a held Ctrl+K or Backspace do not. Opening and closing the menu leave a failure's reason in the footer. The root field keeps its text throughout, and the footer names the menu's selected item while no failure shows there.
+
 ## The compositor's end stops the daemon
 
 When the compositor goes, GPUI's event loop ends and calls GPUI's quit hooks (`gpui-pre-linux` 0.3.9 `src/linux/platform.rs:608-624`). GPUI then drops its windows without calling `on_window_closed` (`gpui-pre` 0.3.9 `src/app.rs:1168-1184`), and runs no task on the main thread again. These were read in source. lyncast's quit hook takes the daemon from the host. Once GPUI's run returns, the daemon stops as the headless host does, with the summon closed, because its windows went with the loop. The capture thread sees the compositor go too, and that stops the daemon as Quit does. It prints `lyncast: the Wayland connection closed` and exits 1.
@@ -134,7 +140,8 @@ After each step, the runner runs GPUI's tasks until none is ready and the daemon
 - Each row, after `> ` when it is selected and after two spaces when it is not. An app or a command reads `<title>  (<kind>)`. The calculator's card reads `= <answer>  (<expression> · <badge>[ · <words>])`.
 - `No results` when the list is empty.
 - `confirm <title>?` while a command asks to be confirmed.
-- The footer: `footer: <default action> (enter)`, or `footer: <title> (enter) · Cancel (escape)` while a command asks, or `footer: pending` while an activation is out, or `footer: closing` after a success while the key is still down, or `footer: failed: <reason>`.
+- `menu "<filter>"`, or `menu (<placeholder>)`, while the Actions menu is open, then each item the filter keeps, after `> ` when it is selected and after two spaces when it is not, with `  (enter)` after the default. `No actions` when the filter keeps none.
+- The footer: `footer: <default action> (enter) · Actions (ctrl-k)`, or `footer: <title> (enter) · Cancel (escape)` while a command asks, or `footer: pending` while an activation is out, or `footer: closing` after a success while the key is still down, or `footer: failed: <reason>`.
 - `closed` once the window has gone, or `stopped` once the daemon's stop has finished too.
 
 ### The field searches as it changes
@@ -157,43 +164,43 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type 8x8
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 $ press ctrl-n
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press down
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press ctrl-p
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 $ press down up up
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 $ press down
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press escape
 root (Search for apps and commands)
 == Suggestions
@@ -209,7 +216,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press escape
 closed
 ```
@@ -234,7 +241,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press backspace
 root (Search for apps and commands)
 == Suggestions
@@ -250,32 +257,32 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fox
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press home
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ type fire
 root "firefox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press space
 root "fire fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press end backspace backspace backspace backspace
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press home delete delete delete delete backspace
 root (Search for apps and commands)
 == Suggestions
@@ -291,27 +298,27 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fox
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press left left
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ type i
 root "fiox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press right
 root "fiox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ type z
 root "fiozx"
 No results
@@ -337,12 +344,12 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ insert fire\r\nfox
 root "fire fox"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press escape
 root (Search for apps and commands)
 == Suggestions
@@ -358,7 +365,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ mark
 root ""
 == Suggestions
@@ -374,7 +381,7 @@ root ""
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ unmark
 root (Search for apps and commands)
 == Suggestions
@@ -390,17 +397,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ mark f
 root "f"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ insert fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 ```
 
 ### Each summon starts on an empty field
@@ -423,13 +430,13 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type 8x8
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 $ toggle
 closed
 $ open
@@ -447,7 +454,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 ```
 
 ### Enter runs the row on the press and closes the window on the release
@@ -470,12 +477,12 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press enter
 root "fire"
 == Results
@@ -521,17 +528,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ stall-runner
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press enter
 root "fire"
 == Results
@@ -572,17 +579,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ stall-runner
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press enter
 root "fire"
 == Results
@@ -597,7 +604,7 @@ record: ["firefox"]
 
 ### A failure stays in the footer, and a repeat activates nothing
 
-The card's Copy Answer fails without a compositor, and the window stays open with the reason in the footer. A repeat of Enter neither sends again nor clears the reason, and an input method's unmark does not clear it either. The next key that moves the selection clears it. A held Enter that the palette never saw go down sends nothing, and a repeat of Escape leaves the field's text. Copy Answer fails again, and typed text clears the reason too.
+The card's Copy Answer fails without a compositor, and the window stays open with the reason in the footer. A repeat of Enter neither sends again nor clears the reason, and an input method's unmark does not clear it either. The reason stays as the Actions menu opens and closes, by Ctrl+K, Escape, and Backspace. The next key that moves the selection clears it. A held Enter that the palette never saw go down sends nothing, and a repeat of Escape leaves the field's text. Copy Answer fails again, and typed text clears the reason too.
 
 ```palette
 $ open
@@ -615,13 +622,13 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type 8x8
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 $ press enter
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
@@ -646,24 +653,50 @@ root "8x8"
 == Results
   8x8  (Application)
 footer: failed: not copied: no Wayland compositor
+$ press ctrl-k
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+menu (Search for actions)
+> Copy Answer  (enter)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k escape
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k backspace
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
 $ press down
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ hold enter
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ hold escape
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press up enter
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
@@ -673,7 +706,7 @@ footer: failed: not copied: no Wayland compositor
 $ type 0
 root "8x80"
 > = 640  (8 × 80 · Product · Six Hundred Forty)
-footer: Copy Answer (enter)
+footer: Copy Answer (enter) · Actions (ctrl-k)
 ```
 
 ### Ctrl+Enter closes the window once Ctrl is up too
@@ -696,17 +729,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ mods ctrl
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press ctrl-enter
 root "fire"
 == Results
@@ -735,17 +768,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ type fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ mods ctrl
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open (enter)
+footer: Open (enter) · Actions (ctrl-k)
 $ press ctrl-enter
 root "fire"
 == Results
@@ -781,12 +814,12 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type reboot
 root "reboot"
 == Results
 > Reboot  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 root "reboot"
 == Results
@@ -809,7 +842,7 @@ $ press escape
 root "reboot"
 == Results
 > Reboot  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 root "reboot"
 == Results
@@ -826,7 +859,7 @@ $ press down
 root "reboot"
 == Results
 > Reboot  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 root "reboot"
 == Results
@@ -862,7 +895,7 @@ root (Search for apps and commands)
   Quit lyncast  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 root (Search for apps and commands)
 == Suggestions
@@ -884,7 +917,7 @@ $ type reb
 root "reb"
 == Results
 > Reboot  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press escape escape
 closed
 ```
@@ -909,7 +942,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ release space
 root (Search for apps and commands)
 == Suggestions
@@ -925,7 +958,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ mods none
 root (Search for apps and commands)
 == Suggestions
@@ -941,7 +974,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ release enter
 root (Search for apps and commands)
 == Suggestions
@@ -957,7 +990,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 root (Search for apps and commands)
 == Suggestions
@@ -973,7 +1006,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ release enter
 root (Search for apps and commands)
 == Suggestions
@@ -989,7 +1022,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 ```
 
 ### Focus loss closes only a window that has been active
@@ -1012,7 +1045,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ blur
 root (Search for apps and commands)
 == Suggestions
@@ -1028,7 +1061,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ focus
 root (Search for apps and commands)
 == Suggestions
@@ -1044,7 +1077,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ blur
 closed
 ```
@@ -1069,14 +1102,367 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ type quit
 root "quit"
 == Results
 > Quit lyncast  (Command)
-footer: Run (enter)
+footer: Run (enter) · Actions (ctrl-k)
 $ press enter
 stopped
+```
+
+### Ctrl+K opens the selected row's Actions menu
+
+The menu lists the row's items, Open first with its key, then the Desktop Action New Window, then Copy Path to .desktop. Text typed while the menu is open filters the menu, and the root field keeps its text. Enter runs the menu's selected item, here the Desktop Action.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ insert fire\nfox
+root "fire fox"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k
+root "fire fox"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ type new
+root "fire fox"
+== Results
+> Firefox  (Application)
+menu "new"
+> New Window
+footer: New Window (enter) · Actions (ctrl-k)
+$ press enter
+root "fire fox"
+== Results
+> Firefox  (Application)
+footer: closing
+record: ["firefox","--new-window"]
+$ release enter
+closed
+```
+
+### The menu's keys
+
+Down and Up move the menu's selection, which stops at both ends. A filter that keeps no item leaves Enter nothing to run. Backspace edits the filter, and in an empty filter it closes the menu. Ctrl+K and Escape close the menu too, and Escape does so before it clears the root field. The repeats of a held Backspace or Ctrl+K close nothing. Copy Path to .desktop fails without a compositor, and its reason shows in the footer. It stays as Ctrl+K opens the menu again, until text in the menu's filter clears it. After the next failure, Down in the menu clears it, and after the one after that, the Escape that clears the root field's text does.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k down down down
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+  Open  (enter)
+  New Window
+> Copy Path to .desktop
+footer: Copy Path to .desktop (enter) · Actions (ctrl-k)
+$ press up
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+  Open  (enter)
+> New Window
+  Copy Path to .desktop
+footer: New Window (enter) · Actions (ctrl-k)
+$ type zz
+root "fire"
+== Results
+> Firefox  (Application)
+menu "zz"
+No actions
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+menu "zz"
+No actions
+$ press backspace backspace
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ hold backspace
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ press backspace
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k ctrl-k
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ hold ctrl-k
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ press escape
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k up up down down
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+  Open  (enter)
+  New Window
+> Copy Path to .desktop
+footer: Copy Path to .desktop (enter) · Actions (ctrl-k)
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: failed: not copied: no Wayland compositor
+$ type c
+root "fire"
+== Results
+> Firefox  (Application)
+menu "c"
+> Copy Path to .desktop
+footer: Copy Path to .desktop (enter) · Actions (ctrl-k)
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k down
+root "fire"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+  Open  (enter)
+> New Window
+  Copy Path to .desktop
+footer: New Window (enter) · Actions (ctrl-k)
+$ press down enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press escape
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press escape
+closed
+```
+
+### Opening the menu ends the root field's composition
+
+An input method composes `f` in the root field. Ctrl+K ends the composition and keeps the `f`, so text the field takes after the menu closes goes after it. In the menu, the input method's unmark ends the composition in the menu's filter, and its placeholder shows again.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ mark f
+root "firef"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k escape
+root "firef"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ insert ox
+root "firefox"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ press ctrl-k
+root "firefox"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ mark
+root "firefox"
+== Results
+> Firefox  (Application)
+menu ""
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+$ unmark
+root "firefox"
+== Results
+> Firefox  (Application)
+menu (Search for actions)
+> Open  (enter)
+  New Window
+  Copy Path to .desktop
+footer: Open (enter) · Actions (ctrl-k)
+```
+
+### A menu pick of a command that asks first
+
+Run, picked from Reboot's menu, asks to be confirmed, and Enter at the question runs Reboot.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type reboot
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press ctrl-k
+root "reboot"
+== Results
+> Reboot  (Command)
+menu (Search for actions)
+> Run  (enter)
+footer: Run (enter) · Actions (ctrl-k)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ release enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: closing
+record: ["systemctl","reboot"]
+$ release enter
+closed
 ```
 
 ### The summon blocks run under anvil

@@ -26,9 +26,10 @@ impl Field {
         self.text.is_empty()
     }
 
-    /// An input method is composing, so the placeholder stays hidden even with no text.
-    pub fn composing(&self) -> bool {
-        self.marked.is_some()
+    /// The placeholder shows in an empty field while no input method composes, as TinyCast's
+    /// does. A composition can show no text yet.
+    pub fn shows_placeholder(&self) -> bool {
+        self.text.is_empty() && self.marked.is_none()
     }
 
     pub fn cursor(&self) -> usize {

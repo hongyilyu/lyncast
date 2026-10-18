@@ -44,6 +44,13 @@ pub const OVERDRAW: f32 = 200.0;
 
 pub const FOOTER: f32 = 36.0;
 
+/// The Actions menu: its background, width, item height, and its inset from the window's
+/// right edge and from the footer.
+pub const MENU: u32 = 0x262629;
+pub const MENU_WIDTH: f32 = 300.0;
+pub const MENU_ROW: f32 = 32.0;
+pub const MENU_INSET: f32 = 8.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

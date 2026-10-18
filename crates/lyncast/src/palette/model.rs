@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::mem;
 use std::ops::Range;
 
-use lyncast_core::{Chord, Key, Kind, Row, Section, calc};
+use lyncast_core::{ActionItem, Chord, Key, Kind, Row, Section, calc, fold};
 
 use super::field::Field;
 use crate::daemon::{After, Answer};
@@ -13,6 +13,10 @@ use crate::wire::{Request, Via};
 pub const PLACEHOLDER: &str = "Search for apps and commands";
 /// What an empty list shows.
 pub const NO_RESULTS: &str = "No results";
+/// What the Actions menu's empty field shows.
+pub const MENU_PLACEHOLDER: &str = "Search for actions";
+/// What the Actions menu shows when its filter keeps no item.
+pub const NO_ACTIONS: &str = "No actions";
 
 /// The key whose release closes the window after a success.
 const ACTIVATING: &str = "enter";
@@ -33,6 +37,21 @@ enum Overlay {
         via: Via,
         title: &'static str,
     },
+    Menu(Menu),
+}
+
+/// The Actions menu of one row: the row's items, default first, and a field that filters
+/// them. The keys and text go to it while it is open.
+pub struct Menu {
+    key: Key,
+    items: Vec<(Option<Chord>, ActionItem)>,
+    field: Field,
+    selected_shown: usize,
+}
+
+enum MenuAfter {
+    Edited,
+    Close,
 }
 
 enum Phase {
@@ -52,18 +71,29 @@ pub enum Footer<'m> {
     Failed(&'m str),
 }
 
-/// A key that the footer names, as the view draws its cap.
+/// A key that the footer or the menu names, as the view draws its cap.
 #[derive(Clone, Copy)]
 pub enum Cap {
     Enter,
     Escape,
+    CtrlK,
+    CtrlEnter,
 }
 
 impl Cap {
+    pub fn of(chord: Chord) -> Cap {
+        match chord {
+            Chord::Enter => Cap::Enter,
+            Chord::CtrlEnter => Cap::CtrlEnter,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Cap::Enter => "↵",
             Cap::Escape => "esc",
+            Cap::CtrlK => "Ctrl K",
+            Cap::CtrlEnter => "Ctrl ↵",
         }
     }
 
@@ -73,6 +103,8 @@ impl Cap {
         match self {
             Cap::Enter => "enter",
             Cap::Escape => "escape",
+            Cap::CtrlK => "ctrl-k",
+            Cap::CtrlEnter => "ctrl-enter",
         }
     }
 }
@@ -82,7 +114,7 @@ impl Footer<'_> {
     /// Enter runs.
     pub fn hints(&self) -> Vec<(&str, Cap)> {
         match self {
-            Footer::Hint(label) => vec![(label, Cap::Enter)],
+            Footer::Hint(label) => vec![(label, Cap::Enter), ("Actions", Cap::CtrlK)],
             Footer::Confirm(title) => vec![(title, Cap::Enter), ("Cancel", Cap::Escape)],
             Footer::Pending | Footer::Closing | Footer::Failed(_) => Vec::new(),
         }
@@ -106,8 +138,10 @@ pub enum Line {
 pub enum Press {
     /// The first press of Enter or Ctrl+Enter.
     Activate(Chord),
-    /// A held key's repeat of Enter or Escape, which the palette takes and drops.
+    /// A held key's repeat of Enter, Escape, or Ctrl+K, which the palette takes and drops.
     Ignore,
+    /// Ctrl+K: opens the selected row's Actions menu, or closes it.
+    Menu,
     Up,
     Down,
     Left,
@@ -115,7 +149,10 @@ pub enum Press {
     Home,
     End,
     Delete,
-    Backspace,
+    /// `held` for a held key's repeat, which deletes but never closes the menu.
+    Backspace {
+        held: bool,
+    },
     Escape,
 }
 
@@ -180,13 +217,22 @@ impl Model {
             Input::Press(Press::Activate(chord)) => return self.activate(Via::Chord(chord)),
             Input::Press(Press::Ignore) => return None,
             Input::Press(Press::Escape) => return self.escape(),
+            Input::Press(Press::Menu) => {
+                self.toggle_menu();
+                return None;
+            }
             Input::Unmark => {
-                self.field.unmark();
+                self.focused_mut().unmark();
                 return None;
             }
             input => {
-                // Any other key or text ends a failure's footer and a confirmation it does
-                // not answer.
+                if let Some(Overlay::Menu(menu)) = &mut self.overlay {
+                    match menu.edit(input) {
+                        MenuAfter::Edited => self.phase = Phase::Idle,
+                        MenuAfter::Close => self.overlay = None,
+                    }
+                    return None;
+                }
                 self.phase = Phase::Idle;
                 self.overlay = None;
                 self.edit(input)
@@ -242,13 +288,31 @@ impl Model {
         }
     }
 
+    /// The root list's field.
     pub fn field(&self) -> &Field {
         &self.field
     }
 
-    /// The placeholder shows in an empty field while no input method composes.
-    pub fn placeholder(&self) -> bool {
-        self.field.is_empty() && !self.field.composing()
+    /// The field that has the caret and gets the window's text: the menu's while it is open.
+    pub fn focused(&self) -> &Field {
+        match &self.overlay {
+            Some(Overlay::Menu(menu)) => &menu.field,
+            _ => &self.field,
+        }
+    }
+
+    fn focused_mut(&mut self) -> &mut Field {
+        match &mut self.overlay {
+            Some(Overlay::Menu(menu)) => &mut menu.field,
+            _ => &mut self.field,
+        }
+    }
+
+    pub fn menu(&self) -> Option<&Menu> {
+        match &self.overlay {
+            Some(Overlay::Menu(menu)) => Some(menu),
+            _ => None,
+        }
     }
 
     pub fn lines(&self) -> &[Line] {
@@ -277,6 +341,7 @@ impl Model {
             Phase::Failed(reason) => Footer::Failed(reason),
             Phase::Idle => match &self.overlay {
                 Some(Overlay::Confirm { title, .. }) => Footer::Confirm(title),
+                Some(Overlay::Menu(menu)) => Footer::Hint(menu.picked()?.label().to_owned()),
                 None => {
                     let row = self.rows.get(self.selected_row)?;
                     Footer::Hint(row.subject.actions().on(Chord::Enter).label().to_owned())
@@ -290,7 +355,7 @@ impl Model {
     #[cfg(test)]
     pub fn dump(&self) -> String {
         let mut out = String::new();
-        if self.placeholder() {
+        if self.field.shows_placeholder() {
             let _ = writeln!(out, "root ({PLACEHOLDER})");
         } else {
             let _ = writeln!(out, "root {:?}", self.field.text());
@@ -307,8 +372,35 @@ impl Model {
         if self.rows.is_empty() {
             let _ = writeln!(out, "{NO_RESULTS}");
         }
-        if let Some(Overlay::Confirm { title, .. }) = &self.overlay {
-            let _ = writeln!(out, "confirm {}", question(title));
+        match &self.overlay {
+            Some(Overlay::Confirm { title, .. }) => {
+                let _ = writeln!(out, "confirm {}", question(title));
+            }
+            Some(Overlay::Menu(menu)) => {
+                if menu.field.shows_placeholder() {
+                    let _ = writeln!(out, "menu ({MENU_PLACEHOLDER})");
+                } else {
+                    let _ = writeln!(out, "menu {:?}", menu.field.text());
+                }
+                for (at, (chord, item)) in menu.shown().enumerate() {
+                    let mark = if at == menu.selected_shown { ">" } else { " " };
+                    let _ = match chord {
+                        Some(chord) => {
+                            writeln!(
+                                out,
+                                "{mark} {}  ({})",
+                                item.label(),
+                                Cap::of(*chord).spelling()
+                            )
+                        }
+                        None => writeln!(out, "{mark} {}", item.label()),
+                    };
+                }
+                if menu.shown().next().is_none() {
+                    let _ = writeln!(out, "{NO_ACTIONS}");
+                }
+            }
+            None => {}
         }
         let _ = match self.footer() {
             Some(Footer::Pending) => writeln!(out, "footer: pending"),
@@ -340,42 +432,30 @@ impl Model {
                 self.selected_row = (self.selected_row + 1).min(self.rows.len().saturating_sub(1));
                 false
             }
-            Input::Press(Press::Backspace) => self.field.backspace(),
-            Input::Press(Press::Delete) => self.field.delete(),
-            Input::Press(Press::Left) => {
-                self.field.left();
-                false
-            }
-            Input::Press(Press::Right) => {
-                self.field.right();
-                false
-            }
-            Input::Press(Press::Home) => {
-                self.field.home();
-                false
-            }
-            Input::Press(Press::End) => {
-                self.field.end();
-                false
-            }
-            Input::Replace { utf16, text } => self.field.replace(utf16, &text),
-            Input::Mark {
-                utf16,
-                text,
-                selected,
-            } => self.field.mark(utf16, &text, selected),
-            // `input` takes these itself.
-            Input::Unmark | Input::Press(Press::Activate(_) | Press::Ignore | Press::Escape) => {
-                false
-            }
+            input => edit(&mut self.field, input),
         }
     }
 
+    fn toggle_menu(&mut self) {
+        self.field.unmark();
+        self.overlay = match self.overlay.take() {
+            Some(Overlay::Menu(_)) => None,
+            _ => self
+                .rows
+                .get(self.selected_row)
+                .map(|row| Overlay::Menu(Menu::new(row))),
+        };
+    }
+
     fn activate(&mut self, via: Via) -> Option<Effect> {
-        let (key, via, confirmed) = match self.overlay.take() {
-            Some(Overlay::Confirm { key, via, .. }) => (key, via, true),
+        let (key, via, confirmed) = match &self.overlay {
+            Some(Overlay::Confirm { key, via, .. }) => (key.clone(), via.clone(), true),
+            Some(Overlay::Menu(menu)) => {
+                (menu.key.clone(), Via::Menu(menu.picked()?.verb()), false)
+            }
             None => (self.rows.get(self.selected_row)?.subject.key(), via, false),
         };
+        self.overlay = None;
         self.phase = Phase::Pending {
             key: key.clone(),
             via: via.clone(),
@@ -422,14 +502,104 @@ impl Model {
     }
 
     fn escape(&mut self) -> Option<Effect> {
-        self.phase = Phase::Idle;
         if self.overlay.take().is_some() {
             return None;
         }
         if self.field.clear() {
+            self.phase = Phase::Idle;
             return Some(self.query());
         }
         Some(Effect::Close)
+    }
+}
+
+impl Menu {
+    fn new(row: &Row) -> Menu {
+        let actions = row.subject.actions();
+        let items = actions.iter().map(|(chord, item)| (chord, item.clone()));
+        Menu {
+            key: row.subject.key(),
+            items: items.collect(),
+            field: Field::default(),
+            selected_shown: 0,
+        }
+    }
+
+    pub fn field(&self) -> &Field {
+        &self.field
+    }
+
+    /// The items whose folded label holds the folded filter, in menu order.
+    pub fn shown(&self) -> impl Iterator<Item = &(Option<Chord>, ActionItem)> {
+        let filter = fold(self.field.text());
+        self.items
+            .iter()
+            .filter(move |(_, item)| fold(item.label()).lower().contains(filter.lower()))
+    }
+
+    pub fn is_selected(&self, at: usize) -> bool {
+        at == self.selected_shown
+    }
+
+    fn picked(&self) -> Option<&ActionItem> {
+        self.shown().nth(self.selected_shown).map(|(_, item)| item)
+    }
+
+    fn edit(&mut self, input: Input) -> MenuAfter {
+        match input {
+            Input::Press(Press::Up) => self.selected_shown = self.selected_shown.saturating_sub(1),
+            Input::Press(Press::Down) => {
+                self.selected_shown =
+                    (self.selected_shown + 1).min(self.shown().count().saturating_sub(1));
+            }
+            Input::Press(Press::Backspace { held: false }) if self.field.is_empty() => {
+                return MenuAfter::Close;
+            }
+            input => {
+                if edit(&mut self.field, input) {
+                    self.selected_shown = 0;
+                }
+            }
+        }
+        MenuAfter::Edited
+    }
+}
+
+fn edit(field: &mut Field, input: Input) -> bool {
+    match input {
+        Input::Press(Press::Backspace { .. }) => field.backspace(),
+        Input::Press(Press::Delete) => field.delete(),
+        Input::Press(Press::Left) => {
+            field.left();
+            false
+        }
+        Input::Press(Press::Right) => {
+            field.right();
+            false
+        }
+        Input::Press(Press::Home) => {
+            field.home();
+            false
+        }
+        Input::Press(Press::End) => {
+            field.end();
+            false
+        }
+        Input::Replace { utf16, text } => field.replace(utf16, &text),
+        Input::Mark {
+            utf16,
+            text,
+            selected,
+        } => field.mark(utf16, &text, selected),
+        Input::Unmark
+        | Input::Press(
+            Press::Activate(_)
+            | Press::Ignore
+            | Press::Menu
+            | Press::Up
+            | Press::Down
+            | Press::Escape,
+        ) => false,
     }
 }
 

@@ -1,5 +1,6 @@
 //! The palette's window. [`PaletteView`] holds the model, runs each effect the model asks for
-//! against the host and the window, and draws the field, the list, and the footer.
+//! against the host and the window, and draws the field, the list, the footer, and the Actions
+//! menu.
 
 mod draw;
 mod input;
@@ -8,15 +9,17 @@ pub(super) mod inspect;
 mod list;
 
 use futures::channel::oneshot;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext, Bounds, Context, ElementInputHandler, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, KeyUpEvent, ListAlignment, ListState, ModifiersChangedEvent, ParentElement,
-    Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, canvas, div, fill, point,
-    px, rgb, size,
+    AnyElement, AppContext, Bounds, Context, ElementInputHandler, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState, ModifiersChangedEvent,
+    ParentElement, Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, canvas, div,
+    fill, point, px, rgb, size,
 };
 
+use super::field::Field;
 use super::host::Host;
-use super::model::{self, Effect, Footer, Input, Landed, Line, Model};
+use super::model::{self, Cap, Effect, Footer, Input, Landed, Line, Menu, Model};
 use super::trace::Trace;
 use super::{keys, theme};
 use crate::daemon::Answer;
@@ -201,24 +204,7 @@ impl PaletteView {
     }
 
     fn field(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (view, focus) = (cx.entity(), self.focus.clone());
-        let (text, runs) = field_runs(&self.model);
-        let cursor = self.model.field().cursor();
-        let line = canvas(
-            move |_, window, _| shape(text, &runs, window),
-            move |bounds, line, window, cx| {
-                window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
-                let height = bounds.size.height;
-                let left = bounds.left() - scroll(&line, cursor, bounds.size.width);
-                let origin = point(left, bounds.top());
-                let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
-                let caret = point(left + line.x_for_index(cursor), bounds.top());
-                window.paint_quad(fill(
-                    Bounds::new(caret, size(px(theme::CARET_WIDTH), height)),
-                    rgb(theme::CARET),
-                ));
-            },
-        );
+        let focused = self.model.menu().is_none();
         div()
             .h(px(theme::FIELD))
             .flex_none()
@@ -227,13 +213,93 @@ impl PaletteView {
             .px_4()
             .border_b_1()
             .border_color(rgb(theme::BORDER))
+            .child(self.field_line(self.model.field(), model::PLACEHOLDER, focused, cx))
+    }
+
+    fn field_line(
+        &self,
+        field: &Field,
+        placeholder: &'static str,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (view, focus) = (cx.entity(), self.focus.clone());
+        let (text, runs) = field_runs(field, placeholder);
+        let cursor = field.cursor();
+        let line = canvas(
+            move |_, window, _| shape(text, &runs, window),
+            move |bounds, line, window, cx| {
+                if focused {
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
+                }
+                let height = bounds.size.height;
+                let left = bounds.left() - scroll(&line, cursor, bounds.size.width);
+                let origin = point(left, bounds.top());
+                let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+                if focused {
+                    let caret = point(left + line.x_for_index(cursor), bounds.top());
+                    let caret = Bounds::new(caret, size(px(theme::CARET_WIDTH), height));
+                    window.paint_quad(fill(caret, rgb(theme::CARET)));
+                }
+            },
+        );
+        div()
+            .w_full()
+            .h(px(theme::FIELD_LINE))
+            .overflow_hidden()
+            .when(focused, |clip| clip.debug_selector(|| FIELD.to_owned()))
+            .child(line.size_full())
+    }
+
+    fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
+        let items: Vec<AnyElement> = menu
+            .shown()
+            .enumerate()
+            .map(|(at, (chord, item))| {
+                let line = div()
+                    .h(px(theme::MENU_ROW))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .rounded(px(6.0))
+                    .child(item.label().to_owned())
+                    .children(chord.map(|chord| key_cap(Cap::of(chord).label())));
+                line.when(menu.is_selected(at), |line| line.bg(rgb(theme::SELECTED)))
+                    .into_any_element()
+            })
+            .collect();
+        let empty = items.is_empty().then(|| {
+            div()
+                .h(px(theme::MENU_ROW))
+                .flex()
+                .items_center()
+                .px_2()
+                .text_color(rgb(theme::MUTED))
+                .child(model::NO_ACTIONS)
+        });
+        div()
+            .absolute()
+            .right(px(theme::MENU_INSET))
+            .bottom(px(theme::FOOTER + theme::MENU_INSET))
+            .w(px(theme::MENU_WIDTH))
+            .flex()
+            .flex_col()
+            .p_1()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .bg(rgb(theme::MENU))
+            .children(items)
+            .children(empty)
             .child(
                 div()
-                    .w_full()
-                    .h(px(theme::FIELD_LINE))
-                    .overflow_hidden()
-                    .debug_selector(|| FIELD.to_owned())
-                    .child(line.size_full()),
+                    .mt_1()
+                    .pt_2()
+                    .px_2()
+                    .border_t_1()
+                    .border_color(rgb(theme::BORDER))
+                    .child(self.field_line(menu.field(), model::MENU_PLACEHOLDER, true, cx)),
             )
     }
 
@@ -300,8 +366,10 @@ impl Render for PaletteView {
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
             .font_family(theme::FONT)
+            .relative()
             .child(self.field(cx))
             .child(self.rows(cx))
             .child(self.footer())
+            .children(self.model.menu().map(|menu| self.menu(menu, cx)))
     }
 }

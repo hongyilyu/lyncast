@@ -8,8 +8,8 @@ use lyncast_core::Chord;
 use super::model::Press;
 
 /// What a key press means. `None` leaves the key to the input handler, which types its text.
-/// A held key repeats as presses with `is_held`. Only Enter's first press activates, and only
-/// Escape's first press takes a step.
+/// A held key repeats as presses with `is_held`. Only Enter's first press activates, only
+/// Escape's first press takes a step, and only Ctrl+K's first press opens or closes the menu.
 pub fn press(event: &KeyDownEvent) -> Option<Press> {
     let mods = event.keystroke.modifiers;
     let bare = !(mods.control || mods.alt || mods.platform);
@@ -27,9 +27,13 @@ pub fn press(event: &KeyDownEvent) -> Option<Press> {
         "home" if bare => Press::Home,
         "end" if bare => Press::End,
         "delete" if bare => Press::Delete,
-        "backspace" if bare => Press::Backspace,
+        "backspace" if bare => Press::Backspace {
+            held: event.is_held,
+        },
         "escape" if event.is_held => Press::Ignore,
         "escape" if bare => Press::Escape,
+        "k" if ctrl && event.is_held => Press::Ignore,
+        "k" if ctrl => Press::Menu,
         _ => return None,
     })
 }
