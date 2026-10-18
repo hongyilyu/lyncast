@@ -21,7 +21,7 @@ use super::clips::{self, ClipLine};
 use super::field::Field;
 use super::host::Host;
 use super::icons::Icons;
-use super::model::{self, Cap, Effect, Footer, Input, Landed, Menu, Model};
+use super::model::{self, Cap, Effect, Footer, Input, Landed, Landing, Menu, Model};
 use super::trace::Trace;
 use super::{keys, theme};
 use crate::daemon::{Answer, Daemon, Screen};
@@ -44,16 +44,19 @@ pub struct PaletteView {
     focus: FocusHandle,
     list: ListState,
     answer: Option<Task<()>>,
+    revision: u64,
     trace: Trace,
     seq: u32,
     traced_first: bool,
     _activation: Subscription,
+    _revision_watch: Option<Subscription>,
 }
 
 impl PaletteView {
     /// Takes the keyboard focus, so the field gets the window's text, and asks the host for
     /// the list of an empty field on `screen`. It tells the model whether the window is active
-    /// now and at each change.
+    /// now and at each change, and has the clipboard screen read its list again whenever the
+    /// daemon takes an event that is not a read.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<PaletteView>,
@@ -71,6 +74,19 @@ impl PaletteView {
             let effect = view.model.active(window.is_window_active());
             view.run(effect, window, cx);
         });
+        let upgraded = host.upgrade();
+        let revision = upgraded.as_ref().map_or(0, |host| host.read(cx).revision());
+        let revision_watch = upgraded.map(|host| {
+            cx.observe_in(&host, window, |view, host, window, cx| {
+                let revision = host.read(cx).revision();
+                if revision != view.revision {
+                    view.revision = revision;
+                    if let Some(effect) = view.model.refresh() {
+                        view.run(Some(effect), window, cx);
+                    }
+                }
+            })
+        });
         let mut view = PaletteView {
             model,
             host: host.clone(),
@@ -78,10 +94,12 @@ impl PaletteView {
             focus,
             list: ListState::new(0, ListAlignment::Top, px(theme::OVERDRAW)),
             answer: None,
+            revision,
             trace,
             seq,
             traced_first: false,
             _activation: activation,
+            _revision_watch: revision_watch,
         };
         view.run(Some(list), window, cx);
         view.run(opened, window, cx);
@@ -127,7 +145,7 @@ impl PaletteView {
                 Effect::Query(text) => match self.ask(Request::Query { text }, cx) {
                     Some(Asked::Now(Answer::Rows(rows))) => {
                         let next = self.model.land(Landed::Rows(rows), mods);
-                        self.reset_list();
+                        self.reset_list(Landing::Fresh);
                         next
                     }
                     Some(Asked::Now(Answer::Failed(_))) | None => Some(Effect::Close),
@@ -135,10 +153,14 @@ impl PaletteView {
                         unreachable!("the daemon answers a query with its rows at once")
                     }
                 },
-                Effect::Clips { filter, kinds } => match self.clip_lines(&filter, kinds, cx) {
+                Effect::Clips {
+                    filter,
+                    kinds,
+                    landing,
+                } => match self.clip_lines(&filter, kinds, cx) {
                     Some(lines) => {
-                        let next = self.model.land(Landed::Clips(lines), mods);
-                        self.reset_list();
+                        let next = self.model.land(Landed::Clips(lines, landing), mods);
+                        self.reset_list(landing);
                         next
                     }
                     None => Some(Effect::Close),
@@ -161,9 +183,13 @@ impl PaletteView {
         cx.notify();
     }
 
-    fn reset_list(&self) {
+    fn reset_list(&self, landing: Landing) {
+        let top = self.list.logical_scroll_top();
         let count = self.model.lines().len();
         self.list.reset_with_uniform_height(count, px(theme::ROW));
+        if landing == Landing::Refresh {
+            self.list.scroll_to(top);
+        }
     }
 
     fn clip_lines(&self, filter: &str, kinds: clips::Kinds, cx: &App) -> Option<Vec<ClipLine>> {

@@ -68,6 +68,10 @@ UTC0 => 10:00
 :$FIFO => 10:00
 ```
 
+The screen reads the history again each time the daemon takes an event that is not a read, such as a capture, so a clip copied in another app shows at once, and the selection stays on the clip it was on. The list keeps its scroll position across that read, so a row that stays where it was in the list stays where it was in the window. A selected clip that the read pushes past the list's edge scrolls back into view. `Owner::hand`, which every event goes through, counts those events, and the host tells the window when the count moves.
+
+Enter copies the selected clip and closes the palette once Enter is up, as any success does. Ctrl+K's menu holds Copy, then Pin or Unpin, then Delete. Pin, Unpin, and Delete close the palette too, as every other success does.
+
 Tab and Ctrl+T do nothing while the menu is open. Like any other key, Tab and Ctrl+T cancel a question.
 
 ## Rows show their app's icon
@@ -161,6 +165,7 @@ Exec=8x8
 |---|---|
 | `$ open`, `$ toggle` | sends `toggle` as a socket client sends it |
 | `$ history` | sends `activate cmd:clipboard-history` as `lyncast activate` sends it |
+| `$ capture <kind> <value>` | hands the daemon a capture as the capture thread does, at the clock's time, with a `clips` line's kind and value |
 | `$ type <text>` | GPUI's `simulate_input`, one key press for each char |
 | `$ press <keys>` | GPUI's `simulate_keystrokes`, one key press for each keystroke, in GPUI's syntax |
 | `$ insert <text>` | the input handler's `replace_text_in_range`, as an input method's commit calls it. `\n` and `\r` are line breaks |
@@ -2062,6 +2067,264 @@ clipboard (Search clipboard history) All Types
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 closed
+```
+
+### Enter copies a clip, and its menu pins, unpins, and deletes
+
+Enter copies the selected clip, which fails here with no compositor, and the reason stays in the footer as the menu opens. The menu's Pin, Unpin, and Delete close the window once Enter is up, as every success does, and the screen shows each change as soon as the daemon has made it, while Enter is still down. A pin goes after the pins before it, and an unpinned clip keeps the place its pin gave it among the rest, with its unpin as its last use. Once the selected clip is deleted, the selection stays where it was, on the clip that takes its place.
+
+```palette clips=history
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+menu (Search for actions)
+> Copy  (enter)
+  Pin
+  Delete
+footer: failed: not copied: no Wayland compositor
+$ press down enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+> text: alpha
+== Today
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: closing
+$ release enter
+closed
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+  text: alpha
+== Today
+> email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press up ctrl-k
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+> text: alpha
+== Today
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+menu (Search for actions)
+> Copy  (enter)
+  Unpin
+  Delete
+footer: Copy (enter) · Actions (ctrl-k)
+$ type un
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+> text: alpha
+== Today
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+menu "un"
+> Unpin
+footer: Unpin (enter) · Actions (ctrl-k)
+$ press enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: closing
+$ release enter
+closed
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-k
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+menu (Search for actions)
+> Copy  (enter)
+  Pin
+  Delete
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down down enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: closing
+$ release enter
+closed
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+```
+
+### A capture shows at once, and the selection stays
+
+The screen reads the history again when the daemon takes a capture. The new clip leads Today, and the selection stays on the clip it was on.
+
+```palette clips=history
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+  text: alpha
+> email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ capture text gamma
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+  text: gamma
+  text: alpha
+> email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ capture text me@example.org
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> email: me@example.org
+  text: gamma
+  text: alpha
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
 ```
 
 ### Tab and Ctrl+T end a question, and do nothing in the menu

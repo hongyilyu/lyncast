@@ -32,8 +32,8 @@ use super::view::inspect::Caret;
 use super::view::{FIELD, PaletteView};
 use super::zone::Zone;
 use super::{Exit, Mount};
-use crate::clip::{self, Clips};
-use crate::daemon::{self, Bell, Daemon, Events};
+use crate::clip::{self, Clips, Seen};
+use crate::daemon::{self, Bell, Daemon, Event, Events};
 use crate::doc::{self, Block};
 use crate::vars::Vars;
 use crate::wire::{Request, Via};
@@ -117,7 +117,7 @@ fn the_model_never_names_gpui() {
     }
 }
 
-const PALETTE_BLOCKS: usize = 24;
+const PALETTE_BLOCKS: usize = 26;
 
 #[test]
 fn every_palette_block_runs_as_the_doc_says() {
@@ -243,6 +243,23 @@ fn the_selection_stays_in_view() {
         inside(header, list),
         "the Pinned header at {header:?} is hidden"
     );
+    for step in ["press down"; 10].into_iter().chain(["press up"; 3]) {
+        palette.step(step).expect("the step runs");
+    }
+    let (before, _, _) = selected(&palette);
+    palette.step("capture text below").expect("the step runs");
+    let (after, _, list) = selected(&palette);
+    assert_eq!(before, after, "a capture below the selection moves its row");
+    assert!(inside(after, list), "the clip at {after:?} left the list");
+    for _ in 0..14 {
+        palette.step("press down").expect("the step runs");
+    }
+    palette.step("capture text above").expect("the step runs");
+    let (row, _, list) = selected(&palette);
+    assert!(
+        inside(row, list),
+        "a capture above the selection pushed its row to {row:?}, outside the list at {list:?}"
+    );
     let today: Vec<String> = (1..=30)
         .map(|n| format!("text clip {n:02} 2026-10-17T09:{n:02}"))
         .collect();
@@ -325,6 +342,26 @@ fn icons_stay_bounded() {
     assert!(palette.in_atlas(&last), "Zebra 400's icon is drawn");
     drop(palette);
     fs::remove_dir_all(&dir).expect("the icon tree goes");
+}
+
+#[test]
+fn the_revision_counts_what_is_not_a_read() {
+    let mut palette = Palette::new(Vec::new(), "revision");
+    let revision = |palette: &Palette| {
+        palette
+            .host
+            .read_with(&palette.cx, |host, _| host.revision())
+    };
+    palette.step("open").expect("the step runs");
+    let opened = revision(&palette);
+    palette.step("type abc").expect("the step runs");
+    for read in [Request::Status, Request::Clips] {
+        palette.events.send_or_drop(daemon::from_socket(read));
+    }
+    palette.settle();
+    assert_eq!(revision(&palette), opened, "reads leave the revision");
+    palette.step("capture text one").expect("the step runs");
+    assert_eq!(revision(&palette), opened + 1, "a capture moves it");
 }
 
 #[test]
@@ -558,6 +595,11 @@ impl Palette {
                         confirmed: false,
                         query: String::new(),
                     }));
+            }
+            ("capture", line) => {
+                let (kind, value) = line.split_once(' ').ok_or("capture <kind> <value>")?;
+                let entry = captured(kind, value)?;
+                self.events.send_or_drop(Event::Seen(Seen::Entry(entry)));
             }
             ("type", text) => self.visual()?.simulate_input(text),
             ("press", keys) => self.visual()?.simulate_keystrokes(keys),

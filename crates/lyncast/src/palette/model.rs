@@ -236,11 +236,20 @@ pub enum Landed {
     /// The root list for the field's text.
     Rows(Vec<Row>),
     /// The clipboard rows for the field's text and the type filter.
-    Clips(Vec<ClipLine>),
+    Clips(Vec<ClipLine>, Landing),
     /// The answer to the activation that is out.
     Answer(Answer),
     /// Clipboard History from a client, while the window is open.
     Show,
+}
+
+/// Where the selection goes when clipboard rows land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// To the newest row that is not pinned, else to the first.
+    Fresh,
+    /// To the same clip when it is still listed, else to the same place.
+    Refresh,
 }
 
 /// The one thing the view does next.
@@ -251,6 +260,7 @@ pub enum Effect {
     Clips {
         filter: String,
         kinds: Kinds,
+        landing: Landing,
     },
     /// Send the daemon this activation.
     Ask(Request),
@@ -274,7 +284,7 @@ impl Model {
             phase: Phase::Idle,
             was_active: false,
         };
-        let list = model.list();
+        let list = model.list(Landing::Fresh);
         (model, list)
     }
 
@@ -314,7 +324,7 @@ impl Model {
             Input::Press(Press::Backspace { held: false }) if self.field.is_empty() => self.back(),
             input => {
                 self.phase = Phase::Idle;
-                self.edit(input).then(|| self.list())
+                self.edit(input).then(|| self.list(Landing::Fresh))
             }
         }
     }
@@ -364,17 +374,32 @@ impl Model {
                 }
                 None
             }
-            Landed::Clips(clips) => {
+            Landed::Clips(clips, landing) => {
                 let Scope::Clipboard(clipboard) = &mut self.scope else {
                     return None;
                 };
+                let kept = clipboard.clips.get(self.selected_row).map(|clip| clip.id);
                 self.lines = day_lines(&clips);
-                self.selected_row = clips.iter().position(|clip| !clip.pinned).unwrap_or(0);
+                self.selected_row = match landing {
+                    Landing::Fresh => clips.iter().position(|clip| !clip.pinned).unwrap_or(0),
+                    Landing::Refresh => kept
+                        .and_then(|id| clips.iter().position(|clip| clip.id == id))
+                        .unwrap_or_else(|| self.selected_row.min(clips.len().saturating_sub(1))),
+                };
                 clipboard.clips = clips;
                 None
             }
             Landed::Answer(answer) => self.answered(answer, mods),
             Landed::Show => self.show_clipboard(),
+        }
+    }
+
+    /// The list the screen shows, read again, for a change to the history while it shows. The
+    /// root list is read again only when its text changes.
+    pub fn refresh(&self) -> Option<Effect> {
+        match self.scope {
+            Scope::Clipboard(_) => Some(self.list(Landing::Refresh)),
+            Scope::Root(_) => None,
         }
     }
 
@@ -559,13 +584,14 @@ impl Model {
         }
     }
 
-    fn list(&self) -> Effect {
+    fn list(&self, landing: Landing) -> Effect {
         let text = self.field.text().to_owned();
         match &self.scope {
             Scope::Root(_) => Effect::Query(text),
             Scope::Clipboard(clipboard) => Effect::Clips {
                 filter: text,
                 kinds: clipboard.kinds,
+                landing,
             },
         }
     }
@@ -574,7 +600,7 @@ impl Model {
         self.scope = scope;
         self.lines.clear();
         self.selected_row = 0;
-        Some(self.list())
+        Some(self.list(Landing::Fresh))
     }
 
     fn edit(&mut self, input: Input) -> bool {
@@ -603,7 +629,7 @@ impl Model {
             return None;
         };
         clipboard.kinds = clipboard.kinds.next();
-        Some(self.list())
+        Some(self.list(Landing::Fresh))
     }
 
     fn back(&mut self) -> Option<Effect> {
@@ -692,7 +718,7 @@ impl Model {
         }
         if self.field.clear() {
             self.phase = Phase::Idle;
-            return Some(self.list());
+            return Some(self.list(Landing::Fresh));
         }
         self.back().or(Some(Effect::Close))
     }
