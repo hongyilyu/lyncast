@@ -66,6 +66,7 @@ pub const PALETTE: Doc = Doc {
         "executable",
         "palette",
         "clips",
+        "sizes",
         "summon",
         "icon",
         "icons",

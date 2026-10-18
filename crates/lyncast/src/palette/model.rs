@@ -475,6 +475,14 @@ impl Model {
         self.lines.iter().position(|&other| other == line)
     }
 
+    /// The selected clip, on the clipboard screen.
+    pub fn selected_clip(&self) -> Option<&ClipLine> {
+        match &self.scope {
+            Scope::Clipboard(clipboard) => clipboard.clips.get(self.selected_row),
+            Scope::Root(_) => None,
+        }
+    }
+
     pub fn footer(&self) -> Option<Footer<'_>> {
         Some(match &self.phase {
             Phase::Pending { .. } => Footer::Pending,
@@ -492,9 +500,10 @@ impl Model {
     }
 
     /// The text of palette.md's `palette` blocks: the field, the lines with the selected row
-    /// marked, the overlay, and the footer.
+    /// marked, the clipboard screen's `preview`, which the view gives, and its information, the
+    /// overlay, and the footer.
     #[cfg(test)]
-    pub fn dump(&self) -> String {
+    pub fn dump(&self, preview: Option<&str>) -> String {
         let mut out = String::new();
         let field = if self.field.shows_placeholder() {
             format!("({})", self.placeholder())
@@ -521,6 +530,17 @@ impl Model {
         }
         if self.lines.is_empty() {
             let _ = writeln!(out, "{}", self.empty_text());
+        }
+        if let Some(preview) = preview {
+            let _ = writeln!(out, "preview: {preview}");
+        }
+        if let Some(clip) = self.selected_clip() {
+            let info: Vec<String> = clip
+                .info()
+                .into_iter()
+                .map(|(label, value)| format!("{label} {value}"))
+                .collect();
+            let _ = writeln!(out, "info: {}", info.join(" · "));
         }
         match &self.overlay {
             Some(Overlay::Confirm { title, .. }) => {

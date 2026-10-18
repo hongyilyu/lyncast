@@ -1,12 +1,13 @@
 //! The palette's window. [`PaletteView`] holds the model and runs each effect the model asks
 //! for against the host and the window. It draws the field, the footer, and the Actions menu,
-//! and its modules draw the list.
+//! and its modules draw the list and the clipboard screen's panes.
 
 mod draw;
 mod input;
 #[cfg(test)]
 pub(super) mod inspect;
 mod list;
+mod panes;
 
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder as _;
@@ -16,12 +17,15 @@ use gpui::{
     ModifiersChangedEvent, ParentElement, Render, Styled, Subscription, Task, TextAlign,
     WeakEntity, Window, canvas, div, fill, point, px, rgb, size,
 };
+use lyncast_core::ClipId;
+use lyncast_core::clip::Delivery;
 
 use super::clips::{self, ClipLine};
 use super::field::Field;
 use super::host::Host;
 use super::icons::Icons;
 use super::model::{self, Cap, Effect, Footer, Input, Landed, Landing, Menu, Model};
+use super::preview::{self, Preview};
 use super::trace::Trace;
 use super::{keys, theme};
 use crate::daemon::{Answer, Daemon, Screen};
@@ -179,6 +183,7 @@ impl PaletteView {
                 }
             };
         }
+        self.sync_preview(window, cx);
         self.reveal(window, cx);
         cx.notify();
     }
@@ -208,6 +213,30 @@ impl PaletteView {
 
     fn daemon<'a>(&self, cx: &'a App) -> Option<&'a Daemon> {
         self.host.upgrade()?.read(cx).daemon()
+    }
+
+    fn preview(&self, cx: &App) -> Option<Entity<Preview>> {
+        Some(self.host.upgrade()?.read(cx).preview())
+    }
+
+    fn sync_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.model.selected_clip().map(|clip| clip.id);
+        let Some(preview) = self.preview(cx) else {
+            return;
+        };
+        if preview.read(cx).of() == selected {
+            return;
+        }
+        let what = selected.and_then(|id| {
+            let clips = self.daemon(cx)?.clips();
+            let row = clips.get(id)?;
+            Some(preview::what(row, || clips.payload(&Delivery::Clip(id))))
+        });
+        preview.update(cx, |preview, cx| preview.select(selected, what, window, cx));
+    }
+
+    fn clip_preview(&self, id: ClipId, cx: &App) -> Option<String> {
+        self.daemon(cx)?.clips().get(id)?.preview.clone()
     }
 
     fn ask(&mut self, request: Request, cx: &mut Context<Self>) -> Option<Asked> {
@@ -438,7 +467,10 @@ impl Render for PaletteView {
             .font_family(theme::FONT)
             .relative()
             .child(self.field(cx))
-            .child(self.rows(cx))
+            .child(match self.model.kinds() {
+                Some(_) => self.clipboard(cx),
+                None => self.rows(cx),
+            })
             .child(self.footer())
             .children(self.model.menu().map(|menu| self.menu(menu, cx)))
     }

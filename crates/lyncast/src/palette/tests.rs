@@ -27,6 +27,7 @@ use super::clips::Civil;
 use super::field::MAX_BYTES;
 use super::host::Host;
 use super::icons::{self, CAPACITY, IconRoots, Icons};
+use super::preview::Preview;
 use super::trace::Trace;
 use super::view::inspect::Caret;
 use super::view::{FIELD, PaletteView};
@@ -117,7 +118,7 @@ fn the_model_never_names_gpui() {
     }
 }
 
-const PALETTE_BLOCKS: usize = 26;
+const PALETTE_BLOCKS: usize = 28;
 
 #[test]
 fn every_palette_block_runs_as_the_doc_says() {
@@ -345,6 +346,36 @@ fn icons_stay_bounded() {
 }
 
 #[test]
+fn the_preview_holds_one_image() {
+    let clips = clips_block("atlas");
+    let mut palette = Palette::build(Vec::new(), IconRoots::default(), &clips, "preview");
+    let image = |palette: &Palette| {
+        palette
+            .view(|view, cx| view.preview_image(cx))
+            .flatten()
+            .expect("the pane shows an image")
+    };
+    palette.step("history").expect("the step runs");
+    let newest = image(&palette);
+    assert!(palette.in_atlas(&newest), "the newest image is drawn");
+    palette.step("press down").expect("the step runs");
+    let older = image(&palette);
+    assert!(palette.in_atlas(&older), "the older image is drawn");
+    assert!(
+        !palette.in_atlas(&newest),
+        "the newest image left the atlas"
+    );
+    palette.step("press down").expect("the step runs");
+    assert!(
+        palette
+            .view(|view, cx| view.preview_image(cx))
+            .flatten()
+            .is_none()
+    );
+    assert!(!palette.in_atlas(&older), "the older image left the atlas");
+}
+
+#[test]
 fn the_revision_counts_what_is_not_a_read() {
     let mut palette = Palette::new(Vec::new(), "revision");
     let revision = |palette: &Palette| {
@@ -417,6 +448,15 @@ fn every_zone_reads_as_the_doc_says() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+fn clips_block(name: &str) -> Vec<String> {
+    let blocks = doc::PALETTE.blocks("clips");
+    let block = blocks
+        .iter()
+        .find(|block| block.args.first().is_some_and(|arg| arg == name))
+        .unwrap_or_else(|| panic!("palette.md holds no clips {name} block"));
+    block.lines.clone()
+}
+
 fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
     let clips = block
         .args
@@ -429,6 +469,7 @@ fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
             seeds.unwrap_or_else(|| panic!("line {}: no clips {name} block", block.line))
         });
     let clips = clips.map_or(&[][..], |clips| clips.lines.as_slice());
+    let counts = block.args.iter().any(|arg| arg == "counts");
     let mut palette = Palette::build(
         apps(fixtures),
         IconRoots::default(),
@@ -464,7 +505,14 @@ fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
             .filter(record)
             .map(|line| format!("{}\n", &line["record: ".len()..]))
             .collect();
-        let got_dump = palette.dump();
+        let mut got_dump = palette.dump();
+        if counts {
+            let counts = palette.preview(Preview::counts);
+            got_dump += &format!(
+                "loads: {} started, {} stopped, {} decoded, at most {} out\n",
+                counts.started, counts.stopped, counts.decoded, counts.most_out
+            );
+        }
         let recorded = palette.recorded();
         let got_record = String::from_utf8_lossy(recorded.get(before..).unwrap_or_default());
         if got_dump != want_dump || got_record != want_record {
@@ -520,6 +568,7 @@ struct Palette {
     exit: Exit,
     record: PathBuf,
     stalled: Option<Vec<u8>>,
+    tree: PathBuf,
 }
 
 impl Palette {
@@ -535,9 +584,18 @@ impl Palette {
         cx.executor().allow_parking();
         let record = scratch().join(format!("{}-{name}.runs", process::id()));
         let _ = fs::remove_file(&record);
+        let tree = tree(&format!("{}-{name}-", process::id()));
+        let _ = fs::remove_dir_all(&tree);
+        fs::create_dir_all(&tree).expect("the block's tree");
+        fs::write(tree.join("photo.png"), icons::tests::png(3, 2)).expect("photo.png");
+        mkfifo(&tree.join("fifo.png")).expect("fifo.png");
+        let big = File::create(tree.join("big.png")).expect("big.png");
+        big.set_len(super::preview::MAX_FILE_BYTES + 1)
+            .expect("big.png's size");
         let mut history = Clips::open(None, Retention::Forever, |_| {}, || {}).unwrap();
         for line in clips {
-            seed(&mut history, line).unwrap_or_else(|error| panic!("clips line {line}: {error}"));
+            let line = line.replace("$TREE", &tree.to_string_lossy());
+            seed(&mut history, &line).unwrap_or_else(|error| panic!("clips line {line}: {error}"));
         }
         let index = Index::new(apps);
         let daemon = Daemon::new(
@@ -567,6 +625,7 @@ impl Palette {
             exit,
             record,
             stalled: None,
+            tree,
         };
         palette.settle();
         palette
@@ -597,12 +656,24 @@ impl Palette {
                     }));
             }
             ("capture", line) => {
+                let line = line.replace("$TREE", &self.tree.to_string_lossy());
                 let (kind, value) = line.split_once(' ').ok_or("capture <kind> <value>")?;
                 let entry = captured(kind, value)?;
                 self.events.send_or_drop(Event::Seen(Seen::Entry(entry)));
             }
             ("type", text) => self.visual()?.simulate_input(text),
             ("press", keys) => self.visual()?.simulate_keystrokes(keys),
+            ("dispatch", keys) => {
+                let window = self.window().ok_or("no window is open")?;
+                for key in keys.split(' ') {
+                    self.cx.dispatch_keystroke(window.into(), keystroke(key)?);
+                }
+            }
+            ("decode", "") => {
+                let scheduler = self.cx.dispatcher.scheduler();
+                while scheduler.pending_task_counts().1 == 0 && scheduler.tick() {}
+                while scheduler.tick_background_only() {}
+            }
             ("insert", text) => {
                 let text = text.replace("\\n", "\n").replace("\\r", "\r");
                 self.input(|view, window, cx| view.replace_text_in_range(None, &text, window, cx))?;
@@ -710,6 +781,11 @@ impl Palette {
         icons.read_with(&self.cx, |icons, _| read(icons))
     }
 
+    fn preview<R>(&self, read: impl FnOnce(&Preview) -> R) -> R {
+        let preview = self.host.read_with(&self.cx, |host, _| host.preview());
+        preview.read_with(&self.cx, |preview, _| read(preview))
+    }
+
     fn in_atlas(&mut self, image: &RenderImage) -> bool {
         let window = self.window().expect("an open window");
         window
@@ -725,12 +801,13 @@ impl Palette {
     }
 
     fn dump(&self) -> String {
-        let dump = self.view(|view, _| view.dump());
-        dump.unwrap_or_else(|| match &*self.exit.outcome.borrow() {
+        let dump = self.view(|view, cx| view.dump(cx));
+        let dump = dump.unwrap_or_else(|| match &*self.exit.outcome.borrow() {
             None => "closed\n".to_owned(),
             Some(Ok(())) => "stopped\n".to_owned(),
             Some(Err(error)) => format!("stopped: {error}\n"),
-        })
+        });
+        dump.replace(&*self.tree.to_string_lossy(), "$TREE")
     }
 
     fn recorded(&self) -> Vec<u8> {
@@ -779,10 +856,56 @@ fn captured(kind: &str, value: &str) -> Result<clip::Entry, String> {
                 Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
             });
             let (width, height) = size.ok_or("image <w>x<h>")?;
-            clip::Entry::captured_image(icons::tests::png(width, height))
+            let png = if u64::from(width) * u64::from(height) > super::preview::MAX_PIXELS {
+                png_header(width, height)
+            } else {
+                icons::tests::png(width, height)
+            };
+            clip::Entry::captured_image(png)
         }
         _ => return Err(format!("no clip kind {kind}")),
     })
+}
+
+fn png_header(width: u32, height: u32) -> Vec<u8> {
+    let chunk = |kind: &[u8; 4], data: &[u8]| {
+        let body = [kind.as_slice(), data].concat();
+        let length = u32::try_from(data.len()).expect("a short chunk");
+        [
+            &length.to_be_bytes()[..],
+            &body,
+            &crc32(&body).to_be_bytes(),
+        ]
+        .concat()
+    };
+    let header = [
+        &width.to_be_bytes()[..],
+        &height.to_be_bytes(),
+        &[8, 6, 0, 0, 0],
+    ]
+    .concat();
+    [
+        &b"\x89PNG\r\n\x1a\n"[..],
+        &chunk(b"IHDR", &header),
+        &chunk(b"IDAT", &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]),
+        &chunk(b"IEND", &[]),
+    ]
+    .concat()
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 impl Drop for Palette {
@@ -790,7 +913,19 @@ impl Drop for Palette {
         self.cx.quit();
         let _ = fs::remove_file(&self.record);
         let _ = fs::remove_file(self.record.with_extension("lock"));
+        let _ = fs::remove_dir_all(&self.tree);
     }
+}
+
+const STABLE_TREE_PATH_BYTES: usize = 240;
+
+fn tree(name: &str) -> PathBuf {
+    let start = scratch().join(name);
+    let start = start.to_str().expect("a UTF-8 scratch path");
+    let pad = STABLE_TREE_PATH_BYTES
+        .checked_sub(start.len())
+        .unwrap_or_else(|| panic!("{start} is over {STABLE_TREE_PATH_BYTES} bytes"));
+    PathBuf::from(format!("{start}{}", "x".repeat(pad)))
 }
 
 fn mkfifo(path: &Path) -> Result<(), String> {

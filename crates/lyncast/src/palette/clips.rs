@@ -149,6 +149,11 @@ pub struct ClipLine {
     pub title: String,
     /// The group it shows under: Pinned, or the day of its last use.
     pub day: Day,
+    /// The day and time of its last use.
+    pub used: (Day, Civil),
+    /// A file list's first path.
+    pub path: Option<String>,
+    pub bytes: u64,
 }
 
 impl ClipLine {
@@ -169,6 +174,24 @@ impl ClipLine {
             Content::Image => "I",
             Content::Files => "F",
         }
+    }
+
+    /// The information panel's lines, as a label and a value each.
+    pub fn info(&self) -> Vec<(&'static str, String)> {
+        let kind = match self.content {
+            Content::Text(TextKind::Text) => "Text",
+            Content::Text(TextKind::Link) => "Link",
+            Content::Text(TextKind::Email) => "Email",
+            Content::Image => "Image",
+            Content::Files => "Files",
+        };
+        let (day, time) = self.used;
+        let mut info = vec![("Source", "—".to_owned()), ("Type", kind.to_owned())];
+        info.extend(self.path.clone().map(|path| ("Path", path)));
+        info.push(("Size", size(self.bytes)));
+        let copied = format!("{} at {:02}:{:02}", day.label(), time.hour, time.minute);
+        info.push(("Copied", copied));
+        info
     }
 }
 
@@ -196,13 +219,22 @@ pub fn clip_lines(
     rows.iter()
         .filter(|row| kinds.keeps(row.content) && found(row))
         .map(|row| {
-            let used = Day::of(date(row.used()), today);
+            let used = date(row.used());
+            let used_day = Day::of(used, today);
             ClipLine {
                 id: row.id,
                 pinned: row.pinned,
                 content: row.content,
                 title: title(row),
-                day: if row.pinned { Day::Pinned } else { used },
+                day: if row.pinned { Day::Pinned } else { used_day },
+                used: (used_day, used),
+                path: row
+                    .preview
+                    .as_deref()
+                    .filter(|_| row.content == Content::Files)
+                    .and_then(|preview| preview.lines().next())
+                    .map(str::to_owned),
+                bytes: row.bytes,
             }
         })
         .collect()
@@ -234,6 +266,20 @@ fn title(row: &Row) -> String {
     }
 }
 
+/// A size as the information panel shows it: bytes under 1,000, then kilobytes and megabytes of
+/// 1,000 with one decimal.
+fn size(bytes: u64) -> String {
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let kilo = (bytes as f64 / 100.0).round() / 10.0;
+    if kilo < 1000.0 {
+        return format!("{kilo:.1} kB");
+    }
+    let mega = (bytes as f64 / 100_000.0).round() / 10.0;
+    format!("{mega:.1} MB")
+}
+
 /// The year, month, and day of the day `days` after 1970-01-01, in the proleptic Gregorian
 /// calendar (Howard Hinnant's `civil_from_days`).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
@@ -261,4 +307,22 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let of_year = (153 * from_march + 2) / 5 + i64::from(day) - 1;
     let of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + of_year;
     era * 146_097 + of_era - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size;
+    use crate::doc;
+
+    #[test]
+    fn every_size_reads_as_the_doc_says() {
+        let blocks = doc::PALETTE.blocks("sizes");
+        let [block] = &blocks[..] else {
+            panic!("palette.md holds one sizes block");
+        };
+        for line in &block.lines {
+            let (bytes, shown) = line.split_once(" => ").expect("<bytes> => <size>");
+            assert_eq!(size(bytes.parse().expect("bytes")), shown, "{line}");
+        }
+    }
 }

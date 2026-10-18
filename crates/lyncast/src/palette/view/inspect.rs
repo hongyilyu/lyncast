@@ -1,9 +1,15 @@
 //! What the Tier 3 tests read of a window.
 
-use gpui::{Background, Bounds, Context, EntityInputHandler, Pixels, ScaledPixels, Window, rgb};
+use std::sync::Arc;
+
+use gpui::{
+    App, Background, Bounds, Context, EntityInputHandler, Pixels, RenderImage, ScaledPixels,
+    Window, rgb,
+};
 
 use super::PaletteView;
 use crate::palette::model::{Item, Line};
+use crate::palette::preview::Shown;
 use crate::palette::theme;
 
 /// Where in its field the window draws the caret.
@@ -16,8 +22,43 @@ pub enum Caret {
 
 impl PaletteView {
     /// palette.md's `palette` block text for this window.
-    pub fn dump(&self) -> String {
-        self.model.dump()
+    pub fn dump(&self, cx: &App) -> String {
+        let preview = self.preview_line(cx);
+        self.model.dump(preview.as_deref())
+    }
+
+    fn preview_line(&self, cx: &App) -> Option<String> {
+        let id = self.model.selected_clip()?.id;
+        let preview = self.preview(cx)?;
+        Some(match preview.read(cx).shown() {
+            None => "none".to_owned(),
+            Some(Shown::Text) => format!("text {:?}", self.clip_preview(id, cx)?),
+            Some(Shown::Files) => format!("files {:?}", self.clip_preview(id, cx)?),
+            Some(Shown::Loading) => "loading".to_owned(),
+            Some(Shown::Image {
+                image,
+                width,
+                height,
+            }) => {
+                let drawn = image.size(0);
+                format!(
+                    "image {width}x{height} drawn {}x{}",
+                    drawn.width.0, drawn.height.0
+                )
+            }
+            Some(Shown::TooLarge { width, height }) => {
+                format!("image too large {width}x{height}")
+            }
+            Some(Shown::Unreadable(reason)) => format!("no image: {reason}"),
+        })
+    }
+
+    /// The image the preview pane shows, if it shows one.
+    pub fn preview_image(&self, cx: &App) -> Option<Arc<RenderImage>> {
+        match self.preview(cx)?.read(cx).shown()? {
+            Shown::Image { image, .. } => Some(Arc::clone(image)),
+            _ => None,
+        }
     }
 
     /// The bounds of the selected line and of the line before it, if the list drew them, and
