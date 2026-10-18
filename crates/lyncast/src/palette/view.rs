@@ -1,6 +1,6 @@
-//! The palette's window. [`PaletteView`] holds the model, runs each effect the model asks for
-//! against the host and the window, and draws the field, the list, the footer, and the Actions
-//! menu.
+//! The palette's window. [`PaletteView`] holds the model and runs each effect the model asks
+//! for against the host and the window. It draws the field, the footer, and the Actions menu,
+//! and its modules draw the list.
 
 mod draw;
 mod input;
@@ -11,19 +11,20 @@ mod list;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext, Bounds, Context, ElementInputHandler, Entity, FocusHandle,
+    AnyElement, App, AppContext, Bounds, Context, ElementInputHandler, Entity, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
     ModifiersChangedEvent, ParentElement, Render, Styled, Subscription, Task, TextAlign,
     WeakEntity, Window, canvas, div, fill, point, px, rgb, size,
 };
 
+use super::clips::{self, ClipLine};
 use super::field::Field;
 use super::host::Host;
 use super::icons::Icons;
-use super::model::{self, Cap, Effect, Footer, Input, Landed, Line, Menu, Model};
+use super::model::{self, Cap, Effect, Footer, Input, Landed, Menu, Model};
 use super::trace::Trace;
 use super::{keys, theme};
-use crate::daemon::Answer;
+use crate::daemon::{Answer, Daemon, Screen};
 use crate::wire::Request;
 use draw::{field_runs, key_cap, scroll, shape};
 
@@ -51,19 +52,20 @@ pub struct PaletteView {
 
 impl PaletteView {
     /// Takes the keyboard focus, so the field gets the window's text, and asks the host for
-    /// the root list of an empty field. It tells the model whether the window is active now
-    /// and at each change.
+    /// the list of an empty field on `screen`. It tells the model whether the window is active
+    /// now and at each change.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<PaletteView>,
         host: &WeakEntity<Host>,
         icons: Entity<Icons>,
+        screen: Screen,
         trace: Trace,
         seq: u32,
     ) -> PaletteView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let (mut model, query) = Model::new();
+        let (mut model, list) = Model::new(screen);
         let opened = model.active(window.is_window_active());
         let activation = cx.observe_window_activation(window, |view, window, cx| {
             let effect = view.model.active(window.is_window_active());
@@ -81,9 +83,15 @@ impl PaletteView {
             traced_first: false,
             _activation: activation,
         };
-        view.run(Some(query), window, cx);
+        view.run(Some(list), window, cx);
         view.run(opened, window, cx);
         view
+    }
+
+    /// Clipboard History from a client while the window is open.
+    pub fn show_clipboard(&mut self, window: &mut Window, cx: &mut Context<PaletteView>) {
+        let effect = self.model.land(Landed::Show, window.modifiers().modified());
+        self.run(effect, window, cx);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -119,14 +127,21 @@ impl PaletteView {
                 Effect::Query(text) => match self.ask(Request::Query { text }, cx) {
                     Some(Asked::Now(Answer::Rows(rows))) => {
                         let next = self.model.land(Landed::Rows(rows), mods);
-                        let count = self.model.lines().len();
-                        self.list.reset_with_uniform_height(count, px(theme::ROW));
+                        self.reset_list();
                         next
                     }
                     Some(Asked::Now(Answer::Failed(_))) | None => Some(Effect::Close),
                     Some(Asked::Now(_) | Asked::Later(_)) => {
                         unreachable!("the daemon answers a query with its rows at once")
                     }
+                },
+                Effect::Clips { filter, kinds } => match self.clip_lines(&filter, kinds, cx) {
+                    Some(lines) => {
+                        let next = self.model.land(Landed::Clips(lines), mods);
+                        self.reset_list();
+                        next
+                    }
+                    None => Some(Effect::Close),
                 },
                 Effect::Ask(request) => match self.ask(request, cx) {
                     Some(Asked::Now(answer)) => self.model.land(Landed::Answer(answer), mods),
@@ -142,8 +157,31 @@ impl PaletteView {
                 }
             };
         }
-        self.reveal();
+        self.reveal(window, cx);
         cx.notify();
+    }
+
+    fn reset_list(&self) {
+        let count = self.model.lines().len();
+        self.list.reset_with_uniform_height(count, px(theme::ROW));
+    }
+
+    fn clip_lines(&self, filter: &str, kinds: clips::Kinds, cx: &App) -> Option<Vec<ClipLine>> {
+        let host = self.host.upgrade()?;
+        let host = host.read(cx);
+        let (zone, now) = host.wall()?;
+        let rows = host.daemon()?.clips().rows();
+        Some(clips::clip_lines(
+            &rows,
+            filter,
+            kinds,
+            |at| zone.date(at),
+            zone.date(now),
+        ))
+    }
+
+    fn daemon<'a>(&self, cx: &'a App) -> Option<&'a Daemon> {
+        self.host.upgrade()?.read(cx).daemon()
     }
 
     fn ask(&mut self, request: Request, cx: &mut Context<Self>) -> Option<Asked> {
@@ -167,21 +205,6 @@ impl PaletteView {
                 view.run(effect, window, cx);
             });
         }));
-    }
-
-    /// A list that has not been laid out has no height to scroll in, and it shows its top, where
-    /// the first list's selection is.
-    fn reveal(&self) {
-        let Some(line) = self.model.selected_line() else {
-            return;
-        };
-        if self.list.viewport_bounds().size.height <= px(0.0) {
-            return;
-        }
-        if line > 0 && matches!(self.model.lines()[line - 1], Line::Header(_)) {
-            self.list.scroll_to_reveal_item(line - 1);
-        }
-        self.list.scroll_to_reveal_item(line);
     }
 
     /// `open_window` lays out and paints before it returns, but presents later: the next frame
@@ -209,15 +232,32 @@ impl PaletteView {
 
     fn field(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.model.menu().is_none();
+        let kinds = self.model.kinds().map(|kinds| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .child(kinds.label())
+                .child(key_cap("Ctrl T"))
+        });
         div()
             .h(px(theme::FIELD))
             .flex_none()
             .flex()
             .items_center()
+            .gap_3()
             .px_4()
             .border_b_1()
             .border_color(rgb(theme::BORDER))
-            .child(self.field_line(self.model.field(), model::PLACEHOLDER, focused, cx))
+            .child(div().flex_1().min_w_0().child(self.field_line(
+                self.model.field(),
+                self.model.placeholder(),
+                focused,
+                cx,
+            )))
+            .children(kinds)
     }
 
     fn field_line(

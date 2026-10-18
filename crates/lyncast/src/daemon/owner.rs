@@ -7,10 +7,11 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
+use lyncast_core::rank::Timestamp;
 
 use super::face::{Face, IsOpen, Windowless, apply};
 use super::runner::Runner;
-use super::serve::{Claim, Event, Events, ReplyTo, Socket, WAYLAND_CLOSED, now, spawn_with};
+use super::serve::{Claim, Event, Events, ReplyTo, Socket, WAYLAND_CLOSED, spawn_with};
 use super::{Answer, Daemon, Done, Handled, Job, QUIT_WAIT, Success, Task, Work, quitting};
 use crate::clip::{Copier, Payload, Seen};
 use crate::view;
@@ -82,6 +83,7 @@ pub(crate) struct Owner {
     runner: Runner,
     copier: Option<Copier>,
     unwritten: Unwritten,
+    now: fn() -> Timestamp,
 }
 
 enum Phase {
@@ -140,6 +142,7 @@ impl Owner {
         events: Events,
         runner: Runner,
         copier: Option<Copier>,
+        now: fn() -> Timestamp,
     ) -> Owner {
         Owner {
             daemon,
@@ -150,12 +153,18 @@ impl Owner {
             runner,
             copier,
             unwritten: Unwritten::default(),
+            now,
         }
     }
 
-    /// The daemon, for reads that change nothing.
+    /// The daemon, for reads that change nothing, such as the clipboard history.
     pub(crate) fn daemon(&self) -> &Daemon {
         &self.daemon
+    }
+
+    /// The time now, by the clock the owner hands the daemon with each event.
+    pub(crate) fn now(&self) -> Timestamp {
+        (self.now)()
     }
 
     /// The palette's own request, which skips the inbox. Its answer is in the receiver at once
@@ -299,7 +308,7 @@ impl Owner {
     #[must_use]
     fn dispatch(&mut self, face: &mut dyn Face, event: Event) -> Option<Stop> {
         match event {
-            Event::Request(request, reply_to) => match self.daemon.handle(request, now()) {
+            Event::Request(request, reply_to) => match self.daemon.handle(request, (self.now)()) {
                 Handled::Quit(answer) => return Some(Stop::Quit(answer, reply_to)),
                 handled => self.answer(handled, reply_to, face),
             },
@@ -318,13 +327,13 @@ impl Owner {
     fn drain(&mut self, face: &mut dyn Face, event: Event) {
         match event {
             Event::Request(request, reply_to) => {
-                let handled = self.daemon.handle(request, now());
+                let handled = self.daemon.handle(request, (self.now)());
                 self.answer(handled, reply_to, face);
             }
-            Event::Seen(Seen::Entry(entry)) => self.daemon.captured(entry, now()),
+            Event::Seen(Seen::Entry(entry)) => self.daemon.captured(entry, (self.now)()),
             Event::Seen(Seen::Ended | Seen::Closed) => self.daemon.capture_ended(),
             Event::Finished(success, done, reply_to) => {
-                let answer = self.daemon.finish(success, done, now());
+                let answer = self.daemon.finish(success, done, (self.now)());
                 self.unwritten.deliver(reply_to, answer, face);
             }
             Event::WriterEnded(writer) => self.daemon.writer_ended(writer),
@@ -389,7 +398,7 @@ impl Owner {
         );
         if let Err(((_, success, reply_to), error)) = started {
             let done = Err(format!("not run: {error}"));
-            let answer = self.daemon.finish(success, done, now());
+            let answer = self.daemon.finish(success, done, (self.now)());
             self.unwritten.deliver(reply_to, answer, face);
         }
     }

@@ -3,7 +3,7 @@
 use gpui::{Background, Bounds, Context, EntityInputHandler, Pixels, ScaledPixels, Window, rgb};
 
 use super::PaletteView;
-use crate::palette::model::Line;
+use crate::palette::model::{Item, Line};
 use crate::palette::theme;
 
 /// Where in its field the window draws the caret.
@@ -45,7 +45,10 @@ impl PaletteView {
         lines
             .filter(|(at, _)| self.list.bounds_for_item(*at).is_some())
             .filter_map(|(_, line)| match *line {
-                Line::Row(row) => Some(self.model.row(row).title.clone()),
+                Line::Row(at) => Some(match self.model.item(at) {
+                    Item::Row(row) => row.title.clone(),
+                    Item::Clip(clip) => clip.title.clone(),
+                }),
                 Line::Header(_) => None,
             })
             .collect()

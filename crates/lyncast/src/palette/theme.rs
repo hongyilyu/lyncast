@@ -33,10 +33,12 @@ pub const FIELD_LINE: f32 = 24.0;
 pub const FIELD_TEXT: f32 = 18.0;
 pub const CARET_WIDTH: f32 = 2.0;
 
-/// A section header's height, a row's, and the calculator card's.
+/// A section header's height, a row's, and the calculator card's, and the list's padding above
+/// and below them.
 pub const HEADER: f32 = 28.0;
 pub const ROW: f32 = 40.0;
 pub const CARD: f32 = 84.0;
+pub const LIST_PAD: f32 = 4.0;
 
 /// The side of a row's icon, and of the letter square that stands in for one.
 pub const ICON: f32 = 24.0;

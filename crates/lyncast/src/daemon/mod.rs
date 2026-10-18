@@ -106,8 +106,16 @@ pub enum Ask {
 #[derive(Clone, Copy)]
 pub enum After {
     Close,
-    /// Clipboard History's: open the summon, or leave it open.
+    /// Clipboard History's: open the summon on the clipboard screen, or show that screen in the
+    /// open one.
     ShowClipboard,
+}
+
+/// What a summon shows: the root list, or the clipboard screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Root,
+    Clipboard,
 }
 
 /// An activation's work that waits, and what the activation does once the work succeeds.
@@ -250,6 +258,10 @@ impl Daemon {
     /// The writer of the clips could not save the new row `id`, so the history drops it.
     pub fn unsaved(&mut self, id: ClipId) {
         self.clips.unsaved(id);
+    }
+
+    pub fn clips(&self) -> &Clips {
+        &self.clips
     }
 
     /// The environment the daemon read at start.
