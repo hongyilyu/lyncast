@@ -1,4 +1,7 @@
+mod field;
 mod host;
+mod keys;
+mod model;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -13,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, QuitMode, WeakEntity, WindowBounds, WindowHandle,
+    App, AppContext, AsyncApp, Bounds, Entity, QuitMode, WeakEntity, WindowBounds, WindowHandle,
     WindowKind, WindowOptions, WindowingModes, point, px, size,
 };
 
@@ -48,43 +51,79 @@ pub fn run(record: Option<PathBuf>, trace: bool) -> Result<(), String> {
 fn serve(record: Option<PathBuf>, trace: Trace) -> Result<(), String> {
     let (bell, rung) = Bell::new();
     let owner = daemon::start(record, Some(bell))?;
-    let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::default();
-    let leftover: Rc<RefCell<Option<Owner>>> = Rc::default();
-    let (ended, kept) = (Rc::clone(&outcome), Rc::clone(&leftover));
+    let exit = Exit::default();
+    let mounted = Mount {
+        owner,
+        rung,
+        trace,
+        exit: exit.clone(),
+    };
     gpui_platform::linux(WindowingModes::WAYLAND)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
-            let host = cx.new(|_| Host::new(owner, trace));
-            let weak = host.downgrade();
-            let closed = weak.clone();
-            cx.on_window_closed(move |cx, id| {
-                let _ = closed.update(cx, |host, _| host.closed(id));
-            })
-            .detach();
-            // GPUI runs this hook when its loop ends, also when the compositor goes. It holds
-            // the host's one strong handle, so the host lives until then.
-            cx.on_app_quit(move |cx| {
-                *kept.borrow_mut() = host.update(cx, |host, _| host.take_owner());
-                async {}
-            })
-            .detach();
-            cx.spawn(async move |cx| {
-                trace.event(0, "app_ready");
-                let done = own(weak, rung, cx).await;
-                *ended.borrow_mut() = Some(done);
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
+            mount(cx, mounted);
         });
-    if let Some(done) = outcome.take() {
+    if let Some(done) = exit.outcome.take() {
         return done;
     }
     // GPUI's loop ends before the stop has finished only when the compositor goes, so that is
     // the exit, even when the stop that runs here answers a Quit.
-    if let Some(owner) = leftover.take() {
+    if let Some(owner) = exit.leftover.take() {
         owner.stop_blocking();
     }
     Err(daemon::WAYLAND_CLOSED.to_owned())
+}
+
+/// What the palette host starts with.
+struct Mount {
+    owner: Owner,
+    rung: Rung,
+    trace: Trace,
+    exit: Exit,
+}
+
+/// Where the palette host leaves how it ended: the owner task's outcome once the stop has
+/// finished, or the owner that GPUI's quit hook took before it had.
+#[derive(Clone, Default)]
+struct Exit {
+    outcome: Rc<RefCell<Option<Result<(), String>>>>,
+    leftover: Rc<RefCell<Option<Owner>>>,
+}
+
+/// Starts the palette host in `cx`: the host, the observer of closed windows, the quit hook,
+/// and the owner task.
+fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
+    let Mount {
+        owner,
+        rung,
+        trace,
+        exit,
+    } = mounted;
+    let host = cx.new(|_| Host::new(owner, trace));
+    let weak = host.downgrade();
+    let closed = weak.clone();
+    cx.on_window_closed(move |cx, id| {
+        let _ = closed.update(cx, |host, _| host.closed(id));
+    })
+    .detach();
+    // GPUI runs this hook when its loop ends, also when the compositor goes. It holds a strong
+    // handle, so the host lives until then.
+    let held = host.clone();
+    let leftover = exit.leftover;
+    cx.on_app_quit(move |cx| {
+        *leftover.borrow_mut() = held.update(cx, |host, _| host.take_owner());
+        async {}
+    })
+    .detach();
+    let outcome = exit.outcome;
+    cx.spawn(async move |cx| {
+        trace.event(0, "app_ready");
+        let done = own(weak, rung, cx).await;
+        *outcome.borrow_mut() = Some(done);
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+    host
 }
 
 async fn own(host: WeakEntity<Host>, mut rung: Rung, cx: &mut AsyncApp) -> Result<(), String> {

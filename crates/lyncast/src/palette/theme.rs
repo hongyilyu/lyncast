@@ -13,14 +13,34 @@ pub fn top_margin(height: f32) -> f32 {
 pub const BACKGROUND: u32 = 0x1e1e20;
 pub const BORDER: u32 = 0x3a3a3e;
 pub const TEXT: u32 = 0xe8e8ea;
-/// Section headers and kind labels.
+/// Section headers, kind labels, and the placeholder.
 pub const MUTED: u32 = 0x8e8e93;
+/// The selected row's background.
+pub const SELECTED: u32 = 0x2e2e33;
+/// The selected card's border.
+pub const ACCENT: u32 = 0x5e8bff;
+pub const CARET: u32 = 0x5e8bff;
+/// The card's badges.
+pub const BADGE: u32 = 0x2a2a2e;
 
 pub const FONT: &str = "DejaVu Sans";
 
-/// A section header's height and a row's.
+/// The field's bar, its line, its text size, and its caret's width.
+pub const FIELD: f32 = 56.0;
+pub const FIELD_LINE: f32 = 24.0;
+pub const FIELD_TEXT: f32 = 18.0;
+pub const CARET_WIDTH: f32 = 2.0;
+
+/// A section header's height, a row's, and the calculator card's.
 pub const HEADER: f32 = 28.0;
 pub const ROW: f32 = 40.0;
+pub const CARD: f32 = 84.0;
+
+/// How far past the list's edges it lays out rows, so the row a key selects next has its
+/// height before the list scrolls to it.
+pub const OVERDRAW: f32 = 200.0;
+
+pub const FOOTER: f32 = 36.0;
 
 #[cfg(test)]
 mod tests {

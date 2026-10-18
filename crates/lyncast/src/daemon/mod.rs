@@ -12,6 +12,8 @@ pub(crate) use face::{Face, IsOpen};
 pub(crate) use owner::{Owner, Wait};
 pub use serve::run;
 pub(crate) use serve::{Bell, Rung, WAYLAND_CLOSED, Wake, run_headless, start};
+#[cfg(test)]
+pub(crate) use serve::{Events, detached, from_socket};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
