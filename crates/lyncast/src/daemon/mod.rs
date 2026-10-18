@@ -1,7 +1,9 @@
 //! The daemon's state and what each request does to it. No method here blocks. [`serve`] owns
-//! the socket and the threads, and only its owner loop calls the [`Daemon`], so no lock guards
+//! the socket and the threads, and only its host calls the [`Daemon`], so no lock guards
 //! the state. docs/design/daemon.md describes the requests.
 
+mod face;
+mod owner;
 mod runner;
 mod serve;
 mod store;
@@ -20,7 +22,7 @@ use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
 use crate::vars::Vars;
 use crate::view::Spelled;
-use crate::wire::{Request, Summon, Via};
+use crate::wire::{Request, Via};
 use store::Store;
 
 /// The reason every request gets once Quit has begun.
@@ -49,7 +51,6 @@ pub struct Daemon {
     store: Option<Store>,
     clips: Clips,
     capture: CaptureThread,
-    summon: Summon,
     /// The jobs handed out that have not finished.
     jobs: usize,
     /// Quit has begun, so every request fails.
@@ -74,19 +75,34 @@ pub enum Handled {
 /// The daemon's answer to a request, in the daemon's own types. Only `view::reply` spells one
 /// as a wire reply.
 pub enum Answer {
-    /// The summon state, for Toggle and Status.
-    Summon(Summon),
+    /// Toggle or Status. The daemon holds no summon, so the host's face flips or reads its own.
+    Summon(Ask),
     /// The root list for a query, in `Section` order. The calculator card's row carries its
     /// `calc::Answer`.
     Rows(Vec<Row>),
     /// The clipboard history in screen order.
     Clips(Vec<clip::Row>),
-    /// The success line, such as `ran cmd:reboot`.
-    Done { message: String },
+    /// The success line, such as `ran cmd:reboot`, and what the success does to the summon.
+    Done { message: String, after: After },
     /// The command asks first. Nothing ran.
     Confirm(Command),
     /// The reason, without the `lyncast: ` prefix.
     Failed(String),
+}
+
+/// The two requests about the summon.
+#[derive(Clone, Copy)]
+pub enum Ask {
+    Toggle,
+    Status,
+}
+
+/// What a success does to the summon. A failure and a confirmation leave it alone.
+#[derive(Clone, Copy)]
+pub enum After {
+    Close,
+    /// Clipboard History's: open the summon, or leave it open.
+    ShowClipboard,
 }
 
 /// An activation's work that waits, and what the activation does once the work succeeds.
@@ -95,7 +111,7 @@ pub struct Job {
     pub success: Success,
 }
 
-/// Work that waits, so the owner loop hands it to the host.
+/// Work that waits, so the daemon hands it to the host.
 pub enum Work {
     Task(Task),
     Copy(Payload),
@@ -156,7 +172,6 @@ impl Daemon {
             store,
             clips,
             capture: capture.map_or(CaptureThread::NoCompositor, CaptureThread::Running),
-            summon: Summon::Closed,
             jobs: 0,
             quitting: false,
         }
@@ -174,14 +189,8 @@ impl Daemon {
             return Handled::Answer(quitting());
         }
         let answer = match request {
-            Request::Toggle => {
-                self.summon = match self.summon {
-                    Summon::Closed => Summon::Open,
-                    Summon::Open => Summon::Closed,
-                };
-                Answer::Summon(self.summon)
-            }
-            Request::Status => Answer::Summon(self.summon),
+            Request::Toggle => Answer::Summon(Ask::Toggle),
+            Request::Status => Answer::Summon(Ask::Status),
             Request::Query { text } => {
                 Answer::Rows(root::rows(&self.index, &self.visits, &text, now))
             }
@@ -202,8 +211,8 @@ impl Daemon {
         Handled::Answer(answer)
     }
 
-    /// The answer to a job's result. A failure records nothing and leaves the summon as it was.
-    /// A scan older than the one the index came from changes nothing.
+    /// The answer to a job's result. A failure records nothing. A scan older than the one the
+    /// index came from changes nothing.
     pub fn finish(
         &mut self,
         success: Success,
@@ -219,7 +228,7 @@ impl Daemon {
                     self.index = index;
                     self.indexed = number;
                 }
-                self.succeed(success, Summon::Closed, now)
+                self.succeed(success, After::Close, now)
             }
             Err(reason) => Answer::Failed(reason),
         };
@@ -349,15 +358,15 @@ impl Daemon {
             }
             ActionItem::Pin(id) => {
                 let changed = self.clips.pin(*id, now);
-                self.changed(changed, format!("pinned clip {}", id.0))
+                Self::changed(changed, format!("pinned clip {}", id.0))
             }
             ActionItem::Unpin(id) => {
                 let changed = self.clips.unpin(*id, now);
-                self.changed(changed, format!("unpinned clip {}", id.0))
+                Self::changed(changed, format!("unpinned clip {}", id.0))
             }
             ActionItem::Delete(id) => {
                 let changed = self.clips.delete(*id);
-                self.changed(changed, format!("deleted clip {}", id.0))
+                Self::changed(changed, format!("deleted clip {}", id.0))
             }
             ActionItem::Run(command) => self.command(*command, success(format!("ran {key}")), now),
         }
@@ -368,7 +377,7 @@ impl Daemon {
         let spawn = |argv: &[&str]| Task::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
         let task = match command {
             Command::ClipboardHistory => {
-                return Handled::Answer(self.succeed(success, Summon::Open, now));
+                return Handled::Answer(self.succeed(success, After::ShowClipboard, now));
             }
             // Quit records no visit, so it never leads Suggestions.
             Command::Quit => {
@@ -376,6 +385,7 @@ impl Daemon {
                 self.settle();
                 return Handled::Quit(Answer::Done {
                     message: success.message,
+                    after: After::Close,
                 });
             }
             Command::OpenConfig => match self.vars.config_home() {
@@ -448,19 +458,19 @@ impl Daemon {
         })
     }
 
-    fn changed(&mut self, changed: Result<(), String>, message: String) -> Handled {
+    fn changed(changed: Result<(), String>, message: String) -> Handled {
         Handled::Answer(match changed {
-            Ok(()) => {
-                self.summon = Summon::Closed;
-                Answer::Done { message }
-            }
+            Ok(()) => Answer::Done {
+                message,
+                after: After::Close,
+            },
             Err(reason) => Answer::Failed(reason),
         })
     }
 
     /// Records the visit and hands the visits to the writer, or records the write a copy made,
-    /// then sets the summon and gives the success line.
-    fn succeed(&mut self, success: Success, summon: Summon, now: Timestamp) -> Answer {
+    /// and gives the success line.
+    fn succeed(&mut self, success: Success, after: After, now: Timestamp) -> Answer {
         match success.record {
             Record::Visit { key, query } => {
                 self.visits.record(key, &query, now);
@@ -470,9 +480,9 @@ impl Daemon {
             }
             Record::Write(delivery) => self.clips.wrote(&delivery, now),
         }
-        self.summon = summon;
         Answer::Done {
             message: success.message,
+            after,
         }
     }
 }
@@ -486,6 +496,7 @@ mod tests {
     use lyncast_core::{AppId, Chord};
 
     use super::*;
+    use crate::wire::Summon;
     use crate::{doc, view};
 
     /// Reload Apps, and the number and the success of the scan it hands out.
@@ -511,7 +522,9 @@ mod tests {
             text: text.to_owned(),
         };
         match daemon.handle(request, Timestamp(0)) {
-            Handled::Answer(answer) => serde_json::to_string(&view::reply(answer)).unwrap(),
+            Handled::Answer(answer) => {
+                serde_json::to_string(&view::reply(answer, Summon::Closed)).unwrap()
+            }
             _ => panic!("a query is answered at once"),
         }
     }

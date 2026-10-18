@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip;
 use crate::daemon::Answer;
-use crate::wire::Reply;
+use crate::wire::{Reply, Summon};
 
 /// A value that the CLI and the wire spell as `query --json` prints it.
 pub trait Spelled: Sized {
@@ -65,15 +65,16 @@ pub struct ClipView {
     preview: Option<String>,
 }
 
-/// The wire reply that spells `answer`.
-pub fn reply(answer: Answer) -> Reply {
+/// The wire reply that spells `answer`. `summon` is the host's summon once the answer has
+/// changed it, which a summon answer spells.
+pub fn reply(answer: Answer, summon: Summon) -> Reply {
     match answer {
-        Answer::Summon(state) => Reply::Summon { state },
+        Answer::Summon(_) => Reply::Summon { state: summon },
         Answer::Rows(found) => Reply::Rows { rows: rows(&found) },
         Answer::Clips(found) => Reply::Clips {
             clips: clips(&found),
         },
-        Answer::Done { message } => Reply::Done { message },
+        Answer::Done { message, .. } => Reply::Done { message },
         Answer::Confirm(command) => Reply::Confirm {
             title: command.title().to_owned(),
         },

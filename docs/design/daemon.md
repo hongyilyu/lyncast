@@ -102,7 +102,7 @@ Quit goes in this order:
 
 Steps 2 and 3 wait 5 s at most in all. After that the daemon takes no more requests or results. A request or a job's result that is still queued gets `failed` with `the daemon is quitting`, even when the job's program started, and work still running gets no reply. So Quit takes 7 s at most, plus the time to handle the one request or result in hand when the 5 s run out. Work or a write still running, or a result that the daemon did not take, keeps the lock until the process exits, so a daemon started in its place never writes `ranking.json` at the same time, and finds `clips.sqlite3` locked.
 
-Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. Plan step 7's palette host has to follow the same steps.
+Once Quit has begun, the daemon fails every request, the palette's from plan step 7 among them, and it says when no work or write is left. The host owns the order and the waits. It removes the socket and hands the daemon each request and job result until the daemon says so or the 5 s run out. It checks the time before it takes each one, because its channel gives back a queued one at once even after the 5 s. Each one still queued then fails without reaching the daemon, and the host gives up the lock only if the daemon said so. Then it waits up to 1 s for its warnings, sends the reply, and waits up to 1 s more for the replies to be written. `Owner` in `crates/lyncast/src/daemon/owner.rs` holds the daemon and these steps, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`. Every event reaches the daemon through it, so plan step 7's palette host follows the same steps by handing it its events.
 
 ## The runner starts programs, and tests swap in a recorder
 
@@ -115,7 +115,7 @@ A Tier 1 test also runs the daemon with an empty environment plus the doc's vari
 
 ## The summon is open or closed
 
-The daemon keeps one summon state, `closed` or `open`. Without GPUI it opens no window. `toggle` flips the state, the Clipboard History command opens it, and every other successful activation closes it. A failed activation leaves it alone, so an open palette stays open to show the reason. From plan step 7 an open summon is a real window, and closing the window closes the summon.
+The summon is `closed` or `open`. The host holds it, not the daemon: the daemon answers `toggle` and `status` without a state, and a success says what it does to the summon. One function, `apply` in `crates/lyncast/src/daemon/face.rs`, changes the summon as each answer goes out. `toggle` flips it, the Clipboard History command opens it, and every other successful activation closes it. A failed activation leaves it alone, so an open palette stays open to show the reason. The headless host's summon is only a state, and it opens no window. From plan step 7 an open summon is a real window, and closing the window closes the summon.
 
 ## The root list puts the calculator card first
 
