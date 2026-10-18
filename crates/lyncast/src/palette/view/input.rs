@@ -16,7 +16,7 @@ impl EntityInputHandler for PaletteView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let field = self.model.field();
+        let field = self.model.focused();
         let (start, end) = (field.byte_offset(range.start), field.byte_offset(range.end));
         let (start, end) = (start.min(end), start.max(end));
         *adjusted = Some(field.utf16_offset(start)..field.utf16_offset(end));
@@ -29,7 +29,7 @@ impl EntityInputHandler for PaletteView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let field = self.model.field();
+        let field = self.model.focused();
         let cursor = field.utf16_offset(field.cursor());
         Some(UTF16Selection {
             range: cursor..cursor,
@@ -38,7 +38,7 @@ impl EntityInputHandler for PaletteView {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        let field = self.model.field();
+        let field = self.model.focused();
         let marked = field.marked()?;
         Some(field.utf16_offset(marked.start)..field.utf16_offset(marked.end))
     }
@@ -84,9 +84,9 @@ impl EntityInputHandler for PaletteView {
         window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let field = self.model.field();
+        let field = self.model.focused();
         let (start, end) = (field.byte_offset(range.start), field.byte_offset(range.end));
-        let (text, runs) = field_runs(&self.model);
+        let (text, runs) = field_runs(field, "");
         let line = shape(text, &runs, window);
         let left = element.left() - scroll(&line, field.cursor(), element.size.width);
         Some(Bounds::from_corners(

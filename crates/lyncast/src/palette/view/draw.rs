@@ -9,8 +9,8 @@ use gpui::{
 use lyncast_core::Row;
 use lyncast_core::calc;
 
-use crate::palette::model::{self, Model};
-use crate::palette::theme;
+use crate::palette::field::Field;
+use crate::palette::{model, theme};
 
 pub(super) fn key_cap(name: &'static str) -> impl IntoElement {
     div()
@@ -21,7 +21,7 @@ pub(super) fn key_cap(name: &'static str) -> impl IntoElement {
         .child(name)
 }
 
-pub(super) fn field_runs(model: &Model) -> (SharedString, Vec<TextRun>) {
+pub(super) fn field_runs(field: &Field, placeholder: &'static str) -> (SharedString, Vec<TextRun>) {
     let run = |len, color, underline| TextRun {
         len,
         font: font(theme::FONT),
@@ -30,11 +30,10 @@ pub(super) fn field_runs(model: &Model) -> (SharedString, Vec<TextRun>) {
         underline,
         strikethrough: None,
     };
-    if model.placeholder() {
-        let runs = vec![run(model::PLACEHOLDER.len(), theme::MUTED, None)];
-        return (model::PLACEHOLDER.into(), runs);
+    if field.shows_placeholder() {
+        let runs = vec![run(placeholder.len(), theme::MUTED, None)];
+        return (placeholder.into(), runs);
     }
-    let field = model.field();
     let text = field.text();
     let marked = field.marked().unwrap_or(text.len()..text.len());
     let underline = UnderlineStyle {

@@ -124,8 +124,8 @@ fn every_palette_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        13,
-        "palette.md holds 13 palette blocks, so a lost block fails"
+        17,
+        "palette.md holds 17 palette blocks, so a lost block fails"
     );
     let failures: Vec<String> = blocks
         .into_iter()
@@ -151,6 +151,11 @@ fn the_caret_stays_in_the_field() {
         ("press end", Caret::AtEnd),
         ("press escape", Caret::AtStart),
         ("mark $LONG", Caret::AtEnd),
+        ("press escape", Caret::AtStart),
+        ("press ctrl-k", Caret::AtStart),
+        ("mark $LONG", Caret::AtEnd),
+        ("insert $LONG", Caret::AtEnd),
+        ("press home", Caret::AtStart),
     ];
     for (step, want) in steps {
         palette
