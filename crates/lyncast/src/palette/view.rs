@@ -28,6 +28,7 @@ use super::model::{self, Cap, Effect, Footer, Input, Landed, Landing, Menu, Mode
 use super::preview::{self, Preview};
 use super::trace::Trace;
 use super::{keys, theme};
+use crate::clip::Content;
 use crate::daemon::{Answer, Daemon, Screen};
 use crate::wire::Request;
 use draw::{field_runs, key_cap, scroll, shape};
@@ -169,6 +170,10 @@ impl PaletteView {
                     }
                     None => Some(Effect::Close),
                 },
+                Effect::Paste => {
+                    let text = self.paste_text(cx);
+                    self.model.land(Landed::Paste(text), mods)
+                }
                 Effect::Ask(request) => match self.ask(request, cx) {
                     Some(Asked::Now(answer)) => self.model.land(Landed::Answer(answer), mods),
                     Some(Asked::Later(answer)) => {
@@ -213,6 +218,14 @@ impl PaletteView {
 
     fn daemon<'a>(&self, cx: &'a App) -> Option<&'a Daemon> {
         self.host.upgrade()?.read(cx).daemon()
+    }
+
+    fn paste_text(&self, cx: &App) -> Option<String> {
+        let current = self.daemon(cx)?.clips().current()?;
+        match current.content {
+            Content::Text(_) | Content::Files => current.preview.clone(),
+            Content::Image => None,
+        }
     }
 
     fn preview(&self, cx: &App) -> Option<Entity<Preview>> {

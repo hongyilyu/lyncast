@@ -274,6 +274,7 @@ pub struct Clips {
     next_seq: Option<Seq>,
     retention: Retention,
     bodies: Bodies,
+    current: Option<ClipId>,
 }
 
 /// Where the rows' text and image bytes live, and so where each change to a row goes.
@@ -412,6 +413,7 @@ impl Clips {
             next_seq: Some(Seq::FIRST),
             retention,
             bodies: Bodies::Memory(HashMap::new()),
+            current: None,
         };
         let Some(data_home) = data_home else {
             return Ok(clips);
@@ -440,6 +442,7 @@ impl Clips {
     pub fn record(&mut self, entry: Entry, now: Timestamp) {
         let same = |row: &&Row| row.content == entry.meta.content && row.hash == entry.meta.hash;
         if let Some(id) = self.rows.iter().find(same).map(|row| row.id) {
+            self.current = Some(id);
             self.touch(id, now);
             return;
         }
@@ -450,7 +453,10 @@ impl Clips {
     /// front unless it is pinned, and text is recorded as a capture of it would be.
     pub fn wrote(&mut self, delivery: &Delivery, now: Timestamp) {
         match delivery.handed() {
-            Handed::Clip(id) => self.touch(id, now),
+            Handed::Clip(id) => {
+                self.current = Some(id);
+                self.touch(id, now);
+            }
             Handed::Text(text) => self.record(Entry::text(text, TEXT.to_owned()), now),
         }
     }
@@ -483,6 +489,15 @@ impl Clips {
 
     pub fn get(&self, id: ClipId) -> Option<&Row> {
         self.rows.iter().find(|row| row.id == id)
+    }
+
+    /// The row of the newest capture or recorded write, which is what the clipboard holds as far
+    /// as the capture thread has seen, while the history holds it. A row that matched the bytes is
+    /// the current one, also a pinned row that stays in place and a row that the writer had no
+    /// room to move. A capture that is not recorded leaves the one before. No id comes back, so
+    /// once the row goes there is none.
+    pub fn current(&self) -> Option<&Row> {
+        self.get(self.current?)
     }
 
     /// Pins the row. A pin is a use, so the row takes the next number, and it keeps that
@@ -591,6 +606,7 @@ impl Clips {
         self.next_id = id.0.checked_add(1).map(ClipId);
         self.next_seq = seq.next();
         self.rows.push(Row::new(id, meta, now, false, seq));
+        self.current = Some(id);
         if !expired.is_empty() {
             self.remove(expired);
         }

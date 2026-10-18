@@ -199,6 +199,8 @@ pub enum Press {
     Tab,
     /// Ctrl+T: the clipboard screen's next type filter.
     CycleKinds,
+    /// Ctrl+V: the clip the daemon saw last, typed into the field.
+    Paste,
     Up,
     Down,
     Left,
@@ -241,6 +243,8 @@ pub enum Landed {
     Answer(Answer),
     /// Clipboard History from a client, while the window is open.
     Show,
+    /// What Ctrl+V types: the text of the clip the daemon saw last, or its paths, or nothing.
+    Paste(Option<String>),
 }
 
 /// Where the selection goes when clipboard rows land.
@@ -262,6 +266,8 @@ pub enum Effect {
         kinds: Kinds,
         landing: Landing,
     },
+    /// Read the clip the daemon saw last, for Ctrl+V.
+    Paste,
     /// Send the daemon this activation.
     Ask(Request),
     Close,
@@ -299,6 +305,7 @@ impl Model {
             Input::Press(Press::Activate(chord)) => return self.activate(Via::Chord(chord)),
             Input::Press(Press::Ignore) => return None,
             Input::Press(Press::Escape) => return self.escape(),
+            Input::Press(Press::Paste) => return Some(Effect::Paste),
             Input::Press(Press::Menu) => {
                 self.toggle_menu();
                 return None;
@@ -391,6 +398,8 @@ impl Model {
             }
             Landed::Answer(answer) => self.answered(answer, mods),
             Landed::Show => self.show_clipboard(),
+            Landed::Paste(Some(text)) => self.input(Input::Replace { utf16: None, text }),
+            Landed::Paste(None) => None,
         }
     }
 
@@ -833,6 +842,7 @@ fn edit(field: &mut Field, input: Input) -> bool {
             | Press::Menu
             | Press::Tab
             | Press::CycleKinds
+            | Press::Paste
             | Press::Up
             | Press::Down
             | Press::Escape,
