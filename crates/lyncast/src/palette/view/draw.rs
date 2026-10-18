@@ -1,4 +1,5 @@
-//! Elements drawn from their arguments alone: the field's text, a header, a row, and the card.
+//! Elements drawn from their arguments alone: the field's text, a key's cap, a header, a row, and
+//! the card.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -10,6 +11,15 @@ use lyncast_core::calc;
 
 use crate::palette::model::{self, Model};
 use crate::palette::theme;
+
+pub(super) fn key_cap(name: &'static str) -> impl IntoElement {
+    div()
+        .px_1()
+        .rounded(px(4.0))
+        .bg(rgb(theme::BADGE))
+        .text_color(rgb(theme::MUTED))
+        .child(name)
+}
 
 pub(super) fn field_runs(model: &Model) -> (SharedString, Vec<TextRun>) {
     let run = |len, color, underline| TextRun {

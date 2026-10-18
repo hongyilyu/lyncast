@@ -3,15 +3,21 @@
 //! phase, before the input handler gets the key's text.
 
 use gpui::KeyDownEvent;
+use lyncast_core::Chord;
 
 use super::model::Press;
 
 /// What a key press means. `None` leaves the key to the input handler, which types its text.
+/// A held key repeats as presses with `is_held`. Only Enter's first press activates, and only
+/// Escape's first press takes a step.
 pub fn press(event: &KeyDownEvent) -> Option<Press> {
     let mods = event.keystroke.modifiers;
     let bare = !(mods.control || mods.alt || mods.platform);
     let ctrl = mods.control && !mods.alt && !mods.platform;
     Some(match event.keystroke.key.as_str() {
+        "enter" if event.is_held => Press::Ignore,
+        "enter" if bare => Press::Activate(Chord::Enter),
+        "enter" if ctrl => Press::Activate(Chord::CtrlEnter),
         "up" if bare => Press::Up,
         "p" if ctrl => Press::Up,
         "down" if bare => Press::Down,
@@ -22,6 +28,7 @@ pub fn press(event: &KeyDownEvent) -> Option<Press> {
         "end" if bare => Press::End,
         "delete" if bare => Press::Delete,
         "backspace" if bare => Press::Backspace,
+        "escape" if event.is_held => Press::Ignore,
         "escape" if bare => Press::Escape,
         _ => return None,
     })

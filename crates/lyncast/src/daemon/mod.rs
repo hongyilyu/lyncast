@@ -252,6 +252,12 @@ impl Daemon {
         self.clips.unsaved(id);
     }
 
+    /// The jobs handed out that have not finished. A test settles once none is out.
+    #[cfg(test)]
+    pub fn jobs(&self) -> usize {
+        self.jobs
+    }
+
     /// Begins Quit with no request, for a host whose event loop ended before a stop came.
     pub fn quit_now(&mut self) {
         self.quitting = true;

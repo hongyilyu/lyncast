@@ -7,37 +7,47 @@ mod input;
 pub(super) mod inspect;
 mod list;
 
+use futures::channel::oneshot;
 use gpui::{
     AppContext, Bounds, Context, ElementInputHandler, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ListAlignment, ListState, ParentElement, Render, Styled, TextAlign, WeakEntity,
-    Window, canvas, div, fill, point, px, rgb, size,
+    KeyDownEvent, KeyUpEvent, ListAlignment, ListState, ModifiersChangedEvent, ParentElement,
+    Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, canvas, div, fill, point,
+    px, rgb, size,
 };
 
 use super::host::Host;
-use super::model::{Effect, Input, Landed, Line, Model};
+use super::model::{self, Effect, Footer, Input, Landed, Line, Model};
 use super::trace::Trace;
 use super::{keys, theme};
 use crate::daemon::Answer;
 use crate::wire::Request;
-use draw::{field_runs, scroll, shape};
+use draw::{field_runs, key_cap, scroll, shape};
 
 /// The debug selector of the field that has the caret, by which the Tier 3 tests find its
 /// bounds.
 pub const FIELD: &str = "field";
+
+enum Asked {
+    Now(Answer),
+    Later(oneshot::Receiver<Answer>),
+}
 
 pub struct PaletteView {
     model: Model,
     host: WeakEntity<Host>,
     focus: FocusHandle,
     list: ListState,
+    answer: Option<Task<()>>,
     trace: Trace,
     seq: u32,
     traced_first: bool,
+    _activation: Subscription,
 }
 
 impl PaletteView {
     /// Takes the keyboard focus, so the field gets the window's text, and asks the host for
-    /// the root list of an empty field.
+    /// the root list of an empty field. It tells the model whether the window is active now
+    /// and at each change.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<PaletteView>,
@@ -47,17 +57,25 @@ impl PaletteView {
     ) -> PaletteView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let (model, effect) = Model::new();
+        let (mut model, query) = Model::new();
+        let opened = model.active(window.is_window_active());
+        let activation = cx.observe_window_activation(window, |view, window, cx| {
+            let effect = view.model.active(window.is_window_active());
+            view.run(effect, window, cx);
+        });
         let mut view = PaletteView {
             model,
             host: host.clone(),
             focus,
             list: ListState::new(0, ListAlignment::Top, px(theme::OVERDRAW)),
+            answer: None,
             trace,
             seq,
             traced_first: false,
+            _activation: activation,
         };
-        view.run(Some(effect), window, cx);
+        view.run(Some(query), window, cx);
+        view.run(opened, window, cx);
         view
     }
 
@@ -70,19 +88,46 @@ impl PaletteView {
         self.run(effect, window, cx);
     }
 
+    fn key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let mods = window.modifiers().modified();
+        let effect = self.model.released(&event.keystroke.key, mods);
+        self.run(effect, window, cx);
+    }
+
+    fn modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let effect = self.model.modifiers(event.modifiers.modified());
+        self.run(effect, window, cx);
+    }
+
     fn run(&mut self, effect: Option<Effect>, window: &mut Window, cx: &mut Context<Self>) {
+        let mods = window.modifiers().modified();
         let mut next = effect;
         while let Some(effect) = next {
             next = match effect {
                 Effect::Query(text) => match self.ask(Request::Query { text }, cx) {
-                    Some(Answer::Rows(rows)) => {
-                        let next = self.model.land(Landed::Rows(rows));
+                    Some(Asked::Now(Answer::Rows(rows))) => {
+                        let next = self.model.land(Landed::Rows(rows), mods);
                         let count = self.model.lines().len();
                         self.list.reset_with_uniform_height(count, px(theme::ROW));
                         next
                     }
-                    Some(Answer::Failed(_)) | None => Some(Effect::Close),
-                    Some(_) => unreachable!("the daemon answers a query with its rows"),
+                    Some(Asked::Now(Answer::Failed(_))) | None => Some(Effect::Close),
+                    Some(Asked::Now(_) | Asked::Later(_)) => {
+                        unreachable!("the daemon answers a query with its rows at once")
+                    }
+                },
+                Effect::Ask(request) => match self.ask(request, cx) {
+                    Some(Asked::Now(answer)) => self.model.land(Landed::Answer(answer), mods),
+                    Some(Asked::Later(answer)) => {
+                        self.wait(answer, window, cx);
+                        None
+                    }
+                    None => Some(Effect::Close),
                 },
                 Effect::Close => {
                     window.remove_window();
@@ -94,9 +139,27 @@ impl PaletteView {
         cx.notify();
     }
 
-    fn ask(&mut self, request: Request, cx: &mut Context<Self>) -> Option<Answer> {
+    fn ask(&mut self, request: Request, cx: &mut Context<Self>) -> Option<Asked> {
         let asked = self.host.update(cx, |host, cx| host.ask(request, cx));
-        asked.ok().flatten()?.try_recv().ok().flatten()
+        let mut answer = asked.ok().flatten()?;
+        match answer.try_recv() {
+            Ok(Some(now)) => Some(Asked::Now(now)),
+            Ok(None) => Some(Asked::Later(answer)),
+            Err(oneshot::Canceled) => None,
+        }
+    }
+
+    fn wait(&mut self, answer: oneshot::Receiver<Answer>, window: &Window, cx: &mut Context<Self>) {
+        self.answer = Some(cx.spawn_in(window, async move |view, cx| {
+            let answer = answer
+                .await
+                .unwrap_or_else(|_| Answer::Failed("the daemon gave no answer".to_owned()));
+            let _ = view.update_in(cx, |view, window, cx| {
+                let mods = window.modifiers().modified();
+                let effect = view.model.land(Landed::Answer(answer), mods);
+                view.run(effect, window, cx);
+            });
+        }));
     }
 
     /// A list that has not been laid out has no height to scroll in, and it shows its top, where
@@ -175,17 +238,47 @@ impl PaletteView {
     }
 
     fn footer(&self) -> impl IntoElement {
-        div()
+        let bar = div()
             .h(px(theme::FOOTER))
             .flex_none()
             .flex()
             .items_center()
             .justify_end()
+            .gap_2()
             .px_4()
             .border_t_1()
             .border_color(rgb(theme::BORDER))
-            .text_sm()
-            .children(self.model.footer())
+            .text_sm();
+        match self.model.footer() {
+            Some(Footer::Failed(reason)) => bar.child(
+                div()
+                    .flex_1()
+                    .text_color(rgb(theme::FAILED))
+                    .child(reason.to_owned()),
+            ),
+            Some(footer) => {
+                let bar = match &footer {
+                    Footer::Confirm(title) => {
+                        bar.child(div().flex_1().child(model::question(title)))
+                    }
+                    _ => bar,
+                };
+                let hints = footer.hints().into_iter().enumerate();
+                bar.children(hints.flat_map(|(at, (label, cap))| {
+                    let label = div().child(label.to_owned());
+                    let label = if at == 0 {
+                        label
+                    } else {
+                        label.text_color(rgb(theme::MUTED))
+                    };
+                    [
+                        label.into_any_element(),
+                        key_cap(cap.label()).into_any_element(),
+                    ]
+                }))
+            }
+            None => bar,
+        }
     }
 }
 
@@ -196,6 +289,8 @@ impl Render for PaletteView {
             .key_context("Palette")
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .size_full()
             .flex()
             .flex_col()

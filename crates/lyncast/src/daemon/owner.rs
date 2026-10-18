@@ -153,6 +153,12 @@ impl Owner {
         }
     }
 
+    /// The daemon, for reads that change nothing.
+    #[cfg(test)]
+    pub(crate) fn daemon(&self) -> &Daemon {
+        &self.daemon
+    }
+
     /// The palette's own request, which skips the inbox. Its answer is in the receiver at once
     /// unless the request starts a job, and then it comes when the job ends. A Quit begins the
     /// stop here and rings the bell, so the owner task starts its wait, and the Quit's answer

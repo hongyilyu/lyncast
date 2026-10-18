@@ -1,15 +1,20 @@
 use std::cell::Cell;
 use std::env;
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
 use gpui::{
-    Bounds, Context, Entity, EntityInputHandler, IntoElement, Pixels, Render, TestAppContext,
-    TestDispatcher, VisualTestContext, Window, WindowBounds, WindowHandle, WindowKind, div,
-    prelude::*, px, size,
+    Bounds, Context, Entity, EntityInputHandler, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, Pixels, Render, TestAppContext, TestDispatcher, VisualTestContext, Window,
+    WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
 };
 use lyncast_core::AppId;
 use lyncast_core::clip::Retention;
@@ -119,8 +124,8 @@ fn every_palette_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        4,
-        "palette.md holds 4 palette blocks, so a lost block fails"
+        13,
+        "palette.md holds 13 palette blocks, so a lost block fails"
     );
     let failures: Vec<String> = blocks
         .into_iter()
@@ -247,6 +252,10 @@ fn scratch() -> PathBuf {
     dir
 }
 
+fn keystroke(key: &str) -> Result<Keystroke, String> {
+    Keystroke::parse(key).map_err(|error| error.to_string())
+}
+
 fn apps(fixtures: &[Block]) -> Vec<Entry> {
     fixtures
         .iter()
@@ -264,16 +273,24 @@ fn entry(path: &str, text: &str) -> Entry {
     }
 }
 
+const BUDGET: Duration = Duration::from_secs(60);
+
 struct Palette {
     cx: TestAppContext,
     host: Entity<Host>,
     events: Events,
+    exit: Exit,
     record: PathBuf,
+    stalled: Option<Vec<u8>>,
 }
 
 impl Palette {
     fn new(apps: Vec<Entry>, name: &str) -> Palette {
         let cx = TestAppContext::build(TestDispatcher::new(0), None);
+        // Jobs run on real worker threads, and each wakes the owner task from outside the test
+        // scheduler. With parking allowed, the scheduler takes such a wake without recording
+        // it as non-determinism, which captures a backtrace each time.
+        cx.executor().allow_parking();
         let record = scratch().join(format!("{}-{name}.runs", process::id()));
         let _ = fs::remove_file(&record);
         let clips = Clips::open(None, Retention::DEFAULT, |_| {}, || {}).unwrap();
@@ -281,18 +298,21 @@ impl Palette {
         let daemon = Daemon::new(Vars::default(), index, Visits::default(), None, clips, None);
         let (bell, rung) = Bell::new();
         let (owner, events) = daemon::detached(daemon, &record, bell);
+        let exit = Exit::default();
         let mounted = Mount {
             owner,
             rung,
             trace: Trace::OFF,
-            exit: Exit::default(),
+            exit: exit.clone(),
         };
         let host = cx.update(|cx| super::mount(cx, mounted));
         let palette = Palette {
             cx,
             host,
             events,
+            exit,
             record,
+            stalled: None,
         };
         palette.settle();
         palette
@@ -315,6 +335,28 @@ impl Palette {
                 view.replace_and_mark_text_in_range(None, text, None, window, cx);
             })?,
             ("unmark", "") => self.input(|view, window, cx| view.unmark_text(window, cx))?,
+            ("hold", key) => self.visual()?.simulate_event(KeyDownEvent {
+                keystroke: keystroke(key)?,
+                is_held: true,
+                prefer_character_input: false,
+            }),
+            ("release", key) => self.visual()?.simulate_event(KeyUpEvent {
+                keystroke: keystroke(key)?,
+            }),
+            ("mods", held) => {
+                let modifiers = match held {
+                    "none" => Modifiers::none(),
+                    "ctrl" => Modifiers::control(),
+                    "shift" => Modifiers::shift(),
+                    "alt" => Modifiers::alt(),
+                    _ => return Err(format!("no modifiers {held}")),
+                };
+                self.visual()?.simulate_modifiers_change(modifiers);
+            }
+            ("stall-runner", "") => self.stall()?,
+            ("resume-runner", "") => self.resume()?,
+            ("focus", "") => self.visual()?.update(|window, _| window.activate_window()),
+            ("blur", "") => self.visual()?.deactivate_window(),
             _ => return Err(format!("no step {step}")),
         }
         self.settle();
@@ -322,7 +364,55 @@ impl Palette {
     }
 
     fn settle(&self) {
+        let deadline = Instant::now() + BUDGET;
         self.cx.run_until_parked();
+        while self.stalled.is_none() && !self.idle() {
+            assert!(
+                Instant::now() < deadline,
+                "a job ran over the test's budget"
+            );
+            thread::sleep(Duration::from_millis(1));
+            self.cx.run_until_parked();
+        }
+        self.cx.run_until_parked();
+    }
+
+    fn idle(&self) -> bool {
+        self.host.read_with(&self.cx, |host, _| host.idle())
+    }
+
+    /// Makes the runner's file a FIFO, so the next program the daemon starts waits in the
+    /// runner, opening the file to write its line, and its activation stays out.
+    fn stall(&mut self) -> Result<(), String> {
+        if self.stalled.is_some() {
+            return Err("the runner is stalled already".to_owned());
+        }
+        let kept = self.recorded();
+        fs::remove_file(&self.record).or_else(|error| match error.kind() {
+            ErrorKind::NotFound => Ok(()),
+            _ => Err(error.to_string()),
+        })?;
+        let path = CString::new(self.record.as_os_str().as_bytes()).expect("a path with no NUL");
+        // SAFETY: `path` is a NUL-terminated string that lives through the call.
+        if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+            return Err(format!("mkfifo: {}", io::Error::last_os_error()));
+        }
+        self.stalled = Some(kept);
+        Ok(())
+    }
+
+    /// Lets the waiting program write its line, and makes the runner's file a file again. The
+    /// open for reading waits for the program's open for writing, and the read ends once the
+    /// program has written its line and closed the file.
+    fn resume(&mut self) -> Result<(), String> {
+        let mut kept = self.stalled.take().ok_or("the runner is not stalled")?;
+        if !self.idle() {
+            let mut fifo = File::open(&self.record).map_err(|error| error.to_string())?;
+            fifo.read_to_end(&mut kept)
+                .map_err(|error| error.to_string())?;
+        }
+        fs::remove_file(&self.record).map_err(|error| error.to_string())?;
+        fs::write(&self.record, kept).map_err(|error| error.to_string())
     }
 
     fn window(&self) -> Option<WindowHandle<PaletteView>> {
@@ -351,11 +441,18 @@ impl Palette {
 
     fn dump(&self) -> String {
         self.view(PaletteView::dump)
-            .unwrap_or_else(|| "closed\n".to_owned())
+            .unwrap_or_else(|| match &*self.exit.outcome.borrow() {
+                None => "closed\n".to_owned(),
+                Some(Ok(())) => "stopped\n".to_owned(),
+                Some(Err(error)) => format!("stopped: {error}\n"),
+            })
     }
 
     fn recorded(&self) -> Vec<u8> {
-        fs::read(&self.record).unwrap_or_default()
+        match &self.stalled {
+            Some(kept) => kept.clone(),
+            None => fs::read(&self.record).unwrap_or_default(),
+        }
     }
 }
 

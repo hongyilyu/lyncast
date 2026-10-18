@@ -32,6 +32,16 @@ Escape clears a field that holds text, and closes the palette when the field is 
 
 lyncast binds no GPUI keys. GPUI runs the action of a key binding before any key listener, and the action's handler does not learn whether its key repeats (`gpui-pre` 0.3.9 `src/window.rs:6150-6174`, `src/interactive.rs:25-31`). The view reads every key press in the capture phase through the one table in `crates/lyncast/src/palette/keys.rs` (`src/window.rs:6260-6276`). A key the table names stops there. Any other key goes on to the input handler, which types the key's text (`gpui-pre-linux` 0.3.9 `src/linux/wayland/window.rs:1576-1598`). All of these were read in source.
 
+## Enter runs the selected row as it goes down
+
+Enter and Ctrl+Enter send `activate` for the selected row as the key goes down. The field's text goes with it as the query, which the visit keeps as a search term. A held key repeats as key presses that GPUI marks `is_held`. Only Enter's first press sends, and only Escape's first press takes a step. One activation is out at a time. Until its answer comes, and while the window closes after it, every key press but Escape does nothing, and Escape closes the window. A job's answer comes once its worker thread ends, so the view waits for it on GPUI's main thread without blocking it.
+
+A success closes the window once the activating key is up and no modifier is held, in whichever order the release and the modifiers' change come. Under Wayland they come as separate events (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:2115-2140, 2258-2270`, read in source). The release of another key, or of an Enter the window never saw go down, closes nothing. niri's bind leaves such a release as the window maps. A success sent by a socket client closes the window at once, as daemon.md's rules say. Clipboard History's success leaves the window as it is.
+
+A failure leaves the window open and shows its reason in the footer until the next key that edits the field or moves the selection. Log Out, Reboot, and Power Off ask first: the daemon answers with a confirmation, and the footer asks `Reboot?` with Enter to run and Escape to cancel. Enter there sends the same activation again with `confirmed`. A key that moves the selection or edits the field, and typed text, cancel the question.
+
+Losing the keyboard focus closes the window, as TinyCast hides on focus loss ([notes/06](../research/notes/06-tinycast-behaviour-spec.md)), but only once the window has been active. The view tells the model whether the window is active as it opens and at each change. Under anvil the window turns active only with the first key that reaches it (a GPUI probe under anvil, 2026-10-17), and GPUI's test platform opens a window inactive (`gpui-pre` 0.3.9 `src/platform/test/window.rs:414-425`, read in source).
+
 ## The compositor's end stops the daemon
 
 When the compositor goes, GPUI's event loop ends and calls GPUI's quit hooks (`gpui-pre-linux` 0.3.9 `src/linux/platform.rs:608-624`). GPUI then drops its windows without calling `on_window_closed` (`gpui-pre` 0.3.9 `src/app.rs:1168-1184`), and runs no task on the main thread again. These were read in source. lyncast's quit hook takes the daemon from the host. Once GPUI's run returns, the daemon stops as the headless host does, with the summon closed, because its windows went with the loop. The capture thread sees the compositor go too, and that stops the daemon as Quit does. It prints `lyncast: the Wayland connection closed` and exits 1.
@@ -110,15 +120,22 @@ Exec=8x8
 | `$ insert <text>` | the input handler's `replace_text_in_range`, as an input method's commit calls it. `\n` and `\r` are line breaks |
 | `$ mark [<text>]` | the input handler's `replace_and_mark_text_in_range`, as an input method calls it while it composes |
 | `$ unmark` | the input handler's `unmark_text` |
+| `$ hold <key>` | GPUI's `simulate_event` with a key press marked `is_held`, as a held key repeats |
+| `$ release <key>` | `simulate_event` with the key's release |
+| `$ mods <none\|ctrl\|shift\|alt>` | `simulate_modifiers_change`. `$ press` changes no modifier, so a block holds Ctrl with `$ mods ctrl` before it presses `ctrl-enter` |
+| `$ focus`, `$ blur` | the window turns active, or inactive. A blur acts only on an active window, as GPUI's test platform does |
+| `$ stall-runner` | makes the runner's file a FIFO, so the next program waits in the runner and its activation stays out |
+| `$ resume-runner` | lets the waiting program write its line, and makes the runner's file a file again |
 
-After each step, the runner runs GPUI's tasks until none is ready. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, so they do not check how the view lays the labels out. They show:
+After each step, the runner runs GPUI's tasks until none is ready and the daemon has no job out. While the runner is stalled, it waits for no job. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, but a key reads as the steps name it. So the lines do not check the key caps' text, or how the view lays the labels out. They show:
 
 - `root "<text>"`, or `root (<placeholder>)` while the placeholder shows.
 - `== <header>` before each section that has one.
 - Each row, after `> ` when it is selected and after two spaces when it is not. An app or a command reads `<title>  (<kind>)`. The calculator's card reads `= <answer>  (<expression> · <badge>[ · <words>])`.
 - `No results` when the list is empty.
-- `footer: <default action>`.
-- `closed` once the window has gone.
+- `confirm <title>?` while a command asks to be confirmed.
+- The footer: `footer: <default action> (enter)`, or `footer: <title> (enter) · Cancel (escape)` while a command asks, or `footer: pending` while an activation is out, or `footer: closing` after a success while the key is still down, or `footer: failed: <reason>`.
+- `closed` once the window has gone, or `stopped` once the daemon's stop has finished too.
 
 ### The field searches as it changes
 
@@ -140,43 +157,43 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ type 8x8
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer
+footer: Copy Answer (enter)
 $ press ctrl-n
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open
+footer: Open (enter)
 $ press down
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open
+footer: Open (enter)
 $ press ctrl-p
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer
+footer: Copy Answer (enter)
 $ press down up up
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer
+footer: Copy Answer (enter)
 $ press down
 root "8x8"
   = 64  (8 × 8 · Product · Sixty-Four)
 == Results
 > 8x8  (Application)
-footer: Open
+footer: Open (enter)
 $ press escape
 root (Search for apps and commands)
 == Suggestions
@@ -192,7 +209,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ press escape
 closed
 ```
@@ -217,7 +234,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ press backspace
 root (Search for apps and commands)
 == Suggestions
@@ -233,32 +250,32 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ type fox
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press home
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ type fire
 root "firefox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press space
 root "fire fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press end backspace backspace backspace backspace
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press home delete delete delete delete backspace
 root (Search for apps and commands)
 == Suggestions
@@ -274,27 +291,27 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ type fox
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press left left
 root "fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ type i
 root "fiox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press right
 root "fiox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ type z
 root "fiozx"
 No results
@@ -320,12 +337,12 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ insert fire\r\nfox
 root "fire fox"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ press escape
 root (Search for apps and commands)
 == Suggestions
@@ -341,7 +358,7 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ mark
 root ""
 == Suggestions
@@ -357,7 +374,7 @@ root ""
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ unmark
 root (Search for apps and commands)
 == Suggestions
@@ -373,17 +390,17 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ mark f
 root "f"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 $ insert fire
 root "fire"
 == Results
 > Firefox  (Application)
-footer: Open
+footer: Open (enter)
 ```
 
 ### Each summon starts on an empty field
@@ -406,13 +423,13 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
 $ type 8x8
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
   8x8  (Application)
-footer: Copy Answer
+footer: Copy Answer (enter)
 $ toggle
 closed
 $ open
@@ -430,7 +447,636 @@ root (Search for apps and commands)
   Reboot  (Command)
   Reload Apps  (Command)
   Suspend  (Command)
-footer: Run
+footer: Run (enter)
+```
+
+### Enter runs the row on the press and closes the window on the release
+
+Enter sends the activation as it goes down. The launch succeeds, so the window closes once Enter is up, and the release of another key does not close it. A second press while the window closes sends nothing, and neither does a held Enter's repeat.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+record: ["firefox"]
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+$ hold enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+$ release space
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+$ release enter
+closed
+```
+
+### One activation is out at a time
+
+With the runner stalled, the launch's job stays out, and the footer shows it pending. A second Enter and a Down do nothing then, and Enter goes up before the answer comes. Once the program starts, the success closes the window at once, because Enter is up already. The recorder holds one launch.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ stall-runner
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: pending
+$ press enter down
+root "fire"
+== Results
+> Firefox  (Application)
+footer: pending
+$ release enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: pending
+$ resume-runner
+closed
+record: ["firefox"]
+```
+
+### Escape closes the window while an activation is out
+
+The program still starts, and its answer goes nowhere.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ stall-runner
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ press enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: pending
+$ press escape
+closed
+$ resume-runner
+closed
+record: ["firefox"]
+```
+
+### A failure stays in the footer, and a repeat activates nothing
+
+The card's Copy Answer fails without a compositor, and the window stays open with the reason in the footer. A repeat of Enter neither sends again nor clears the reason, and an input method's unmark does not clear it either. The next key that moves the selection clears it. A held Enter that the palette never saw go down sends nothing, and a repeat of Escape leaves the field's text. Copy Answer fails again, and typed text clears the reason too.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type 8x8
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: Copy Answer (enter)
+$ press enter
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ hold enter
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ release enter
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ unmark
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press down
+root "8x8"
+  = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+> 8x8  (Application)
+footer: Open (enter)
+$ hold enter
+root "8x8"
+  = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+> 8x8  (Application)
+footer: Open (enter)
+$ hold escape
+root "8x8"
+  = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+> 8x8  (Application)
+footer: Open (enter)
+$ press up enter
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ type 0
+root "8x80"
+> = 640  (8 × 80 · Product · Six Hundred Forty)
+footer: Copy Answer (enter)
+```
+
+### Ctrl+Enter closes the window once Ctrl is up too
+
+Ctrl+Enter runs the row's Ctrl+Enter item, which is Open for an app. The window closes once both keys are up, in either order. The launch is a visit, so the next summon suggests Firefox first.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ mods ctrl
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ press ctrl-enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+record: ["firefox"]
+$ release enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+$ mods none
+closed
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Firefox  (Application)
+  Clipboard History  (Command)
+  8x8  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Open (enter)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ mods ctrl
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter)
+$ press ctrl-enter
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+record: ["firefox"]
+$ mods none
+root "fire"
+== Results
+> Firefox  (Application)
+footer: closing
+$ release enter
+closed
+```
+
+### Reboot asks first
+
+The daemon answers Reboot's first activation with a confirmation, and the footer asks. Escape cancels the question, and the field keeps its text. Down cancels it too, and an input method's unmark does not. Enter at the question sends the activation again, confirmed. Escape while the window closes closes it at once. The run is a visit, so the next summon suggests Reboot first, and text typed at its question cancels the question.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type reboot
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ release enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ unmark
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press escape
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ release enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press down
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ release enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: closing
+record: ["systemctl","reboot"]
+$ press escape
+closed
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Reboot  (Command)
+  Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ press enter
+root (Search for apps and commands)
+== Suggestions
+> Reboot  (Command)
+  Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ type reb
+root "reb"
+== Results
+> Reboot  (Command)
+footer: Run (enter)
+$ press escape escape
+closed
+```
+
+### Keys the window did not see go down do nothing
+
+niri's bind leaves the release of Space and a change of the modifiers as the window maps. Neither closes the window, and neither does the release of an Enter the window never saw go down. Clipboard History's success leaves the window as it is.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ release space
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ mods none
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ release enter
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ press enter
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ release enter
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+```
+
+### Focus loss closes only a window that has been active
+
+The window starts inactive, as GPUI's test platform opens it. A blur then changes nothing. Once the window has been active, turning inactive closes it.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ blur
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ focus
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ blur
+closed
+```
+
+### Quit lyncast stops the daemon
+
+Quit lyncast closes the window, and the daemon's stop finishes. This daemon has no capture thread and nothing to write, so no other event wakes the owner task, and the palette's own Quit wakes it.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter)
+$ type quit
+root "quit"
+== Results
+> Quit lyncast  (Command)
+footer: Run (enter)
+$ press enter
+stopped
 ```
 
 ### The summon blocks run under anvil
@@ -439,7 +1085,11 @@ A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdou
 
 - `$ wait-trace <event> <seq>` waits until `$RUNTIME/daemon.stdout` holds that summon's line for the event.
 - `$ count-trace <event>` prints how many lines for the event it holds.
+- `$ keys <key>...` types keys into the compositor with `python3 -I scripts/x11.py <display> focus keys <key>...`, on the X display that `$RUNTIME/display` names. Each key is an X keysym name, such as `f` or `Return`, and `ctrl+v` holds Ctrl while it taps `v`. The script gives the X input focus to anvil's window, sends the keys through XTEST, and returns once the X server has handled them.
+- `$ wait-summon <open|closed>` runs `lyncast status` until it prints that state.
 - `$ stall-stdout` gives the next daemon a stdout that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stdout`. `$ drain-stdout` reads what fills it, and from then on what the daemon writes to stdout goes on to `$RUNTIME/daemon.stdout`.
+
+anvil reads the keys after `keys` returns, so a `keys` line holds no `record:` lines, and the programs its keys start count on the next line's. That line waits for what the keys do, as `wait-summon closed` waits for the window that a launch closes. Without that focus, anvil gave a GPUI window no key at all, and with it the window turned active at its first key (a GPUI probe under anvil, 2026-10-17). The keys summon block below fails when `x11.py` skips the focus (a deliberate break, 2026-10-17).
 
 ### A summon opens around activate and closes after it
 
@@ -559,6 +1209,43 @@ stderr: lyncast: the Wayland connection closed
 exit: 1
 $ sqlite3 data/lyncast/clips.sqlite3 "select id, body from clips"
 1|alpha
+```
+
+### Keys typed under anvil reach the palette
+
+The keys go through Xvfb's XTEST and anvil to the palette. Enter launches Firefox, and the window closes once Enter is up. The visit keeps `fire`, the field's text, as a search term.
+
+```summon
+$ lyncast daemon --trace
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 1
+$ keys f i r e Return
+$ wait-summon closed
+record: ["firefox"]
+$ wait-trace window_closed 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+$ grep -o '"terms":\["fire"\]' data/lyncast/ranking.json
+"terms":["fire"]
+```
+
+### Quit from the palette stops the daemon
+
+Quit lyncast, run from the palette, stops the daemon through the same steps as a Quit from a client: the socket goes, the window closes, and the daemon exits 0.
+
+```summon
+$ lyncast daemon --trace
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 1
+$ keys q u i t Return
+$ wait-exit
+$ count-trace window_closed
+1
+$ test -e "$RUNTIME/lyncast.sock" || echo gone
+gone
 ```
 
 ### A stdout that does not drain holds up only the trace

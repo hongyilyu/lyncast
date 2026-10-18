@@ -111,6 +111,14 @@ impl Host {
         }
     }
 
+    /// No job is out, so every answer the palette waits for is in its receiver.
+    #[cfg(test)]
+    pub fn idle(&self) -> bool {
+        self.owner
+            .as_ref()
+            .is_none_or(|owner| owner.daemon().jobs() == 0)
+    }
+
     /// The quit hook's: the owner, for a stop that runs once GPUI's loop has ended.
     pub fn take_owner(&mut self) -> Option<Owner> {
         self.owner.take()

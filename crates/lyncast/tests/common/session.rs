@@ -56,8 +56,21 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
 
 /// [`session`] for a block whose lines may also run `verbs`.
 pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) -> Vec<String> {
+    session_later(world, block, verbs, &|_| false)
+}
+
+/// [`session_with`] for a block where a line that `later` names starts programs after it
+/// returns, as keys typed into the palette do. Such a line holds no `record:` lines, and the
+/// programs it starts count on the next line's.
+pub fn session_later(
+    world: &World,
+    block: &doc::Block,
+    verbs: &mut Verbs<'_>,
+    later: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let mut failures = Vec::new();
     let mut session = Session::default();
+    let mut recorded_before_later = None;
     let mut rest = block.lines.as_slice();
     while let [command, after @ ..] = rest {
         let number = block.line + 1 + block.lines.len() - rest.len();
@@ -74,7 +87,9 @@ pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) ->
             })
             .collect();
         rest = &after[printed..];
-        let before = world.recorded().len();
+        let before = recorded_before_later
+            .take()
+            .unwrap_or_else(|| world.recorded().len());
         let ran = match session.line(world, command, want.is_empty(), verbs) {
             Line::Ran(Some(ran)) => ran,
             Line::Ran(None) => {
@@ -100,11 +115,17 @@ pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) ->
         };
         let (stdout, stderr, code) = ran;
         let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+        let record = if later(command) {
+            recorded_before_later = Some(before);
+            String::new()
+        } else {
+            text(world.recorded().get(before..).unwrap_or_default())
+        };
         let got = Printed {
             stdout: text(&stdout),
             stderr: text(&stderr),
             exit: code.unwrap_or(-1),
-            record: text(world.recorded().get(before..).unwrap_or_default()),
+            record,
         };
         let want = Printed::expected(&want);
         if got != want {
