@@ -25,8 +25,8 @@ fn every_summon_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        12,
-        "palette.md holds 12 summon blocks, so a lost block fails"
+        13,
+        "palette.md holds 13 summon blocks, so a lost block fails"
     );
     let trees = Path::new(TREES);
     match fs::remove_dir_all(trees) {
@@ -133,14 +133,18 @@ fn palette(world: &World, line: &str) -> Option<Ran> {
 }
 
 fn shot(world: &World, line: &str) -> Option<Ran> {
-    let ["shot", name] = line.strip_prefix("$ ")?.split(' ').collect::<Vec<_>>()[..] else {
+    let words: Vec<&str> = line.strip_prefix("$ ")?.split(' ').collect();
+    let ["shot", name, wanted @ ..] = &words[..] else {
         return None;
     };
     let file = world.runtime.path().join("Xvfb_screen0");
     let mut last = None;
+    let mut seen = None;
     let shown = poll(|| {
         let screen = Screen::read(&file).ok()?;
         let lines = screen.palette();
+        seen.clone_from(&lines);
+        let lines = lines.filter(|lines| shows(lines, wanted));
         if lines.is_some() && lines == last {
             return Some((screen, lines?));
         }
@@ -148,13 +152,23 @@ fn shot(world: &World, line: &str) -> Option<Ran> {
         None
     });
     let Some((screen, lines)) = shown else {
-        return Some((Vec::new(), b"no palette on the screen\n".to_vec(), Some(1)));
+        let said = match seen {
+            Some(seen) => format!("the screen never showed {}:\n{seen}", wanted.join(" ")),
+            None => "no palette on the screen\n".to_owned(),
+        };
+        return Some((Vec::new(), said.into_bytes(), Some(1)));
     };
     let block = world.tree.file_name().expect("a tree named by its block");
     let png = Path::new(SHOTS).join(format!("{}-{name}.png", block.to_string_lossy()));
     fs::create_dir_all(SHOTS).expect("the shots directory");
     screen.png().save(&png).expect("the PNG saves");
     Some((lines.into_bytes(), Vec::new(), Some(0)))
+}
+
+fn shows(lines: &str, wanted: &[&str]) -> bool {
+    let colors = lines.lines().find_map(|line| line.strip_prefix("colors "));
+    let colors: Vec<&str> = colors.unwrap_or_default().split(' ').collect();
+    wanted.iter().all(|color| colors.contains(color))
 }
 
 struct Screen {

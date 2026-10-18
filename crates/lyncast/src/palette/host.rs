@@ -9,6 +9,7 @@ use gpui::{App, Context, Entity, WeakEntity, WindowHandle, WindowId};
 use lyncast_core::rank::Timestamp;
 
 use super::icons::Icons;
+use super::preview::Preview;
 use super::trace::Trace;
 use super::view::PaletteView;
 use super::zone::Zone;
@@ -37,6 +38,7 @@ pub struct Host {
     summons: Summons,
     windows: Vec<(WindowId, u32)>,
     icons: Entity<Icons>,
+    preview: Entity<Preview>,
     zone: Zone,
 }
 
@@ -47,7 +49,13 @@ struct Summons {
 }
 
 impl Host {
-    pub fn new(owner: Owner, icons: Entity<Icons>, zone: Zone, trace: Trace) -> Host {
+    pub fn new(
+        owner: Owner,
+        icons: Entity<Icons>,
+        preview: Entity<Preview>,
+        zone: Zone,
+        trace: Trace,
+    ) -> Host {
         Host {
             owner: Some(owner),
             summons: Summons {
@@ -57,6 +65,7 @@ impl Host {
             },
             windows: Vec::new(),
             icons,
+            preview,
             zone,
         }
     }
@@ -81,6 +90,10 @@ impl Host {
 
     pub fn icons(&self) -> Entity<Icons> {
         self.icons.clone()
+    }
+
+    pub fn preview(&self) -> Entity<Preview> {
+        self.preview.clone()
     }
 
     /// How the palette sends the daemon a request, which may change it. The answer is in the

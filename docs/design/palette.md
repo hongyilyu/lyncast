@@ -74,6 +74,156 @@ Enter copies the selected clip and closes the palette once Enter is up, as any s
 
 Tab and Ctrl+T do nothing while the menu is open. Like any other key, Tab and Ctrl+T cancel a question.
 
+### The preview pane and the information panel
+
+The pane beside the list shows the selected clip. A text shows its preview, its first 1,024 bytes. An image decodes on GPUI's background executor from the bytes the daemon holds, read as a copy reads them, and the pane shows it scaled down to fit, with its size under it. Its size is read first, and an image of more than 32 million pixels shows its size and no pixels. A file list whose first file's name ends in `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, or `.bmp`, in any case, shows that file as an image, read as icons are read: never a FIFO or a device, and at most 25 MiB, as many bytes as a clip holds. An image larger than 840 by 480 pixels, the pane at twice the scale, is scaled down to fit that before it is drawn. Any other file list shows a badge with its first file's extension, and its paths.
+
+The pane holds one image at a time: once the selection moves, the old image leaves the window's atlas. One load is out at a time, so at most one image decodes, whatever the rate at which the selection moves. While a load is out, the newest selected image waits for it, and a load whose clip is no longer selected once its image's size is read stops there and decodes nothing. The palette host holds the preview and its one load, not the window, so these hold across summons: a window that closes with a load out leaves the load to go on, and a summon that lands on the clip it loaded shows that image with no new load. `the_preview_holds_one_image` in `crates/lyncast/src/palette/tests.rs` moves the selection through the `clips atlas` block's clips, from one image to another and then to a text, and checks the window's atlas after each move.
+
+```clips atlas
+text gamma 2026-10-17T08:00
+image 4x4 2026-10-17T09:00
+image 8x8 2026-10-17T10:00
+```
+
+```clips loads
+text notes 2026-10-17T06:00
+image 4x4 2026-10-17T07:00
+image 5x5 2026-10-17T08:00
+image 6x6 2026-10-17T09:00
+image 7x7 2026-10-17T10:00
+```
+
+In the block below, `loads:` counts the loads started, those that stopped, those that decoded, and the most out at once, over every window the block opens. Three Downs before any load runs start two loads, and the first stops before it decodes, so the pane shows the last image selected. A selection that leaves a clip whose image has decoded and comes back before the image lands starts no second load for it. Two Ups and an Escape close the window with a load out and an image waiting for it, and both go on, so the next summon lands on the image that waited and starts no load. The image of a load that lands once its clip is no longer selected is dropped, and the newest selected image loads next. A selection that moves to a text, or to the root list, drops the image that waited, so it never loads. One that moves there before the load out has read its image's size stops that load, so it decodes nothing.
+
+```palette clips=loads counts
+$ history
+clipboard (Search clipboard history) All Types
+== Today
+> image: Image
+  image: Image
+  image: Image
+  image: Image
+  text: notes
+preview: image 7x7 drawn 7x7
+info: Source — · Type Image · Size 146 B · Copied Today at 10:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 1 started, 0 stopped, 1 decoded, at most 1 out
+$ press down down down
+clipboard (Search clipboard history) All Types
+== Today
+  image: Image
+  image: Image
+  image: Image
+> image: Image
+  text: notes
+preview: image 4x4 drawn 4x4
+info: Source — · Type Image · Size 130 B · Copied Today at 07:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 3 started, 1 stopped, 2 decoded, at most 1 out
+$ dispatch up + decode + dispatch up down
+clipboard (Search clipboard history) All Types
+== Today
+  image: Image
+  image: Image
+> image: Image
+  image: Image
+  text: notes
+preview: image 5x5 drawn 5x5
+info: Source — · Type Image · Size 138 B · Copied Today at 08:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 4 started, 1 stopped, 3 decoded, at most 1 out
+$ press up up escape
+closed
+loads: 6 started, 2 stopped, 4 decoded, at most 1 out
+$ history
+clipboard (Search clipboard history) All Types
+== Today
+> image: Image
+  image: Image
+  image: Image
+  image: Image
+  text: notes
+preview: image 7x7 drawn 7x7
+info: Source — · Type Image · Size 146 B · Copied Today at 10:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 6 started, 2 stopped, 4 decoded, at most 1 out
+$ dispatch down + decode + dispatch down
+clipboard (Search clipboard history) All Types
+== Today
+  image: Image
+  image: Image
+> image: Image
+  image: Image
+  text: notes
+preview: image 5x5 drawn 5x5
+info: Source — · Type Image · Size 138 B · Copied Today at 08:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 8 started, 2 stopped, 6 decoded, at most 1 out
+$ dispatch up + decode + dispatch down down down
+clipboard (Search clipboard history) All Types
+== Today
+  image: Image
+  image: Image
+  image: Image
+  image: Image
+> text: notes
+preview: text "notes"
+info: Source — · Type Text · Size 5 B · Copied Today at 06:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 9 started, 2 stopped, 7 decoded, at most 1 out
+$ dispatch up + dispatch down
+clipboard (Search clipboard history) All Types
+== Today
+  image: Image
+  image: Image
+  image: Image
+  image: Image
+> text: notes
+preview: text "notes"
+info: Source — · Type Text · Size 5 B · Copied Today at 06:00
+footer: Copy (enter) · Actions (ctrl-k)
+loads: 10 started, 3 stopped, 7 decoded, at most 1 out
+$ dispatch up + decode + dispatch up + dispatch tab
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+loads: 11 started, 3 stopped, 8 decoded, at most 1 out
+$ dispatch tab + dispatch tab
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+loads: 12 started, 4 stopped, 8 decoded, at most 1 out
+```
+
+No preview goes through GPUI's image loader, which reads a path with `fs::read` and so waits on a FIFO (`gpui-pre` 0.3.9 `src/elements/img.rs:634`, read in source).
+
+The information panel under the pane gives the clip's Source, Type, Path for a file list, Size, and Copied. Source shows `—` until plan step 8 brings the focused app from niri. Type is Text, Link, Email, Image, or Files. Path is the first file's path. Size is in bytes under 1,000, then in kB and MB of 1,000, with one decimal. Copied is the day and time of the clip's last use, which a capture, a copy, a pin, and an unpin set, because the daemon keeps no other time of a clip in memory.
+
 ## Rows show their app's icon
 
 Each app row and command row starts with an icon 24 logical pixels wide. An app's icon comes from the `Icon=` key of its desktop entry. A command, and an app whose icon does not load, shows a rounded square with the first letter of its title instead. The list asks for an icon only as it lays out the icon's row, so a row it has not laid out reads nothing. It lays out the rows on screen and those within `theme::OVERDRAW`, 200 logical pixels, past its edges.
@@ -114,7 +264,7 @@ Each line's time is read as its event happens, and one thread writes the lines, 
 
 ## The fixtures
 
-These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `clips`, and `palette` blocks. There too, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
+These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `clips`, and `palette` blocks. There too, `the_preview_holds_one_image` reads a `clips` block, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_size_reads_as_the_doc_says` in `crates/lyncast/src/palette/clips.rs` reads the `sizes` block, and `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
 
 ```env
 HOME=$TREE/home
@@ -168,6 +318,8 @@ Exec=8x8
 | `$ capture <kind> <value>` | hands the daemon a capture as the capture thread does, at the clock's time, with a `clips` line's kind and value |
 | `$ type <text>` | GPUI's `simulate_input`, one key press for each char |
 | `$ press <keys>` | GPUI's `simulate_keystrokes`, one key press for each keystroke, in GPUI's syntax |
+| `$ dispatch <keys>` | GPUI's `dispatch_keystroke` for each keystroke, which runs no task, so with ` + ` the next step comes before the tasks the keys started |
+| `$ decode` | runs GPUI's tasks until one starts a background task, then only the background tasks, so the preview's load decodes and its result waits to land |
 | `$ insert <text>` | the input handler's `replace_text_in_range`, as an input method's commit calls it. `\n` and `\r` are line breaks |
 | `$ mark [<text>]` | the input handler's `replace_and_mark_text_in_range`, as an input method calls it while it composes |
 | `$ unmark` | the input handler's `unmark_text` |
@@ -179,16 +331,18 @@ Exec=8x8
 | `$ resume-runner` | lets the waiting program write its line, and makes the runner's file a file again |
 | `<step> + <step>` | both steps before the wait, so the requests reach the daemon in one drain, before GPUI runs the window's deferred open |
 
-After each step, the runner runs GPUI's tasks until none is ready and the daemon has no job out. While the runner is stalled, it waits for no job. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, but a key reads as the steps name it, and a clip's kind as `clip list --json` spells it. So the lines do not check the key caps' text, the clips' letters, or how the view lays the labels out. They show:
+After each step, the runner runs GPUI's tasks until none is ready and the daemon has no job out. While the runner is stalled, it waits for no job. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, but a key reads as the steps name it, a clip's kind as `clip list --json` spells it, and the preview pane by what it shows. So the lines do not check the key caps' text, the clips' letters, the pane's wording, or how the view lays the labels out. They show:
 
 - `root "<text>"`, or `root (<placeholder>)` while the placeholder shows. On the clipboard screen, `clipboard "<text>" <type filter>`, or `clipboard (<placeholder>) <type filter>`.
 - `== <header>` before each section that has one, and before each day's clips, or the pins'.
 - Each row, after `> ` when it is selected and after two spaces when it is not. An app or a command reads `<title>  (<kind>)`. The calculator's card reads `= <answer>  (<expression> · <badge>[ · <words>])`. A clip reads `<kind>: <title>`, with its kind as `clip list --json` spells it.
 - `No results` when the root list is empty, and `No clips` when the clipboard screen's is, as the list shows them.
+- `preview: <pane>` for the selected clip: `text "<preview>"` or `files "<paths>"`, quoted as Rust quotes a string, `image <w>x<h> drawn <w>x<h>` with the image's size and the size the pane draws it at, `image too large <w>x<h>`, `no image: <why>`, or `loading`. Then `info: ` and the information panel's lines, joined by ` · `.
 - `confirm <title>?` while a command asks to be confirmed.
 - `menu "<filter>"`, or `menu (<placeholder>)`, while the Actions menu is open, then each item the filter keeps, after `> ` when it is selected and after two spaces when it is not, with `  (enter)` after the default. `No actions` when the filter keeps none.
 - The footer: `footer: <default action> (enter) · Actions (ctrl-k)`, or `footer: <title> (enter) · Cancel (escape)` while a command asks, or `footer: pending` while an activation is out, or `footer: closing` after a success while the key is still down, or `footer: failed: <reason>`.
 - `closed` once the window has gone, or `stopped` once the daemon's stop has finished too.
+- In a block marked `counts`, a last line `loads: <started> started, <stopped> stopped, <decoded> decoded, at most <most> out` with the preview's loads so far. A load counts as decoded once it has begun to decode, on the background executor.
 
 ### The field searches as it changes
 
@@ -1507,7 +1661,7 @@ closed
 
 ### The clipboard screen's blocks start with a history
 
-A `clips <name>` block is a history for `palette clips=<name>`, or for a test that names it. Each line is a capture at a wall time of the test clock's, in order, so the clips take the ids 1, 2, and so on: `text <text>`, `files <URI list>`, or `image <w>x<h>`, with `\n` for a line break, and the time last. An image is an orange PNG of that size. `pin <id> <time>` pins a clip. A `$ capture` step takes the same kinds and values, with no time.
+A `clips <name>` block is a history for `palette clips=<name>`, or for a test that names it. Each line is a capture at a wall time of the test clock's, in order, so the clips take the ids 1, 2, and so on: `text <text>`, `files <URI list>`, or `image <w>x<h>`, with `\n` for a line break, and the time last. An image is an orange PNG of that size, and one over 32 million pixels is a PNG's header alone, which only the size check reads. `pin <id> <time>` pins a clip. A `$ capture` step takes the same kinds and values, with no time. `$TREE` is a directory of the block's own, with `photo.png`, an orange PNG of 3 by 2, `fifo.png`, a FIFO, and `big.png`, a byte over 25 MiB. Its path is 240 bytes long, so the size of a file list that names a file in it, which counts the list's bytes, reads the same on every machine.
 
 ```clips history
 image 2x1 2025-10-15T12:00
@@ -1521,7 +1675,7 @@ pin 4 2026-10-17T10:00
 
 ### The clipboard screen groups the history by day
 
-Clipboard History from a client opens the summon on the clipboard screen. The pin comes first, then the days. The selection lands on the newest clip that is not pinned. Up and Down stop at both ends. A summon that opened on the clipboard screen closes on Escape.
+Clipboard History from a client opens the summon on the clipboard screen. The pin comes first, then the days. The selection lands on the newest clip that is not pinned, and its preview and its information show beside the list. Up and Down stop at both ends. A summon that opened on the clipboard screen closes on Escape.
 
 ```palette clips=history
 $ history
@@ -1537,6 +1691,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press up up
 clipboard (Search clipboard history) All Types
@@ -1551,6 +1707,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "https://example.org/a"
+info: Source — · Type Link · Size 21 B · Copied Today at 10:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press down down down
 clipboard (Search clipboard history) All Types
@@ -1565,6 +1723,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: files "/etc/hostname\n/etc/os-release"
+info: Source — · Type Files · Path /etc/hostname · Size 43 B · Copied Yesterday at 18:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ press down down down
 clipboard (Search clipboard history) All Types
@@ -1579,6 +1739,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
 > image: Image
+preview: image 2x1 drawn 2x1
+info: Source — · Type Image · Size 77 B · Copied Oct 15, 2025 at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 closed
@@ -1601,7 +1763,23 @@ clipboard (Search clipboard history) All Types
 == Pinned
 > text: two
   text: 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+preview: text "two"
+info: Source — · Type Text · Size 3 B · Copied Today at 10:00
 footer: Copy (enter) · Actions (ctrl-k)
+```
+
+### The information panel's sizes
+
+Each line of the `sizes` block is a clip's size in bytes and what the information panel shows for it. A unit test in `crates/lyncast/src/palette/clips.rs` reads it.
+
+```sizes
+999 => 999 B
+1000 => 1.0 kB
+1549 => 1.5 kB
+1550 => 1.6 kB
+999949 => 999.9 kB
+999950 => 1.0 MB
+26214400 => 26.2 MB
 ```
 
 ### The filter keeps the clips that hold every word
@@ -1622,6 +1800,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ type EXAMPLE
 clipboard "EXAMPLE" All Types
@@ -1629,11 +1809,15 @@ clipboard "EXAMPLE" All Types
   link: https://example.org/a
 == Today
 > email: me@example.org
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ type  me
 clipboard "EXAMPLE me" All Types
 == Today
 > email: me@example.org
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 clipboard (Search clipboard history) All Types
@@ -1648,6 +1832,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) Text Only
@@ -1658,6 +1844,8 @@ clipboard (Search clipboard history) Text Only
   email: me@example.org
 == Oct 15
   text: a note
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ hold ctrl-t
 clipboard (Search clipboard history) Text Only
@@ -1668,11 +1856,15 @@ clipboard (Search clipboard history) Text Only
   email: me@example.org
 == Oct 15
   text: a note
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) Images Only
 == Oct 15, 2025
 > image: Image
+preview: image 2x1 drawn 2x1
+info: Source — · Type Image · Size 77 B · Copied Oct 15, 2025 at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ type a
 clipboard "a" Images Only
@@ -1681,16 +1873,22 @@ $ press escape ctrl-t
 clipboard (Search clipboard history) Files Only
 == Yesterday
 > files: hostname +1
+preview: files "/etc/hostname\n/etc/os-release"
+info: Source — · Type Files · Path /etc/hostname · Size 43 B · Copied Yesterday at 18:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) Links Only
 == Pinned
 > link: https://example.org/a
+preview: text "https://example.org/a"
+info: Source — · Type Link · Size 21 B · Copied Today at 10:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) Emails Only
 == Today
 > email: me@example.org
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) All Types
@@ -1705,6 +1903,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 ```
 
@@ -1736,11 +1936,15 @@ $ press tab
 clipboard "lines" All Types
 == Oct 15
 > text: a note
+preview: text "a note\nwith two lines"
+info: Source — · Type Text · Size 21 B · Copied Oct 15 at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ hold tab
 clipboard "lines" All Types
 == Oct 15
 > text: a note
+preview: text "a note\nwith two lines"
+info: Source — · Type Text · Size 21 B · Copied Oct 15 at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press tab
 root "lines"
@@ -1758,6 +1962,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 root (Search for apps and commands)
@@ -1788,6 +1994,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press enter
 clipboard (Search clipboard history) All Types
@@ -1802,6 +2010,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: failed: not copied: no Wayland compositor
 $ press backspace
 root (Search for apps and commands)
@@ -1878,6 +2088,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ release enter
 clipboard (Search clipboard history) All Types
@@ -1892,6 +2104,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ type qz
 clipboard "qz" All Types
@@ -1912,6 +2126,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ hold backspace
 clipboard (Search clipboard history) All Types
@@ -1926,6 +2142,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press backspace
 root (Search for apps and commands)
@@ -1958,6 +2176,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press backspace
 clipboard (Search clipboard history) All Types
@@ -1972,6 +2192,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press tab
 root (Search for apps and commands)
@@ -2032,6 +2254,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 root (Search for apps and commands)
@@ -2064,6 +2288,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press escape
 closed
@@ -2087,6 +2313,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press enter
 clipboard (Search clipboard history) All Types
@@ -2101,6 +2329,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: failed: not copied: no Wayland compositor
 $ press ctrl-k
 clipboard (Search clipboard history) All Types
@@ -2115,6 +2345,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 menu (Search for actions)
 > Copy  (enter)
   Pin
@@ -2133,6 +2365,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 footer: closing
 $ release enter
 closed
@@ -2149,6 +2383,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ press up ctrl-k
 clipboard (Search clipboard history) All Types
@@ -2163,6 +2399,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 menu (Search for actions)
 > Copy  (enter)
   Unpin
@@ -2181,6 +2419,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 menu "un"
 > Unpin
 footer: Unpin (enter) · Actions (ctrl-k)
@@ -2197,6 +2437,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 footer: closing
 $ release enter
 closed
@@ -2213,6 +2455,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-k
 clipboard (Search clipboard history) All Types
@@ -2227,6 +2471,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 12:00
 menu (Search for actions)
 > Copy  (enter)
   Pin
@@ -2244,6 +2490,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: closing
 $ release enter
 closed
@@ -2259,6 +2507,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 ```
 
@@ -2280,6 +2530,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "\n  alpha\nbeta"
+info: Source — · Type Text · Size 13 B · Copied Today at 09:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press down
 clipboard (Search clipboard history) All Types
@@ -2294,6 +2546,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ capture text gamma
 clipboard (Search clipboard history) All Types
@@ -2309,6 +2563,8 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 08:30
 footer: Copy (enter) · Actions (ctrl-k)
 $ capture text me@example.org
 clipboard (Search clipboard history) All Types
@@ -2324,6 +2580,138 @@ clipboard (Search clipboard history) All Types
   text: a note
 == Oct 15, 2025
   image: Image
+preview: text "me@example.org"
+info: Source — · Type Email · Size 14 B · Copied Today at 12:00
+footer: Copy (enter) · Actions (ctrl-k)
+```
+
+### The preview shows images, and file lists as images or paths
+
+An image over 32 million pixels shows its size, and an image file that a file list names first shows as an image. A FIFO there is never opened, and a file over 25 MiB is never read. A file that is gone shows why, and any other file shows its paths. An image wider or taller than the pane is drawn scaled down to fit it: 1680 by 200 pixels at 840 by 100, and 200 by 1000 at 96 by 480.
+
+```clips previews
+image 200x1000 2026-10-17T07:00
+image 1680x200 2026-10-17T07:30
+image 6000x6000 2026-10-17T08:00
+files file://$TREE/big.png 2026-10-17T08:30
+files file://$TREE/photo.png 2026-10-17T09:00
+files file://$TREE/fifo.png 2026-10-17T10:00
+files file://$TREE/gone.PNG 2026-10-17T11:00
+files file://$TREE/notes.txt 2026-10-17T11:30
+```
+
+```palette clips=previews
+$ history
+clipboard (Search clipboard history) All Types
+== Today
+> files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+  files: photo.png
+  files: big.png
+  image: Image
+  image: Image
+  image: Image
+preview: files "$TREE/notes.txt"
+info: Source — · Type Files · Path $TREE/notes.txt · Size 257 B · Copied Today at 11:30
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+> files: gone.PNG
+  files: fifo.png
+  files: photo.png
+  files: big.png
+  image: Image
+  image: Image
+  image: Image
+preview: no image: $TREE/gone.PNG: No such file or directory (os error 2)
+info: Source — · Type Files · Path $TREE/gone.PNG · Size 256 B · Copied Today at 11:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+> files: fifo.png
+  files: photo.png
+  files: big.png
+  image: Image
+  image: Image
+  image: Image
+preview: no image: $TREE/fifo.png: not a regular file
+info: Source — · Type Files · Path $TREE/fifo.png · Size 256 B · Copied Today at 10:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+> files: photo.png
+  files: big.png
+  image: Image
+  image: Image
+  image: Image
+preview: image 3x2 drawn 3x2
+info: Source — · Type Files · Path $TREE/photo.png · Size 257 B · Copied Today at 09:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+  files: photo.png
+> files: big.png
+  image: Image
+  image: Image
+  image: Image
+preview: no image: $TREE/big.png: over 25 MiB
+info: Source — · Type Files · Path $TREE/big.png · Size 255 B · Copied Today at 08:30
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+  files: photo.png
+  files: big.png
+> image: Image
+  image: Image
+  image: Image
+preview: image too large 6000x6000
+info: Source — · Type Image · Size 65 B · Copied Today at 08:00
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+  files: photo.png
+  files: big.png
+  image: Image
+> image: Image
+  image: Image
+preview: image 1680x200 drawn 840x100
+info: Source — · Type Image · Size 7.1 kB · Copied Today at 07:30
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down
+clipboard (Search clipboard history) All Types
+== Today
+  files: notes.txt
+  files: gone.PNG
+  files: fifo.png
+  files: photo.png
+  files: big.png
+  image: Image
+  image: Image
+> image: Image
+preview: image 200x1000 drawn 96x480
+info: Source — · Type Image · Size 6.6 kB · Copied Today at 07:00
 footer: Copy (enter) · Actions (ctrl-k)
 ```
 
@@ -2396,7 +2784,7 @@ A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdou
 - `$ keys <key>...` types keys into the compositor with `python3 -I scripts/x11.py <display> focus keys <key>...`, on the X display that `$RUNTIME/display` names. Each key is an X keysym name, such as `f` or `Return`, and `ctrl+v` holds Ctrl while it taps `v`. The script gives the X input focus to anvil's window, sends the keys through XTEST, and returns once the X server has handled them.
 - `$ wait-summon <open|closed>` runs `lyncast status` until it prints that state.
 - `$ stall-stdout` gives the next daemon a stdout that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stdout`. `$ drain-stdout` reads what fills it, and from then on what the daemon writes to stdout goes on to `$RUNTIME/daemon.stdout`.
-- `$ shot <name>` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, and two reads in a row agree. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` when every pixel on the box's edge has that color, or `edge mixed`, and `colors` with each color that covers at least 1% of the box, most first. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
+- `$ shot <name> [<color>...]` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, in which each `<color>` covers at least 1% of the box, and two reads in a row agree. The colors let a block wait for what the window draws after its first frame, such as an image that loads. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` when every pixel on the box's edge has that color, or `edge mixed`, and `colors` with each color that covers at least 1% of the box, most first. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
 
 anvil reads the keys after `keys` returns, so a `keys` line holds no `record:` lines, and the programs its keys start count on the next line's. That line waits for what the keys do, as `wait-summon closed` waits for the window that a launch closes. Without that focus, anvil gave a GPUI window no key at all, and with it the window turned active at its first key (a GPUI probe under anvil, 2026-10-17). The keys summon block below fails when `x11.py` skips the focus (a deliberate break, 2026-10-17).
 
@@ -2803,6 +3191,29 @@ $ shot palette
 palette at 265,106 750x480
 edge 3a3a3e
 colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+```
+
+### A screenshot under anvil shows the clipboard screen
+
+Clipboard History from a client opens the window on the clipboard screen, at the same place. The image, seeded after the text, is the newest clip, so it is selected, and the pane shows it once it has loaded, as the shot waits for its green, `3c8c6e`. Then the background covers most of the box, the image 4.0%, the selected row 3.1%, and the borders 1.3%. The letter squares and the keys cover 0.9%, under the line, and text only takes pixels from them.
+
+```summon
+$ python3 -c 'import struct, sys, zlib; w, h = 160, 90; chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data)); rows = (b"\0" + b"\x3c\x8c\x6e" * w) * h; sys.stdout.buffer.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))' > green.png
+$ lyncast daemon --trace
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+$ seed-file image/png green.png
+$ wait-clips 2
+$ lyncast activate cmd:clipboard-history
+ran cmd:clipboard-history
+$ wait-trace frame1_presented 1
+$ shot clipboard 3c8c6e
+palette at 265,106 750x480
+edge 3a3a3e
+colors 1e1e20 3c8c6e 2e2e33 3a3a3e
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit

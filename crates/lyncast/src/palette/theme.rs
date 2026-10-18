@@ -43,6 +43,11 @@ pub const LIST_PAD: f32 = 4.0;
 /// The side of a row's icon, and of the letter square that stands in for one.
 pub const ICON: f32 = 24.0;
 
+/// The clipboard screen's list width, beside the preview pane, and the side of a file's badge
+/// in the pane.
+pub const CLIP_LIST: f32 = 300.0;
+pub const FILE_BADGE: f32 = 48.0;
+
 /// How far past the list's edges it lays out rows, so the row a key selects next has its
 /// height before the list scrolls to it.
 pub const OVERDRAW: f32 = 200.0;

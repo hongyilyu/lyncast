@@ -1,5 +1,5 @@
-//! The list: each line as GPUI's `list()` asks for it, and the scroll that keeps the selected
-//! row in view.
+//! The list and the clipboard screen: each line as GPUI's `list()` asks for it, the scroll that
+//! keeps the selected row in view, and the screen's list beside its panes.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use lyncast_core::{Row, Subject};
 
 use super::PaletteView;
 use super::draw::{clip_line, header_line, row_line};
+use super::panes::info_panel;
 use crate::palette::model::{Item, Line};
 use crate::palette::{icons, theme};
 
@@ -47,6 +48,40 @@ impl PaletteView {
                 }
             }
         }
+    }
+
+    pub(super) fn clipboard(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.model.selected_clip();
+        let pane = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .p_3()
+                    .overflow_hidden()
+                    .children(selected.map(|clip| self.preview_pane(clip, cx))),
+            )
+            .children(selected.map(info_panel));
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(
+                div()
+                    .w(px(theme::CLIP_LIST))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(rgb(theme::BORDER))
+                    .child(self.rows(cx)),
+            )
+            .child(pane)
+            .into_any_element()
     }
 
     /// Scrolls the selected row into view, and the header above it when the row is the first

@@ -5,6 +5,7 @@ mod icons;
 mod keys;
 mod model;
 mod pixels;
+mod preview;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -27,6 +28,7 @@ use gpui::{
 use crate::daemon::{self, Bell, Owner, Rung, Screen, Wake};
 use host::{Host, Next};
 use icons::{IconRoots, Icons};
+use preview::Preview;
 use trace::Trace;
 use view::PaletteView;
 use zone::Zone;
@@ -102,8 +104,8 @@ struct Exit {
     leftover: Rc<RefCell<Option<Owner>>>,
 }
 
-/// Starts the palette host in `cx`: the host with the icons from its roots, the observer of
-/// closed windows, the quit hook, and the owner task.
+/// Starts the palette host in `cx`: the host with the icons from its roots and the preview, the
+/// observer of closed windows, the quit hook, and the owner task.
 fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
     let Mount {
         owner,
@@ -114,7 +116,8 @@ fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
         exit,
     } = mounted;
     let icons = cx.new(|_| Icons::new(roots));
-    let host = cx.new(|_| Host::new(owner, icons, zone, trace));
+    let preview = cx.new(|_| Preview::default());
+    let host = cx.new(|_| Host::new(owner, icons, preview, zone, trace));
     let weak = host.downgrade();
     let closed = weak.clone();
     cx.on_window_closed(move |cx, id| {

@@ -27,8 +27,8 @@ Tab, or the Clipboard History command, opens the clipboard screen. Hongyi chose 
 - A filter input at the top. Its text filters entries, and the selection lands on the newest unpinned entry.
 - A type filter with All Types, Text Only, Images Only, Files Only, Links Only, and Emails Only. Links and emails are kinds derived from text, so the filter reads them from the same rows.
 - Rows grouped by day, newest first, with pins above the groups.
-- A preview pane. Text shows its content. Images show a preview capped in size, decoded from the blob only for the selected row. Files show their icon, plus an image preview when the file is an image. The MVP renders no PDFs or documents. Reading the freedesktop thumbnail cache (`~/.cache/thumbnails`) is the first follow-up.
-- An information panel with Source, Type, Path (files only), Size, and Copied (the capture time).
+- A preview pane. Text shows its content. Images show a preview capped in size, decoded from the blob only for the selected row. Files show a badge with their extension, or an image preview when the first file is an image ([palette](palette.md#the-preview-pane-and-the-information-panel)). The MVP renders no PDFs or documents. Reading the freedesktop thumbnail cache (`~/.cache/thumbnails`) is the first follow-up.
+- An information panel with Source, Type, Path (files only), Size, and Copied, the clip's last use, which a capture, a copy, a pin, and an unpin set.
 - A footer with the default action and Enter, plus Actions and Ctrl+K. The Actions menu offers Copy, Pin or Unpin, and Delete.
 
 The preview decodes one image at a time and drops it when the selection moves. That keeps image memory bounded by one preview, not by the history size. Vicinae reached 1.2 to 2.7 GB while scrolling images on niri, as reported in its issue #998 ([notes/01](../research/notes/01-landscape.md)).

@@ -63,6 +63,13 @@ impl Payload {
         };
         Ok((self.content, self.mime, body))
     }
+
+    /// Reads the bytes as a copy does, and gives what `look` makes of them. A stored row's read
+    /// waits for the writer, so the palette calls this off its main thread.
+    pub(crate) fn blocking_read_with<T>(self, look: impl FnOnce(&[u8]) -> T) -> Result<T, String> {
+        let (_, _, body) = self.read()?;
+        Ok(look(body.bytes()))
+    }
 }
 
 /// A text offers `text/plain;charset=utf-8`, which wl-clipboard-rs also offers as its other text
