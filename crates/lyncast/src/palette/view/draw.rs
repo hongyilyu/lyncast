@@ -1,5 +1,5 @@
-//! Elements drawn from their arguments alone: the field's text, a key's cap, a header, a row, an
-//! icon or its letter square, and the card.
+//! Elements drawn from their arguments alone: the field's text, a key's cap, a header, a row, a
+//! clip, an icon or a letter square, and the card.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use gpui::{
 use lyncast_core::Row;
 use lyncast_core::calc;
 
+use crate::palette::clips::ClipLine;
 use crate::palette::field::Field;
 use crate::palette::{model, theme};
 
@@ -66,7 +67,7 @@ pub(super) fn scroll(line: &ShapedLine, cursor: usize, width: Pixels) -> Pixels 
     (line.x_for_index(cursor) + px(theme::CARET_WIDTH) - width).max(px(0.0))
 }
 
-pub(super) fn header_line(name: &'static str) -> AnyElement {
+pub(super) fn header_line(name: SharedString) -> AnyElement {
     div()
         .w_full()
         .h(px(theme::HEADER))
@@ -108,14 +109,29 @@ pub(super) fn row_line(row: &Row, icon: Option<Arc<RenderImage>>, selected: bool
         .into_any_element()
 }
 
-pub(super) fn icon_slot(icon: Option<Arc<RenderImage>>, title: &str) -> AnyElement {
-    if let Some(icon) = icon {
-        return img(icon)
-            .size(px(theme::ICON))
-            .flex_none()
-            .into_any_element();
-    }
-    let letter: String = title.chars().take(1).flat_map(char::to_uppercase).collect();
+pub(super) fn clip_line(clip: &ClipLine, selected: bool) -> AnyElement {
+    let line = div()
+        .w_full()
+        .h(px(theme::ROW))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_2()
+        .rounded(px(6.0))
+        .child(letter_square(clip.letter()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(clip.title.clone()),
+        );
+    line.when(selected, |line| line.bg(rgb(theme::SELECTED)))
+        .into_any_element()
+}
+
+pub(super) fn letter_square(letter: impl Into<SharedString>) -> AnyElement {
     div()
         .size(px(theme::ICON))
         .flex_none()
@@ -126,8 +142,24 @@ pub(super) fn icon_slot(icon: Option<Arc<RenderImage>>, title: &str) -> AnyEleme
         .bg(rgb(theme::BADGE))
         .text_xs()
         .text_color(rgb(theme::MUTED))
-        .child(letter)
+        .child(letter.into())
         .into_any_element()
+}
+
+pub(super) fn icon_slot(icon: Option<Arc<RenderImage>>, title: &str) -> AnyElement {
+    if let Some(icon) = icon {
+        return img(icon)
+            .size(px(theme::ICON))
+            .flex_none()
+            .into_any_element();
+    }
+    letter_square(
+        title
+            .chars()
+            .take(1)
+            .flat_map(char::to_uppercase)
+            .collect::<String>(),
+    )
 }
 
 pub(super) fn card_line(card: &calc::Answer, selected: bool) -> AnyElement {

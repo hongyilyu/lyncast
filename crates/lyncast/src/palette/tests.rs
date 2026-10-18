@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::{self, Command as Process, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
@@ -14,27 +14,29 @@ use std::time::{Duration, Instant};
 
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
 use gpui::{
-    Bounds, Context, Entity, EntityInputHandler, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
-    Modifiers, Pixels, Render, RenderImage, TestAppContext, TestDispatcher, VisualTestContext,
-    Window, WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, EntityInputHandler, IntoElement, KeyDownEvent, KeyUpEvent,
+    Keystroke, Modifiers, Pixels, Render, RenderImage, TestAppContext, TestDispatcher,
+    VisualTestContext, Window, WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
 };
-use lyncast_core::AppId;
 use lyncast_core::clip::Retention;
 use lyncast_core::desktop::{self, App as Entry, Session, Verdict};
-use lyncast_core::rank::{Index, Visits};
+use lyncast_core::rank::{Index, Timestamp, Visits};
+use lyncast_core::{AppId, Chord, ClipId, Command, Key};
 
+use super::clips::Civil;
 use super::field::MAX_BYTES;
 use super::host::Host;
 use super::icons::{self, CAPACITY, IconRoots, Icons};
 use super::trace::Trace;
 use super::view::inspect::Caret;
 use super::view::{FIELD, PaletteView};
+use super::zone::Zone;
 use super::{Exit, Mount};
-use crate::clip::Clips;
+use crate::clip::{self, Clips};
 use crate::daemon::{self, Bell, Daemon, Events};
 use crate::doc::{self, Block};
 use crate::vars::Vars;
-use crate::wire::Request;
+use crate::wire::{Request, Via};
 
 struct Blank;
 
@@ -98,12 +100,11 @@ fn the_window_is_placed_as_the_geometry_block_says(cx: &mut TestAppContext) {
     assert_eq!(shell.namespace, "lyncast");
 }
 
-/// model.rs and field.rs hold the palette's rules and stay free of GPUI, so the rules read
-/// without the framework and a change to GPUI cannot reach them.
 #[test]
 fn the_model_never_names_gpui() {
     for (file, text) in [
         ("model.rs", include_str!("model.rs")),
+        ("clips.rs", include_str!("clips.rs")),
         ("field.rs", include_str!("field.rs")),
     ] {
         for (at, line) in text.lines().enumerate() {
@@ -116,6 +117,8 @@ fn the_model_never_names_gpui() {
     }
 }
 
+const PALETTE_BLOCKS: usize = 24;
+
 #[test]
 fn every_palette_block_runs_as_the_doc_says() {
     let fixtures = doc::PALETTE
@@ -127,12 +130,12 @@ fn every_palette_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        17,
-        "palette.md holds 17 palette blocks, so a lost block fails"
+        PALETTE_BLOCKS,
+        "palette.md holds {PALETTE_BLOCKS} palette blocks, so a lost block fails"
     );
     let failures: Vec<String> = blocks
         .into_iter()
-        .flat_map(|block| run(apps(&fixtures), block))
+        .flat_map(|block| run(&fixtures, block))
         .collect();
     assert!(
         failures.is_empty(),
@@ -159,6 +162,13 @@ fn the_caret_stays_in_the_field() {
         ("mark $LONG", Caret::AtEnd),
         ("insert $LONG", Caret::AtEnd),
         ("press home", Caret::AtStart),
+        ("press escape", Caret::AtStart),
+        ("press tab", Caret::AtStart),
+        ("insert $LONG", Caret::AtEnd),
+        ("press home", Caret::AtStart),
+        ("press end", Caret::AtEnd),
+        ("press escape", Caret::AtStart),
+        ("mark $LONG", Caret::AtEnd),
     ];
     for (step, want) in steps {
         palette
@@ -196,7 +206,7 @@ fn the_selection_stays_in_view() {
     for step in steps.chain(["press down"; 250]).chain(["press up"; 250]) {
         palette.step(step).expect("the step runs");
         let (row, _, list) = palette
-            .view(PaletteView::selected_bounds)
+            .view(|view, _| view.selected_bounds())
             .expect("an open window");
         assert!(
             inside(row, list),
@@ -204,9 +214,53 @@ fn the_selection_stays_in_view() {
         );
     }
     let (_, header, list) = palette
-        .view(PaletteView::selected_bounds)
+        .view(|view, _| view.selected_bounds())
         .expect("an open window");
     assert!(inside(header, list), "the header at {header:?} is hidden");
+
+    let pins = (1..=20).map(|n| format!("text pin {n:02} 2026-10-17T08:{n:02}"));
+    let pinned = (1..=20).map(|n| format!("pin {n} 2026-10-17T09:{n:02}"));
+    let clips: Vec<String> = pins
+        .chain(pinned)
+        .chain(["text landing 2026-10-17T10:00".to_owned()])
+        .collect();
+    let mut palette = Palette::build(Vec::new(), IconRoots::default(), &clips, "in-view-clips");
+    let selected = |palette: &Palette| {
+        palette
+            .view(|view, _| view.selected_bounds())
+            .expect("an open window")
+    };
+    for step in ["history"].into_iter().chain(["press up"; 20]) {
+        palette.step(step).expect("the step runs");
+        let (row, _, list) = selected(&palette);
+        assert!(
+            inside(row, list),
+            "{step}: the clip at {row:?} is outside the list at {list:?}"
+        );
+    }
+    let (_, header, list) = selected(&palette);
+    assert!(
+        inside(header, list),
+        "the Pinned header at {header:?} is hidden"
+    );
+    let today: Vec<String> = (1..=30)
+        .map(|n| format!("text clip {n:02} 2026-10-17T09:{n:02}"))
+        .collect();
+    let mut days = Palette::build(Vec::new(), IconRoots::default(), &today, "in-view-days");
+    let steps = ["history"].into_iter();
+    for step in steps.chain(["press down"; 20]).chain(["press up"; 20]) {
+        days.step(step).expect("the step runs");
+        let (row, _, list) = selected(&days);
+        assert!(
+            inside(row, list),
+            "{step}: the clip at {row:?} is outside the list at {list:?}"
+        );
+    }
+    let (_, header, list) = selected(&days);
+    assert!(
+        inside(header, list),
+        "the Today header at {header:?} is hidden"
+    );
 }
 
 #[test]
@@ -229,11 +283,11 @@ fn icons_stay_bounded() {
         data_dirs: Some(dir.clone().into_os_string()),
         ..Vars::default()
     };
-    let mut palette = Palette::with_icons(apps, IconRoots::from_vars(&vars), "icons");
+    let mut palette = Palette::build(apps, IconRoots::from_vars(&vars), &[], "icons");
     let mut laid_out = HashSet::new();
     let mut step = |palette: &mut Palette, step: &str| {
         palette.step(step).expect("the step runs");
-        laid_out.extend(palette.view(PaletteView::laid_out).unwrap_or_default());
+        laid_out.extend(palette.view(|view, _| view.laid_out()).unwrap_or_default());
         let held = palette.icons(Icons::len);
         let apps = laid_out
             .iter()
@@ -273,8 +327,77 @@ fn icons_stay_bounded() {
     fs::remove_dir_all(&dir).expect("the icon tree goes");
 }
 
-fn run(apps: Vec<Entry>, block: &Block) -> Vec<String> {
-    let mut palette = Palette::new(apps, &block.line.to_string());
+#[test]
+fn every_zone_reads_as_the_doc_says() {
+    const CHILD: &str = "LYNCAST_ZONE_CHILD";
+    if env::var_os(CHILD).is_some() {
+        let wall = Zone::load().date(NOW);
+        println!("wall {:02}:{:02}", wall.hour, wall.minute);
+        return;
+    }
+    let blocks = doc::PALETTE.blocks("zone");
+    let [block] = blocks.as_slice() else {
+        panic!("palette.md holds one zone block");
+    };
+    let fifo = scratch().join(format!("{}-zone.fifo", process::id()));
+    let _ = fs::remove_file(&fifo);
+    mkfifo(&fifo).expect("the zone FIFO");
+    let exe = env::current_exe().expect("the test binary's path");
+    let mut failures = Vec::new();
+    for line in &block.lines {
+        let (tz, want) = line.split_once(" => ").expect("<TZ> => <wall>");
+        let tz = tz.replace("$FIFO", fifo.to_str().expect("a UTF-8 path"));
+        let mut child = Process::new(&exe)
+            .args([
+                "--exact",
+                "palette::tests::every_zone_reads_as_the_doc_says",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("TZ", tz)
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the test binary runs");
+        let deadline = Instant::now() + BUDGET;
+        while child.try_wait().expect("the child's status").is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let out = child.wait_with_output().expect("the child's output");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !stdout.lines().any(|got| got == format!("wall {want}")) {
+            failures.push(format!(
+                "line {}: {line}\n  the child printed {stdout}",
+                block.line
+            ));
+        }
+    }
+    fs::remove_file(&fifo).expect("the FIFO goes");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
+    let clips = block
+        .args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("clips="))
+        .map(|name| {
+            let seeds = fixtures.iter().find(|seeds| {
+                seeds.kind == "clips" && seeds.args.first().is_some_and(|arg| arg == name)
+            });
+            seeds.unwrap_or_else(|| panic!("line {}: no clips {name} block", block.line))
+        });
+    let clips = clips.map_or(&[][..], |clips| clips.lines.as_slice());
+    let mut palette = Palette::build(
+        apps(fixtures),
+        IconRoots::default(),
+        clips,
+        &block.line.to_string(),
+    );
     let mut failures = Vec::new();
     let mut rest = block.lines.as_slice();
     while let [step, after @ ..] = rest {
@@ -347,6 +470,12 @@ fn entry(path: &str, text: &str) -> Entry {
 
 const BUDGET: Duration = Duration::from_secs(60);
 
+/// The Tier 3 daemon's clock: 2026-10-17 at 10:00 UTC.
+const NOW: Timestamp = Timestamp(1_792_231_200_000);
+/// The wall that the Tier 3 blocks read their days on, two hours east of UTC.
+const WALL_EAST: i64 = 2 * 3600;
+const WALL: Zone = Zone::East(WALL_EAST);
+
 struct Palette {
     cx: TestAppContext,
     host: Entity<Host>,
@@ -358,10 +487,10 @@ struct Palette {
 
 impl Palette {
     fn new(apps: Vec<Entry>, name: &str) -> Palette {
-        Palette::with_icons(apps, IconRoots::default(), name)
+        Palette::build(apps, IconRoots::default(), &[], name)
     }
 
-    fn with_icons(apps: Vec<Entry>, roots: IconRoots, name: &str) -> Palette {
+    fn build(apps: Vec<Entry>, roots: IconRoots, clips: &[String], name: &str) -> Palette {
         let cx = TestAppContext::build(TestDispatcher::new(0), None);
         // Jobs run on real worker threads, and each wakes the owner task from outside the test
         // scheduler. With parking allowed, the scheduler takes such a wake without recording
@@ -369,15 +498,26 @@ impl Palette {
         cx.executor().allow_parking();
         let record = scratch().join(format!("{}-{name}.runs", process::id()));
         let _ = fs::remove_file(&record);
-        let clips = Clips::open(None, Retention::DEFAULT, |_| {}, || {}).unwrap();
+        let mut history = Clips::open(None, Retention::Forever, |_| {}, || {}).unwrap();
+        for line in clips {
+            seed(&mut history, line).unwrap_or_else(|error| panic!("clips line {line}: {error}"));
+        }
         let index = Index::new(apps);
-        let daemon = Daemon::new(Vars::default(), index, Visits::default(), None, clips, None);
+        let daemon = Daemon::new(
+            Vars::default(),
+            index,
+            Visits::default(),
+            None,
+            history,
+            None,
+        );
         let (bell, rung) = Bell::new();
-        let (owner, events) = daemon::detached(daemon, &record, bell);
+        let (owner, events) = daemon::detached(daemon, &record, bell, || NOW);
         let exit = Exit::default();
         let mounted = Mount {
             owner,
             roots,
+            zone: WALL,
             rung,
             trace: Trace::OFF,
             exit: exit.clone(),
@@ -396,11 +536,28 @@ impl Palette {
     }
 
     fn step(&mut self, step: &str) -> Result<(), String> {
+        for part in step.split(" + ") {
+            self.act(part)?;
+        }
+        self.settle();
+        Ok(())
+    }
+
+    fn act(&mut self, step: &str) -> Result<(), String> {
         let (verb, text) = step.split_once(' ').unwrap_or((step, ""));
         match (verb, text) {
             ("open" | "toggle", "") => {
                 self.events
                     .send_or_drop(daemon::from_socket(Request::Toggle));
+            }
+            ("history", "") => {
+                self.events
+                    .send_or_drop(daemon::from_socket(Request::Activate {
+                        key: Key::Command(Command::ClipboardHistory),
+                        via: Via::Chord(Chord::Enter),
+                        confirmed: false,
+                        query: String::new(),
+                    }));
             }
             ("type", text) => self.visual()?.simulate_input(text),
             ("press", keys) => self.visual()?.simulate_keystrokes(keys),
@@ -436,7 +593,6 @@ impl Palette {
             ("blur", "") => self.visual()?.deactivate_window(),
             _ => return Err(format!("no step {step}")),
         }
-        self.settle();
         Ok(())
     }
 
@@ -469,11 +625,7 @@ impl Palette {
             ErrorKind::NotFound => Ok(()),
             _ => Err(error.to_string()),
         })?;
-        let path = CString::new(self.record.as_os_str().as_bytes()).expect("a path with no NUL");
-        // SAFETY: `path` is a NUL-terminated string that lives through the call.
-        if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
-            return Err(format!("mkfifo: {}", io::Error::last_os_error()));
-        }
+        mkfifo(&self.record)?;
         self.stalled = Some(kept);
         Ok(())
     }
@@ -525,18 +677,18 @@ impl Palette {
             .expect("the window takes an update")
     }
 
-    fn view<R>(&self, read: impl FnOnce(&PaletteView) -> R) -> Option<R> {
+    fn view<R>(&self, read: impl FnOnce(&PaletteView, &App) -> R) -> Option<R> {
         let window = self.window()?;
-        window.read_with(&self.cx, |view, _| read(view)).ok()
+        window.read_with(&self.cx, read).ok()
     }
 
     fn dump(&self) -> String {
-        self.view(PaletteView::dump)
-            .unwrap_or_else(|| match &*self.exit.outcome.borrow() {
-                None => "closed\n".to_owned(),
-                Some(Ok(())) => "stopped\n".to_owned(),
-                Some(Err(error)) => format!("stopped: {error}\n"),
-            })
+        let dump = self.view(|view, _| view.dump());
+        dump.unwrap_or_else(|| match &*self.exit.outcome.borrow() {
+            None => "closed\n".to_owned(),
+            Some(Ok(())) => "stopped\n".to_owned(),
+            Some(Err(error)) => format!("stopped: {error}\n"),
+        })
     }
 
     fn recorded(&self) -> Vec<u8> {
@@ -547,10 +699,63 @@ impl Palette {
     }
 }
 
+fn seed(clips: &mut Clips, line: &str) -> Result<(), String> {
+    let (rest, time) = line.rsplit_once(' ').ok_or("<kind> <value> <time>")?;
+    let at = wall_time(time)
+        .ok_or_else(|| format!("not a time {time}"))?
+        .timestamp(WALL_EAST);
+    match rest.split_once(' ').ok_or("<kind> <value>")? {
+        ("pin", id) => clips.pin(ClipId(id.parse().map_err(|_| "pin <id>")?), at),
+        (kind, value) => {
+            clips.record(captured(kind, value)?, at);
+            Ok(())
+        }
+    }
+}
+
+/// A `YYYY-MM-DDTHH:MM` wall time.
+fn wall_time(text: &str) -> Option<Civil> {
+    let (date, time) = text.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<u32>);
+    let (hour, minute) = time.split_once(':')?;
+    Some(Civil {
+        year: i64::from(date.next()?.ok()?),
+        month: date.next()?.ok()?,
+        day: date.next()?.ok()?,
+        hour: hour.parse().ok()?,
+        minute: minute.parse().ok()?,
+    })
+}
+
+fn captured(kind: &str, value: &str) -> Result<clip::Entry, String> {
+    let value = value.replace("\\n", "\n");
+    Ok(match kind {
+        "text" => clip::Entry::captured_text(&value),
+        "files" => clip::Entry::captured_files(&value).ok_or("no local file")?,
+        "image" => {
+            let size = value.split_once('x').and_then(|(width, height)| {
+                Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
+            });
+            let (width, height) = size.ok_or("image <w>x<h>")?;
+            clip::Entry::captured_image(icons::tests::png(width, height))
+        }
+        _ => return Err(format!("no clip kind {kind}")),
+    })
+}
+
 impl Drop for Palette {
     fn drop(&mut self) {
         self.cx.quit();
         let _ = fs::remove_file(&self.record);
         let _ = fs::remove_file(self.record.with_extension("lock"));
     }
+}
+
+fn mkfifo(path: &Path) -> Result<(), String> {
+    let path = CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
+    // SAFETY: `path` is a NUL-terminated string that lives through the call.
+    if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+        return Err(format!("mkfifo: {}", io::Error::last_os_error()));
+    }
+    Ok(())
 }

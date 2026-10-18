@@ -81,7 +81,7 @@ The commands run like this:
 
 | Command | Runs |
 |---|---|
-| Clipboard History | opens the summon. Plan step 7 shows the clipboard screen. |
+| Clipboard History | opens the summon. The palette opens it on the clipboard screen, or shows that screen in the open window ([palette](palette.md#tab-opens-the-clipboard-screen)). |
 | Open Config | creates `$XDG_CONFIG_HOME/lyncast/config.toml` if it is missing, then runs `xdg-open <path>` |
 | Reload Apps | scans the apps again |
 | Quit lyncast | stops taking requests, waits for the work in flight and the last writes of the visits and the clips, gives up the lock, replies, and exits 0 |

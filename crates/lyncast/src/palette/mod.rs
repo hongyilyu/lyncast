@@ -1,3 +1,4 @@
+mod clips;
 mod field;
 mod host;
 mod icons;
@@ -9,6 +10,7 @@ mod tests;
 mod theme;
 mod trace;
 mod view;
+mod zone;
 
 use std::cell::RefCell;
 use std::env;
@@ -22,11 +24,12 @@ use gpui::{
     WindowKind, WindowOptions, WindowingModes, point, px, size,
 };
 
-use crate::daemon::{self, Bell, Owner, Rung, Wake};
+use crate::daemon::{self, Bell, Owner, Rung, Screen, Wake};
 use host::{Host, Next};
 use icons::{IconRoots, Icons};
 use trace::Trace;
 use view::PaletteView;
+use zone::Zone;
 
 const TRACE_BEFORE_EXIT: Duration = Duration::from_secs(1);
 
@@ -55,10 +58,12 @@ fn serve(record: Option<PathBuf>, trace: Trace) -> Result<(), String> {
     let (bell, rung) = Bell::new();
     let owner = daemon::start(record, Some(bell))?;
     let roots = IconRoots::from_vars(owner.daemon().vars());
+    let zone = Zone::load();
     let exit = Exit::default();
     let mounted = Mount {
         owner,
         roots,
+        zone,
         rung,
         trace,
         exit: exit.clone(),
@@ -83,6 +88,7 @@ fn serve(record: Option<PathBuf>, trace: Trace) -> Result<(), String> {
 struct Mount {
     owner: Owner,
     roots: IconRoots,
+    zone: Zone,
     rung: Rung,
     trace: Trace,
     exit: Exit,
@@ -102,12 +108,13 @@ fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
     let Mount {
         owner,
         roots,
+        zone,
         rung,
         trace,
         exit,
     } = mounted;
     let icons = cx.new(|_| Icons::new(roots));
-    let host = cx.new(|_| Host::new(owner, icons, trace));
+    let host = cx.new(|_| Host::new(owner, icons, zone, trace));
     let weak = host.downgrade();
     let closed = weak.clone();
     cx.on_window_closed(move |cx, id| {
@@ -155,12 +162,13 @@ async fn own(host: WeakEntity<Host>, mut rung: Rung, cx: &mut AsyncApp) -> Resul
 fn open_window(
     cx: &mut App,
     host: &WeakEntity<Host>,
+    screen: Screen,
     trace: Trace,
     seq: u32,
 ) -> gpui::Result<WindowHandle<PaletteView>> {
     let icons = host.read_with(cx, |host, _| host.icons())?;
     cx.open_window(options(cx), |window, cx| {
-        cx.new(|cx| PaletteView::new(window, cx, host, icons, trace, seq))
+        cx.new(|cx| PaletteView::new(window, cx, host, icons, screen, trace, seq))
     })
 }
 

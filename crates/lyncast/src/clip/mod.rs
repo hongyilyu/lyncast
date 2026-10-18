@@ -193,6 +193,22 @@ impl Entry {
     }
 }
 
+#[cfg(test)]
+impl Entry {
+    pub(crate) fn captured_text(text: &str) -> Entry {
+        Entry::text(text, TEXT.to_owned())
+    }
+
+    /// `None` when `list` names no local file.
+    pub(crate) fn captured_files(list: &str) -> Option<Entry> {
+        Entry::files(list, URI_LIST.to_owned())
+    }
+
+    pub(crate) fn captured_image(png: Vec<u8>) -> Entry {
+        Entry::image(png, "image/png".to_owned())
+    }
+}
+
 #[derive(Clone)]
 pub struct Row {
     pub id: ClipId,
@@ -221,6 +237,11 @@ impl Row {
             pinned,
             seq,
         }
+    }
+
+    /// When the row was last used: captured, copied, pinned, or unpinned.
+    pub fn used(&self) -> Timestamp {
+        self.used
     }
 
     fn place(&self) -> Place {

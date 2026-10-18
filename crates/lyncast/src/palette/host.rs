@@ -6,19 +6,19 @@ use std::time::Duration;
 
 use futures::channel::oneshot;
 use gpui::{App, Context, Entity, WeakEntity, WindowHandle, WindowId};
-use lyncast_core::AppId;
+use lyncast_core::rank::Timestamp;
 
 use super::icons::Icons;
 use super::trace::Trace;
 use super::view::PaletteView;
-use crate::daemon::{Answer, Face, IsOpen, Owner, Wait};
+use super::zone::Zone;
+use crate::daemon::{Answer, Daemon, Face, IsOpen, Owner, Screen, Wait};
 use crate::warning::warn;
 use crate::wire::{Request, Summon};
 
 enum Shown {
     Closed,
-    /// The deferred open of this summon is on its way.
-    Opening(u32),
+    Opening { seq: u32, screen: Screen },
     Open(WindowHandle<PaletteView>),
 }
 
@@ -37,6 +37,7 @@ pub struct Host {
     summons: Summons,
     windows: Vec<(WindowId, u32)>,
     icons: Entity<Icons>,
+    zone: Zone,
 }
 
 struct Summons {
@@ -46,7 +47,7 @@ struct Summons {
 }
 
 impl Host {
-    pub fn new(owner: Owner, icons: Entity<Icons>, trace: Trace) -> Host {
+    pub fn new(owner: Owner, icons: Entity<Icons>, zone: Zone, trace: Trace) -> Host {
         Host {
             owner: Some(owner),
             summons: Summons {
@@ -56,24 +57,31 @@ impl Host {
             },
             windows: Vec::new(),
             icons,
+            zone,
         }
+    }
+
+    /// The daemon, for reads that change nothing, such as the clipboard history. `None` once
+    /// the stop has finished.
+    pub fn daemon(&self) -> Option<&Daemon> {
+        self.owner.as_ref().map(Owner::daemon)
+    }
+
+    /// The zone of the wall clock and the daemon's time now, by the clock the owner reads.
+    /// `None` once the stop has finished.
+    pub fn wall(&self) -> Option<(Zone, Timestamp)> {
+        Some((self.zone, self.owner.as_ref()?.now()))
     }
 
     pub fn icons(&self) -> Entity<Icons> {
         self.icons.clone()
     }
 
-    /// The `Icon=` value of the app with this ID. `None` too once the stop has finished.
-    pub fn icon(&self, id: &AppId) -> Option<&str> {
-        self.owner.as_ref()?.daemon().icon(id)
-    }
-
     /// How the palette sends the daemon a request, which may change it. The answer is in the
     /// receiver at once unless the request starts a job, and then it comes when the job ends.
     /// `None` once the stop has finished. The root list's query comes here too, as a `query`
-    /// request, so [`Daemon::handle`](crate::daemon::Daemon::handle) gives the palette the rows
-    /// it gives a socket client. Any other read that changes nothing, such as [`Host::icon`],
-    /// goes to the daemon with no request.
+    /// request, so [`Daemon::handle`] gives the palette the rows it gives a socket client. Any
+    /// other read that changes nothing goes through [`Host::daemon`] with no request.
     pub fn ask(
         &mut self,
         request: Request,
@@ -123,16 +131,14 @@ impl Host {
     pub fn window(&self) -> Option<WindowHandle<PaletteView>> {
         match self.summons.shown {
             Shown::Open(handle) => Some(handle),
-            Shown::Closed | Shown::Opening(_) => None,
+            Shown::Closed | Shown::Opening { .. } => None,
         }
     }
 
     /// No job is out, so every answer the palette waits for is in its receiver.
     #[cfg(test)]
     pub fn idle(&self) -> bool {
-        self.owner
-            .as_ref()
-            .is_none_or(|owner| owner.daemon().jobs() == 0)
+        self.daemon().is_none_or(|daemon| daemon.jobs() == 0)
     }
 
     /// The quit hook's: the owner, for a stop that runs once GPUI's loop has ended.
@@ -150,11 +156,11 @@ impl Face for WindowFace<'_, '_> {
     fn summon(&self) -> Summon {
         match self.summons.shown {
             Shown::Closed => Summon::Closed,
-            Shown::Opening(_) | Shown::Open(_) => Summon::Open,
+            Shown::Opening { .. } | Shown::Open(_) => Summon::Open,
         }
     }
 
-    fn open(&mut self) {
+    fn open(&mut self, screen: Screen) {
         self.summons.newest += 1;
         let (seq, trace, host) = (
             self.summons.newest,
@@ -162,7 +168,7 @@ impl Face for WindowFace<'_, '_> {
             self.cx.weak_entity(),
         );
         trace.event(seq, "toggle_handled_open");
-        self.summons.shown = Shown::Opening(seq);
+        self.summons.shown = Shown::Opening { seq, screen };
         self.cx.defer(move |cx| open_summon(cx, &host, trace, seq));
     }
 
@@ -173,19 +179,33 @@ impl Face for WindowFace<'_, '_> {
             });
         }
     }
+
+    fn show_clipboard(&mut self) {
+        match &mut self.summons.shown {
+            Shown::Opening { screen, .. } => *screen = Screen::Clipboard,
+            Shown::Open(handle) => {
+                let handle = *handle;
+                self.cx.defer(move |cx| {
+                    let _ = handle.update(cx, |view, window, cx| view.show_clipboard(window, cx));
+                });
+            }
+            Shown::Closed => {}
+        }
+    }
 }
 
 fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32) {
-    if !host
-        .read_with(
-            cx,
-            |host, _| matches!(host.summons.shown, Shown::Opening(opening) if opening == seq),
-        )
-        .unwrap_or(false)
-    {
+    let opening = host.read_with(cx, |host, _| match host.summons.shown {
+        Shown::Opening {
+            seq: opening,
+            screen,
+        } if opening == seq => Some(screen),
+        _ => None,
+    });
+    let Ok(Some(screen)) = opening else {
         return;
-    }
-    match super::open_window(cx, host, trace, seq) {
+    };
+    match super::open_window(cx, host, screen, trace, seq) {
         Ok(handle) => {
             trace.event(seq, "window_opened");
             let _ = host.update(cx, |host, _| {

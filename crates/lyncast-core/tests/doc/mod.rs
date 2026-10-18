@@ -65,10 +65,12 @@ pub const PALETTE: Doc = Doc {
         "desktop",
         "executable",
         "palette",
+        "clips",
         "summon",
         "icon",
         "icons",
         "geometry",
+        "zone",
     ],
     prose: &["", "text"],
 };

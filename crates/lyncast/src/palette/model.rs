@@ -1,20 +1,26 @@
+use std::borrow::Cow;
 #[cfg(test)]
 use std::fmt::Write;
 use std::mem;
 use std::ops::Range;
 
-use lyncast_core::{ActionItem, Chord, Key, Kind, Row, Section, calc, fold};
+use lyncast_core::{ActionItem, Chord, Key, Kind, Row, Section, Subject, calc, fold};
 
+use super::clips::{ClipLine, Day, Kinds};
 use super::field::Field;
-use crate::daemon::{After, Answer};
+use crate::daemon::{After, Answer, Screen};
 use crate::wire::{Request, Via};
 
-/// What the empty field shows.
-pub const PLACEHOLDER: &str = "Search for apps and commands";
-/// What an empty list shows.
-pub const NO_RESULTS: &str = "No results";
+/// What the empty field shows on the root list.
+const PLACEHOLDER: &str = "Search for apps and commands";
+/// What the empty field shows on the clipboard screen.
+const CLIPS_PLACEHOLDER: &str = "Search clipboard history";
 /// What the Actions menu's empty field shows.
 pub const MENU_PLACEHOLDER: &str = "Search for actions";
+/// What an empty root list shows.
+const NO_RESULTS: &str = "No results";
+/// What an empty clipboard screen shows.
+const NO_CLIPS: &str = "No clips";
 /// What the Actions menu shows when its filter keeps no item.
 pub const NO_ACTIONS: &str = "No actions";
 
@@ -23,12 +29,35 @@ const ACTIVATING: &str = "enter";
 
 pub struct Model {
     field: Field,
-    rows: Vec<Row>,
+    scope: Scope,
     lines: Vec<Line>,
     selected_row: usize,
     overlay: Option<Overlay>,
     phase: Phase,
     was_active: bool,
+}
+
+enum Scope {
+    Root(Vec<Row>),
+    Clipboard(Clipboard),
+}
+
+/// The clipboard screen. `pushed` when it came from the root list, so Escape goes back there
+/// instead of closing.
+struct Clipboard {
+    pushed: bool,
+    kinds: Kinds,
+    clips: Vec<ClipLine>,
+}
+
+impl Scope {
+    fn clipboard(pushed: bool) -> Scope {
+        Scope::Clipboard(Clipboard {
+            pushed,
+            kinds: Kinds::All,
+            clips: Vec::new(),
+        })
+    }
 }
 
 enum Overlay {
@@ -43,7 +72,7 @@ enum Overlay {
 /// The Actions menu of one row: the row's items, default first, and a field that filters
 /// them. The keys and text go to it while it is open.
 pub struct Menu {
-    key: Key,
+    subject: Subject,
     items: Vec<(Option<Chord>, ActionItem)>,
     field: Field,
     selected_shown: usize,
@@ -51,6 +80,7 @@ pub struct Menu {
 
 enum MenuAfter {
     Edited,
+    Ignored,
     Close,
 }
 
@@ -128,20 +158,47 @@ pub fn question(title: &str) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Line {
-    /// The header of a section that has one.
-    Header(&'static str),
-    /// The row at this index in [`Model::row`].
+    Header(Heading),
+    /// The row at this index in the list that shows, which [`Model::item`] gives.
     Row(usize),
+}
+
+/// What a header names: a section of the root list, or a day of the clipboard screen's clips, or
+/// its pins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heading {
+    Section(&'static str),
+    Day(Day),
+}
+
+impl Heading {
+    pub fn label(self) -> Cow<'static, str> {
+        match self {
+            Heading::Section(name) => name.into(),
+            Heading::Day(day) => day.label().into(),
+        }
+    }
+}
+
+/// A row of the list that shows.
+pub enum Item<'m> {
+    Row(&'m Row),
+    Clip(&'m ClipLine),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
     /// The first press of Enter or Ctrl+Enter.
     Activate(Chord),
-    /// A held key's repeat of Enter, Escape, or Ctrl+K, which the palette takes and drops.
+    /// A held key's repeat of Enter, Escape, Ctrl+K, Tab, or Ctrl+T, which the palette takes
+    /// and drops.
     Ignore,
     /// Ctrl+K: opens the selected row's Actions menu, or closes it.
     Menu,
+    /// Tab: the root list or the clipboard screen, whichever does not show.
+    Tab,
+    /// Ctrl+T: the clipboard screen's next type filter.
+    CycleKinds,
     Up,
     Down,
     Left,
@@ -178,32 +235,47 @@ pub enum Input {
 pub enum Landed {
     /// The root list for the field's text.
     Rows(Vec<Row>),
+    /// The clipboard rows for the field's text and the type filter.
+    Clips(Vec<ClipLine>),
     /// The answer to the activation that is out.
     Answer(Answer),
+    /// Clipboard History from a client, while the window is open.
+    Show,
 }
 
 /// The one thing the view does next.
 pub enum Effect {
     /// Ask the daemon for the root list of this text.
     Query(String),
+    /// Read the clipboard rows for this filter and these kinds from the daemon's history.
+    Clips {
+        filter: String,
+        kinds: Kinds,
+    },
     /// Send the daemon this activation.
     Ask(Request),
     Close,
 }
 
 impl Model {
-    /// The model of a summon that has just opened, and the root list it asks for.
-    pub fn new() -> (Model, Effect) {
+    /// The model of a summon that has just opened on `screen`, and the list it asks for. A
+    /// summon that opens on the clipboard screen goes nowhere back: Escape closes it.
+    pub fn new(screen: Screen) -> (Model, Effect) {
+        let scope = match screen {
+            Screen::Root => Scope::Root(Vec::new()),
+            Screen::Clipboard => Scope::clipboard(false),
+        };
         let model = Model {
             field: Field::default(),
-            rows: Vec::new(),
+            scope,
             lines: Vec::new(),
             selected_row: 0,
             overlay: None,
             phase: Phase::Idle,
             was_active: false,
         };
-        (model, Effect::Query(String::new()))
+        let list = model.list();
+        (model, list)
     }
 
     /// A key press, typed text, or an input method's text. While an activation is out or the
@@ -213,7 +285,7 @@ impl Model {
         if let Phase::Pending { .. } | Phase::Closing { .. } = self.phase {
             return matches!(input, Input::Press(Press::Escape)).then_some(Effect::Close);
         }
-        let edited = match input {
+        match input {
             Input::Press(Press::Activate(chord)) => return self.activate(Via::Chord(chord)),
             Input::Press(Press::Ignore) => return None,
             Input::Press(Press::Escape) => return self.escape(),
@@ -225,20 +297,26 @@ impl Model {
                 self.focused_mut().unmark();
                 return None;
             }
-            input => {
-                if let Some(Overlay::Menu(menu)) = &mut self.overlay {
-                    match menu.edit(input) {
-                        MenuAfter::Edited => self.phase = Phase::Idle,
-                        MenuAfter::Close => self.overlay = None,
-                    }
-                    return None;
-                }
-                self.phase = Phase::Idle;
-                self.overlay = None;
-                self.edit(input)
+            _ => {}
+        }
+        if let Some(Overlay::Menu(menu)) = &mut self.overlay {
+            match menu.edit(input) {
+                MenuAfter::Edited => self.phase = Phase::Idle,
+                MenuAfter::Ignored => {}
+                MenuAfter::Close => self.overlay = None,
             }
-        };
-        edited.then(|| self.query())
+            return None;
+        }
+        self.overlay = None;
+        match input {
+            Input::Press(Press::Tab) => self.tab(),
+            Input::Press(Press::CycleKinds) => self.cycle_kinds(),
+            Input::Press(Press::Backspace { held: false }) if self.field.is_empty() => self.back(),
+            input => {
+                self.phase = Phase::Idle;
+                self.edit(input).then(|| self.list())
+            }
+        }
     }
 
     /// A key's release, by its name. `mods` says whether a modifier is held.
@@ -279,18 +357,53 @@ impl Model {
     pub fn land(&mut self, landed: Landed, mods: bool) -> Option<Effect> {
         match landed {
             Landed::Rows(rows) => {
-                self.lines = lines(&rows);
-                self.rows = rows;
-                self.selected_row = 0;
+                if let Scope::Root(held) = &mut self.scope {
+                    self.lines = lines(&rows);
+                    *held = rows;
+                    self.selected_row = 0;
+                }
+                None
+            }
+            Landed::Clips(clips) => {
+                let Scope::Clipboard(clipboard) = &mut self.scope else {
+                    return None;
+                };
+                self.lines = day_lines(&clips);
+                self.selected_row = clips.iter().position(|clip| !clip.pinned).unwrap_or(0);
+                clipboard.clips = clips;
                 None
             }
             Landed::Answer(answer) => self.answered(answer, mods),
+            Landed::Show => self.show_clipboard(),
         }
     }
 
-    /// The root list's field.
     pub fn field(&self) -> &Field {
         &self.field
+    }
+
+    /// The clipboard screen's type filter, or `None` on the root list.
+    pub fn kinds(&self) -> Option<Kinds> {
+        match &self.scope {
+            Scope::Clipboard(clipboard) => Some(clipboard.kinds),
+            Scope::Root(_) => None,
+        }
+    }
+
+    /// What the field shows while it is empty.
+    pub fn placeholder(&self) -> &'static str {
+        match self.scope {
+            Scope::Root(_) => PLACEHOLDER,
+            Scope::Clipboard(_) => CLIPS_PLACEHOLDER,
+        }
+    }
+
+    /// What the list shows while it is empty.
+    pub fn empty_text(&self) -> &'static str {
+        match self.scope {
+            Scope::Root(_) => NO_RESULTS,
+            Scope::Clipboard(_) => NO_CLIPS,
+        }
     }
 
     /// The field that has the caret and gets the window's text: the menu's while it is open.
@@ -319,8 +432,12 @@ impl Model {
         &self.lines
     }
 
-    pub fn row(&self, index: usize) -> &Row {
-        &self.rows[index]
+    /// The row of the list that shows at `index`.
+    pub fn item(&self, index: usize) -> Item<'_> {
+        match &self.scope {
+            Scope::Root(rows) => Item::Row(&rows[index]),
+            Scope::Clipboard(clipboard) => Item::Clip(&clipboard.clips[index]),
+        }
     }
 
     pub fn is_selected(&self, index: usize) -> bool {
@@ -329,9 +446,8 @@ impl Model {
 
     /// The selected row's line, if the list has a row.
     pub fn selected_line(&self) -> Option<usize> {
-        self.lines
-            .iter()
-            .position(|&line| line == Line::Row(self.selected_row))
+        let line = Line::Row(self.selected_row);
+        self.lines.iter().position(|&other| other == line)
     }
 
     pub fn footer(&self) -> Option<Footer<'_>> {
@@ -343,34 +459,43 @@ impl Model {
                 Some(Overlay::Confirm { title, .. }) => Footer::Confirm(title),
                 Some(Overlay::Menu(menu)) => Footer::Hint(menu.picked()?.label().to_owned()),
                 None => {
-                    let row = self.rows.get(self.selected_row)?;
-                    Footer::Hint(row.subject.actions().on(Chord::Enter).label().to_owned())
+                    let subject = self.subject()?;
+                    Footer::Hint(subject.actions().on(Chord::Enter).label().to_owned())
                 }
             },
         })
     }
 
     /// The text of palette.md's `palette` blocks: the field, the lines with the selected row
-    /// marked, and the footer.
+    /// marked, the overlay, and the footer.
     #[cfg(test)]
     pub fn dump(&self) -> String {
         let mut out = String::new();
-        if self.field.shows_placeholder() {
-            let _ = writeln!(out, "root ({PLACEHOLDER})");
+        let field = if self.field.shows_placeholder() {
+            format!("({})", self.placeholder())
         } else {
-            let _ = writeln!(out, "root {:?}", self.field.text());
-        }
+            format!("{:?}", self.field.text())
+        };
+        let _ = match self.kinds() {
+            None => writeln!(out, "root {field}"),
+            Some(kinds) => writeln!(out, "clipboard {field} {}", kinds.label()),
+        };
         for line in &self.lines {
             let _ = match *line {
-                Line::Header(name) => writeln!(out, "== {name}"),
+                Line::Header(heading) => writeln!(out, "== {}", heading.label()),
                 Line::Row(index) => {
                     let mark = if self.is_selected(index) { ">" } else { " " };
-                    writeln!(out, "{mark} {}", row_text(&self.rows[index]))
+                    match self.item(index) {
+                        Item::Row(row) => writeln!(out, "{mark} {}", row_text(row)),
+                        Item::Clip(clip) => {
+                            writeln!(out, "{mark} {}: {}", clip.content.spelling(), clip.title)
+                        }
+                    }
                 }
             };
         }
-        if self.rows.is_empty() {
-            let _ = writeln!(out, "{NO_RESULTS}");
+        if self.lines.is_empty() {
+            let _ = writeln!(out, "{}", self.empty_text());
         }
         match &self.overlay {
             Some(Overlay::Confirm { title, .. }) => {
@@ -417,9 +542,39 @@ impl Model {
         out
     }
 
-    /// The root list's request for the field's text.
-    fn query(&self) -> Effect {
-        Effect::Query(self.field.text().to_owned())
+    fn subject(&self) -> Option<Subject> {
+        match &self.scope {
+            Scope::Root(rows) => rows.get(self.selected_row).map(|row| row.subject.clone()),
+            Scope::Clipboard(clipboard) => clipboard
+                .clips
+                .get(self.selected_row)
+                .map(ClipLine::subject),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.scope {
+            Scope::Root(rows) => rows.len(),
+            Scope::Clipboard(clipboard) => clipboard.clips.len(),
+        }
+    }
+
+    fn list(&self) -> Effect {
+        let text = self.field.text().to_owned();
+        match &self.scope {
+            Scope::Root(_) => Effect::Query(text),
+            Scope::Clipboard(clipboard) => Effect::Clips {
+                filter: text,
+                kinds: clipboard.kinds,
+            },
+        }
+    }
+
+    fn show(&mut self, scope: Scope) -> Option<Effect> {
+        self.scope = scope;
+        self.lines.clear();
+        self.selected_row = 0;
+        Some(self.list())
     }
 
     fn edit(&mut self, input: Input) -> bool {
@@ -429,11 +584,43 @@ impl Model {
                 false
             }
             Input::Press(Press::Down) => {
-                self.selected_row = (self.selected_row + 1).min(self.rows.len().saturating_sub(1));
+                self.selected_row = (self.selected_row + 1).min(self.len().saturating_sub(1));
                 false
             }
             input => edit(&mut self.field, input),
         }
+    }
+
+    fn tab(&mut self) -> Option<Effect> {
+        match self.scope {
+            Scope::Root(_) => self.show(Scope::clipboard(true)),
+            Scope::Clipboard(_) => self.show(Scope::Root(Vec::new())),
+        }
+    }
+
+    fn cycle_kinds(&mut self) -> Option<Effect> {
+        let Scope::Clipboard(clipboard) = &mut self.scope else {
+            return None;
+        };
+        clipboard.kinds = clipboard.kinds.next();
+        Some(self.list())
+    }
+
+    fn back(&mut self) -> Option<Effect> {
+        match self.scope {
+            Scope::Clipboard(Clipboard { pushed: true, .. }) => self.show(Scope::Root(Vec::new())),
+            _ => None,
+        }
+    }
+
+    fn show_clipboard(&mut self) -> Option<Effect> {
+        let pushed = match &self.scope {
+            Scope::Root(_) => true,
+            Scope::Clipboard(clipboard) => clipboard.pushed,
+        };
+        self.overlay = None;
+        self.field.clear();
+        self.show(Scope::clipboard(pushed))
     }
 
     fn toggle_menu(&mut self) {
@@ -441,9 +628,8 @@ impl Model {
         self.overlay = match self.overlay.take() {
             Some(Overlay::Menu(_)) => None,
             _ => self
-                .rows
-                .get(self.selected_row)
-                .map(|row| Overlay::Menu(Menu::new(row))),
+                .subject()
+                .map(|subject| Overlay::Menu(Menu::new(subject))),
         };
     }
 
@@ -451,9 +637,9 @@ impl Model {
         let (key, via, confirmed) = match &self.overlay {
             Some(Overlay::Confirm { key, via, .. }) => (key.clone(), via.clone(), true),
             Some(Overlay::Menu(menu)) => {
-                (menu.key.clone(), Via::Menu(menu.picked()?.verb()), false)
+                (menu.subject.key(), Via::Menu(menu.picked()?.verb()), false)
             }
-            None => (self.rows.get(self.selected_row)?.subject.key(), via, false),
+            None => (self.subject()?.key(), via, false),
         };
         self.overlay = None;
         self.phase = Phase::Pending {
@@ -484,11 +670,10 @@ impl Model {
                 after: After::Close,
                 ..
             } => self.phase = Phase::Closing { released },
-            // The window has no clipboard screen to show.
             Answer::Done {
                 after: After::ShowClipboard,
                 ..
-            } => {}
+            } => return self.show_clipboard(),
             Answer::Confirm(command) => {
                 let title = command.title();
                 self.overlay = Some(Overlay::Confirm { key, via, title });
@@ -507,19 +692,22 @@ impl Model {
         }
         if self.field.clear() {
             self.phase = Phase::Idle;
-            return Some(self.query());
+            return Some(self.list());
         }
-        Some(Effect::Close)
+        self.back().or(Some(Effect::Close))
     }
 }
 
 impl Menu {
-    fn new(row: &Row) -> Menu {
-        let actions = row.subject.actions();
-        let items = actions.iter().map(|(chord, item)| (chord, item.clone()));
+    fn new(subject: Subject) -> Menu {
+        let items = subject
+            .actions()
+            .iter()
+            .map(|(chord, item)| (chord, item.clone()))
+            .collect();
         Menu {
-            key: row.subject.key(),
-            items: items.collect(),
+            subject,
+            items,
             field: Field::default(),
             selected_shown: 0,
         }
@@ -555,6 +743,7 @@ impl Menu {
             Input::Press(Press::Backspace { held: false }) if self.field.is_empty() => {
                 return MenuAfter::Close;
             }
+            Input::Press(Press::Tab | Press::CycleKinds) => return MenuAfter::Ignored,
             input => {
                 if edit(&mut self.field, input) {
                     self.selected_shown = 0;
@@ -596,6 +785,8 @@ fn edit(field: &mut Field, input: Input) -> bool {
             Press::Activate(_)
             | Press::Ignore
             | Press::Menu
+            | Press::Tab
+            | Press::CycleKinds
             | Press::Up
             | Press::Down
             | Press::Escape,
@@ -637,7 +828,20 @@ fn lines(rows: &[Row]) -> Vec<Line> {
     for (index, row) in rows.iter().enumerate() {
         if section != Some(row.section) {
             section = Some(row.section);
-            lines.extend(header(row.section).map(Line::Header));
+            lines.extend(header(row.section).map(|name| Line::Header(Heading::Section(name))));
+        }
+        lines.push(Line::Row(index));
+    }
+    lines
+}
+
+fn day_lines(clips: &[ClipLine]) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(clips.len() + 4);
+    let mut day = None;
+    for (index, clip) in clips.iter().enumerate() {
+        if day != Some(clip.day) {
+            day = Some(clip.day);
+            lines.push(Line::Header(Heading::Day(clip.day)));
         }
         lines.push(Line::Row(index));
     }

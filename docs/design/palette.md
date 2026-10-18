@@ -8,11 +8,11 @@ This page describes the palette, lyncast's GPUI window, for a maintainer and for
 
 The daemon starts as the headless one does: the lock, the scan, the visits, the clips, the capture thread, and the socket, in daemon.md's order. Then GPUI's app runs, with `QuitMode::Explicit`, so the process stays when the last window closes and keeps the clipboard selection it serves. A client that connects before GPUI runs waits in the daemon's channel until GPUI takes it.
 
-The daemon lives on GPUI's main thread. One task there, the owner task, hands it every event that the connection threads, the workers, the copier, the capture thread, and the writers queue, and each of them rings a bell that wakes the task once its event is queued. The palette's own requests go to the daemon through `Host::ask`, on the same thread, and get the daemon's typed answer back. A read that changes nothing, such as an app's icon, goes to the daemon with no request. The root list's query is the one read that goes through `Host::ask`, as a `query` request, so `Daemon::handle` gives the palette the rows it gives a socket client's `query`. Quit runs through the same `Owner` as the headless host's, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`: the socket goes, the work in flight and the last writes get 5 s, then the reply.
+The daemon lives on GPUI's main thread. One task there, the owner task, hands it every event that the connection threads, the workers, the copier, the capture thread, and the writers queue, and each of them rings a bell that wakes the task once its event is queued. The palette's own requests go to the daemon through `Host::ask`, on the same thread, and get the daemon's typed answer back. Reads that change nothing, such as an app's icon or the clipboard history, go to the daemon with no request. The root list's query is the one read that goes through `Host::ask`, as a `query` request, so `Daemon::handle` gives the palette the rows it gives a socket client's `query`. Quit runs through the same `Owner` as the headless host's, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`: the socket goes, the work in flight and the last writes get 5 s, then the reply.
 
 ## A summon opens one window
 
-The palette host holds the summon as a window. A socket client's answer changes it by daemon.md's rules: `toggle` opens a window when the summon is closed and closes it when it is open, a success closes it, and Clipboard History opens it. A failure leaves it.
+The palette host holds the summon as a window. A socket client's answer changes it by daemon.md's rules: `toggle` opens a window on the root list when the summon is closed and closes it when it is open, a success closes it, and Clipboard History opens a window on the clipboard screen, or shows that screen in the open window. A failure leaves it. A Clipboard History that comes while a window is still opening, before GPUI has drawn it, opens that window on the clipboard screen.
 
 The host opens and closes windows only from `cx.defer` callbacks, which GPUI runs at the end of its effect cycle, when no entity is being updated. `open_window` builds the window's view and draws it before it returns (`gpui-pre` 0.3.9 `src/app.rs:1500-1525`), and the view asks the host for its rows, so an open inside one of the host's updates would update the host twice, which panics (`src/app/entity_map.rs:230-233`). A close calls `window.remove_window()`, which only marks the window (`src/window.rs:2384`). GPUI removes a marked window once the window's update returns, and then calls `on_window_closed` (`src/app.rs:3155-3187`). All of these were read in source.
 
@@ -36,7 +36,7 @@ lyncast binds no GPUI keys. GPUI runs the action of a key binding before any key
 
 Enter and Ctrl+Enter send `activate` for the selected row as the key goes down. The field's text goes with it as the query, which the visit keeps as a search term. A held key repeats as key presses that GPUI marks `is_held`. Only Enter's first press sends, and only Escape's first press takes a step. One activation is out at a time. Until its answer comes, and while the window closes after it, every key press but Escape does nothing, and Escape closes the window. A job's answer comes once its worker thread ends, so the view waits for it on GPUI's main thread without blocking it.
 
-A success closes the window once the activating key is up and no modifier is held, in whichever order the release and the modifiers' change come. Under Wayland they come as separate events (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:2115-2140, 2258-2270`, read in source). The release of another key, or of an Enter the window never saw go down, closes nothing. niri's bind leaves such a release as the window maps. A success sent by a socket client closes the window at once, as daemon.md's rules say. Clipboard History's success leaves the window as it is.
+A success closes the window once the activating key is up and no modifier is held, in whichever order the release and the modifiers' change come. Under Wayland they come as separate events (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:2115-2140, 2258-2270`, read in source). The release of another key, or of an Enter the window never saw go down, closes nothing. niri's bind leaves such a release as the window maps. A success sent by a socket client closes the window at once, as daemon.md's rules say. Clipboard History's success shows the clipboard screen instead, and closes nothing.
 
 A failure leaves the window open and shows its reason in the footer until the next key that edits the field or moves the selection. Log Out, Reboot, and Power Off ask first: the daemon answers with a confirmation, and the footer asks `Reboot?` with Enter to run and Escape to cancel. Enter there sends the same activation again with `confirmed`. A key that moves the selection or edits the field, and typed text, cancel the question.
 
@@ -47,6 +47,28 @@ Losing the keyboard focus closes the window, as TinyCast hides on focus loss ([n
 Ctrl+K opens the selected row's Actions menu over the bottom right of the list, as [architecture.md](architecture.md#ctrlk-opens-the-actions-menu) describes it. The menu lists the row's items from its chord table, default first with the Enter key beside it. While the menu is open, the keys and text go to it. Up and Down move its selection, which stops at both ends. Text goes to the menu's own field, whose placeholder reads `Search for actions`, and the menu keeps the items whose folded label holds the folded text, as ranking folds a query. The menu's field moves its text and clips it as the root field does, and `the_caret_stays_in_the_field` composes and commits 1,024 bytes there too. A new filter selects the first item it keeps.
 
 Opening the menu ends the root field's composition, and the composing text stays as typed. Enter or Ctrl+Enter sends `activate` with the selected item's verb, and the activation goes on as one sent by Enter does: the window closes after a success, a failure shows in the footer, and a command that asks first asks. Escape, Ctrl+K, and Backspace in an empty filter close the menu, and the repeats of a held Ctrl+K or Backspace do not. Opening and closing the menu leave a failure's reason in the footer. The root field keeps its text throughout, and the footer names the menu's selected item while no failure shows there.
+
+## Tab opens the clipboard screen
+
+Tab on the root list opens the clipboard screen, which lists the clipboard history, and the field's text stays as the screen's filter. Tab there goes back to the root list, with the text. The Clipboard History command opens the clipboard screen too, with an empty field, from the palette or from `lyncast activate cmd:clipboard-history`. The screen has its own placeholder, `Search clipboard history`, and the type filter's name beside the field. The field there ends where the type filter's name begins, and it moves and clips its text as the root field does, which `the_caret_stays_in_the_field` checks there too.
+
+Escape takes one step back at a time, as TinyCast's palette does ([notes/06](../research/notes/06-tinycast-behaviour-spec.md)): it closes the Actions menu or a question first, then clears a field that holds text, then goes from a clipboard screen that came from the root list back to the root list, and then closes the palette. A summon that opened on the clipboard screen has no root list behind it, so Escape closes it from there, and Tab turns it into the root list. Backspace in an empty field goes back the same way and never closes the palette. A held Backspace's repeats only edit, so a held key that empties the filter stays on the screen. Tab's repeats do nothing. A failure's reason stays in the footer through Tab, Ctrl+T, and a step back that clears no text, also with the Actions menu open, until a key edits the field or moves the selection.
+
+The list holds every clip in the history's order: the pins first, under `Pinned`, in the order they were pinned, then the rest by their last use, newest first, under the day of that use. A day is `Today`, `Yesterday`, or a date such as `Oct 15`, with its year when it is not this year, such as `Oct 15, 2025`, on the daemon's local wall clock, which `TZ` sets. Each row shows a square with its kind's letter and its title. A text's title is its first line that holds more than whitespace, trimmed, at most 200 characters. A file list's is its first file's name, with `+N` for the other paths its preview holds. An image's is `Image`.
+
+The selection lands on the newest clip that is not pinned, or on the first when every clip is pinned, as TinyCast's does, each time the filter or the type filter changes. Up and Down move it, and it stops at both ends. The field's text filters the list: a clip stays when its preview holds every word of the text, each folded as ranking folds a query. An image has no preview, so only an empty field keeps it. Ctrl+T moves the type filter on, from All Types to Text Only, Images Only, Files Only, Links Only, Emails Only, and back to All Types. Text Only keeps links and emails too, because they are text. The root list has no type filter, so Ctrl+T does nothing there, and its repeats do nothing anywhere.
+
+The list scrolls the selected clip into view, with its day's header or `Pinned` when the clip is the first under it, as the root list does with a section's header. A summon that opens on the clipboard screen lands on the newest clip that is not pinned, which many pins can push below the window's first view, so the list scrolls to it once the window has been laid out. Each line is as tall as the theme says, so the scroll needs no line that the list has measured.
+
+The zone that the wall clock reads is the system's, which glibc loads at the first `localtime_r`, holding its zone lock, and never loads again for `localtime_r` (glibc 2.34 `time/tzset.c:367-374` and `567-577`, `time/localtime.c:28-41`, read in source). That load reads the file that `TZ` or `/etc/localtime` names, and a FIFO there would hold it forever, so the daemon loads the zone on a thread of its own as the palette starts and waits up to 1 s for it. A zone that does not load in time leaves the palette on UTC, with the warning `lyncast: the time zone did not load within 1 s, so the palette shows times in UTC`, and the palette never calls `localtime_r` again, because the thread that waits holds glibc's lock. That covers glibc only. Once an AT-SPI client, such as a screen reader, turns on a window's accessibility tree, GPUI reads the local time through chrono on the main thread at each frame (`gpui-pre` 0.3.9 `src/window.rs:3779-3788`, `src/window/a11y.rs:285`, and `src/window/a11y/debug.rs:84`), and chrono opens the file that `TZ` names itself (`chrono` 0.4.45 `src/offset/local/unix.rs:89-97` and `src/offset/local/tz_info/timezone.rs:37-57`). So with such a client, a FIFO there would still hold the main thread. These were read in source. `every_zone_reads_as_the_doc_says` in `crates/lyncast/src/palette/tests.rs` runs itself again for each line of the `zone` block, with only `TZ` and the test's own marker, `LYNCAST_ZONE_CHILD`, set, and reads the wall time of 2026-10-17 at 10:00 UTC there. `$FIFO` is a FIFO that no one writes.
+
+```zone
+XYZ-5:30 => 15:30
+UTC0 => 10:00
+:$FIFO => 10:00
+```
+
+Tab and Ctrl+T do nothing while the menu is open. Like any other key, Tab and Ctrl+T cancel a question.
 
 ## Rows show their app's icon
 
@@ -88,7 +110,7 @@ Each line's time is read as its event happens, and one thread writes the lines, 
 
 ## The fixtures
 
-Five tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop` and `palette` blocks, and `the_window_is_placed_as_the_geometry_block_says` there and `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` read the `geometry` block. `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
+These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `clips`, and `palette` blocks. There too, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
 
 ```env
 HOME=$TREE/home
@@ -133,11 +155,12 @@ Exec=8x8
 
 ### The palette blocks run on GPUI's test platform
 
-`every_palette_block_runs_as_the_doc_says` in `crates/lyncast/src/palette/tests.rs` runs each `palette` block against a daemon and a palette host of its own, in a GPUI `TestAppContext` app. The daemon has the apps of the `desktop` blocks above, no visits, no data home, and no compositor, so a copy fails with `not copied: no Wayland compositor`. Its runner records each program to a scratch file. A block is a list of steps. Each step is a `$ ` line, and the lines after it say what the palette shows once the step has run:
+`every_palette_block_runs_as_the_doc_says` in `crates/lyncast/src/palette/tests.rs` runs each `palette` block against a daemon and a palette host of its own, in a GPUI `TestAppContext` app. The daemon has the apps of the `desktop` blocks above, no visits, no data home, and no compositor, so a copy fails with `not copied: no Wayland compositor`. Its runner records each program to a scratch file. Its clock reads 2026-10-17 at 12:00 on a wall two hours east of UTC, for the daemon and the palette alike. Its history keeps every row, so no row expires, and `palette clips=<name>` starts it with the lines of the `clips <name>` block. A block is a list of steps. Each step is a `$ ` line, and the lines after it say what the palette shows once the step has run:
 
 | Step | Does |
 |---|---|
 | `$ open`, `$ toggle` | sends `toggle` as a socket client sends it |
+| `$ history` | sends `activate cmd:clipboard-history` as `lyncast activate` sends it |
 | `$ type <text>` | GPUI's `simulate_input`, one key press for each char |
 | `$ press <keys>` | GPUI's `simulate_keystrokes`, one key press for each keystroke, in GPUI's syntax |
 | `$ insert <text>` | the input handler's `replace_text_in_range`, as an input method's commit calls it. `\n` and `\r` are line breaks |
@@ -149,13 +172,14 @@ Exec=8x8
 | `$ focus`, `$ blur` | the window turns active, or inactive. A blur acts only on an active window, as GPUI's test platform does |
 | `$ stall-runner` | makes the runner's file a FIFO, so the next program waits in the runner and its activation stays out |
 | `$ resume-runner` | lets the waiting program write its line, and makes the runner's file a file again |
+| `<step> + <step>` | both steps before the wait, so the requests reach the daemon in one drain, before GPUI runs the window's deferred open |
 
-After each step, the runner runs GPUI's tasks until none is ready and the daemon has no job out. While the runner is stalled, it waits for no job. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, but a key reads as the steps name it. So the lines do not check the key caps' text, or how the view lays the labels out. They show:
+After each step, the runner runs GPUI's tasks until none is ready and the daemon has no job out. While the runner is stalled, it waits for no job. Then it compares the palette's state with the lines after the step, and the programs the step started with the step's `record:` lines. A step with no `record:` line started none. The lines spell that state through the functions that give the view its labels and their order, but a key reads as the steps name it, and a clip's kind as `clip list --json` spells it. So the lines do not check the key caps' text, the clips' letters, or how the view lays the labels out. They show:
 
-- `root "<text>"`, or `root (<placeholder>)` while the placeholder shows.
-- `== <header>` before each section that has one.
-- Each row, after `> ` when it is selected and after two spaces when it is not. An app or a command reads `<title>  (<kind>)`. The calculator's card reads `= <answer>  (<expression> · <badge>[ · <words>])`.
-- `No results` when the list is empty.
+- `root "<text>"`, or `root (<placeholder>)` while the placeholder shows. On the clipboard screen, `clipboard "<text>" <type filter>`, or `clipboard (<placeholder>) <type filter>`.
+- `== <header>` before each section that has one, and before each day's clips, or the pins'.
+- Each row, after `> ` when it is selected and after two spaces when it is not. An app or a command reads `<title>  (<kind>)`. The calculator's card reads `= <answer>  (<expression> · <badge>[ · <words>])`. A clip reads `<kind>: <title>`, with its kind as `clip list --json` spells it.
+- `No results` when the root list is empty, and `No clips` when the clipboard screen's is, as the list shows them.
 - `confirm <title>?` while a command asks to be confirmed.
 - `menu "<filter>"`, or `menu (<placeholder>)`, while the Actions menu is open, then each item the filter keeps, after `> ` when it is selected and after two spaces when it is not, with `  (enter)` after the default. `No actions` when the filter keeps none.
 - The footer: `footer: <default action> (enter) · Actions (ctrl-k)`, or `footer: <title> (enter) · Cancel (escape)` while a command asks, or `footer: pending` while an activation is out, or `footer: closing` after a success while the key is still down, or `footer: failed: <reason>`.
@@ -621,7 +645,7 @@ record: ["firefox"]
 
 ### A failure stays in the footer, and a repeat activates nothing
 
-The card's Copy Answer fails without a compositor, and the window stays open with the reason in the footer. A repeat of Enter neither sends again nor clears the reason, and an input method's unmark does not clear it either. The reason stays as the Actions menu opens and closes, by Ctrl+K, Escape, and Backspace. The next key that moves the selection clears it. A held Enter that the palette never saw go down sends nothing, and a repeat of Escape leaves the field's text. Copy Answer fails again, and typed text clears the reason too.
+The card's Copy Answer fails without a compositor, and the window stays open with the reason in the footer. A repeat of Enter neither sends again nor clears the reason, and an input method's unmark does not clear it either. The reason stays as the Actions menu opens and closes, by Ctrl+K, Escape, and Backspace, as Tab and Ctrl+T do nothing in the menu, and as Tab goes to the clipboard screen, Ctrl+T moves its type filter on, and Tab comes back. The next key that moves the selection clears it. A held Enter that the palette never saw go down sends nothing, and a repeat of Escape leaves the field's text. Copy Answer fails again, and typed text clears the reason too.
 
 ```palette
 $ open
@@ -691,6 +715,26 @@ root "8x8"
   8x8  (Application)
 footer: failed: not copied: no Wayland compositor
 $ press ctrl-k backspace
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-k tab ctrl-t ctrl-k
+root "8x8"
+> = 64  (8 × 8 · Product · Sixty-Four)
+== Results
+  8x8  (Application)
+footer: failed: not copied: no Wayland compositor
+$ press tab
+clipboard "8x8" All Types
+No clips
+footer: failed: not copied: no Wayland compositor
+$ press ctrl-t
+clipboard "8x8" Text Only
+No clips
+footer: failed: not copied: no Wayland compositor
+$ press tab
 root "8x8"
 > = 64  (8 × 8 · Product · Sixty-Four)
 == Results
@@ -941,7 +985,7 @@ closed
 
 ### Keys the window did not see go down do nothing
 
-niri's bind leaves the release of Space and a change of the modifiers as the window maps. Neither closes the window, and neither does the release of an Enter the window never saw go down. Clipboard History's success leaves the window as it is.
+niri's bind leaves the release of Space and a change of the modifiers as the window maps. Neither closes the window, and neither does the release of an Enter the window never saw go down. Clipboard History's success shows the clipboard screen, with no clips here, and the release of its Enter closes nothing.
 
 ```palette
 $ open
@@ -1009,37 +1053,11 @@ root (Search for apps and commands)
   Suspend  (Command)
 footer: Run (enter) · Actions (ctrl-k)
 $ press enter
-root (Search for apps and commands)
-== Suggestions
-> Clipboard History  (Command)
-  8x8  (Application)
-  Firefox  (Application)
-== Commands
-  Lock Screen  (Command)
-  Log Out  (Command)
-  Open Config  (Command)
-  Power Off  (Command)
-  Quit lyncast  (Command)
-  Reboot  (Command)
-  Reload Apps  (Command)
-  Suspend  (Command)
-footer: Run (enter) · Actions (ctrl-k)
+clipboard (Search clipboard history) All Types
+No clips
 $ release enter
-root (Search for apps and commands)
-== Suggestions
-> Clipboard History  (Command)
-  8x8  (Application)
-  Firefox  (Application)
-== Commands
-  Lock Screen  (Command)
-  Log Out  (Command)
-  Open Config  (Command)
-  Power Off  (Command)
-  Quit lyncast  (Command)
-  Reboot  (Command)
-  Reload Apps  (Command)
-  Suspend  (Command)
-footer: Run (enter) · Actions (ctrl-k)
+clipboard (Search clipboard history) All Types
+No clips
 ```
 
 ### Focus loss closes only a window that has been active
@@ -1482,6 +1500,630 @@ $ release enter
 closed
 ```
 
+### The clipboard screen's blocks start with a history
+
+A `clips <name>` block is a history for `palette clips=<name>`, or for a test that names it. Each line is a capture at a wall time of the test clock's, in order, so the clips take the ids 1, 2, and so on: `text <text>`, `files <URI list>`, or `image <w>x<h>`, with `\n` for a line break, and the time last. An image is an orange PNG of that size. `pin <id> <time>` pins a clip. A `$ capture` step takes the same kinds and values, with no time.
+
+```clips history
+image 2x1 2025-10-15T12:00
+text a note\nwith two lines 2026-10-15T12:00
+files file:///etc/hostname\nfile:///etc/os-release 2026-10-16T18:30
+text https://example.org/a 2026-10-17T08:00
+text me@example.org 2026-10-17T08:30
+text \n  alpha\nbeta 2026-10-17T09:00
+pin 4 2026-10-17T10:00
+```
+
+### The clipboard screen groups the history by day
+
+Clipboard History from a client opens the summon on the clipboard screen. The pin comes first, then the days. The selection lands on the newest clip that is not pinned. Up and Down stop at both ends. A summon that opened on the clipboard screen closes on Escape.
+
+```palette clips=history
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press up up
+clipboard (Search clipboard history) All Types
+== Pinned
+> link: https://example.org/a
+== Today
+  text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down down down
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+  text: alpha
+  email: me@example.org
+== Yesterday
+> files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press down down down
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+  text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+> image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape
+closed
+```
+
+### Pins come in the order they were pinned
+
+When every clip is pinned, the selection lands on the first. A text's title stops at 200 chars.
+
+```clips pins
+text 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789 2026-10-17T08:00
+text two 2026-10-17T09:00
+pin 2 2026-10-17T10:00
+pin 1 2026-10-17T11:00
+```
+
+```palette clips=pins
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+> text: two
+  text: 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+footer: Copy (enter) · Actions (ctrl-k)
+```
+
+### The filter keeps the clips that hold every word
+
+The field's words filter the clips, and the selection lands on the newest clip that is not pinned. Ctrl+T moves the type filter on, from All Types through each kind and back, and Text Only keeps the link and the email. An image has no preview, so a filter with text never keeps it. Escape clears the field and keeps the type filter. Ctrl+T's repeats do nothing.
+
+```palette clips=history
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ type EXAMPLE
+clipboard "EXAMPLE" All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> email: me@example.org
+footer: Copy (enter) · Actions (ctrl-k)
+$ type  me
+clipboard "EXAMPLE me" All Types
+== Today
+> email: me@example.org
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-t
+clipboard (Search clipboard history) Text Only
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Oct 15
+  text: a note
+footer: Copy (enter) · Actions (ctrl-k)
+$ hold ctrl-t
+clipboard (Search clipboard history) Text Only
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Oct 15
+  text: a note
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-t
+clipboard (Search clipboard history) Images Only
+== Oct 15, 2025
+> image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ type a
+clipboard "a" Images Only
+No clips
+$ press escape ctrl-t
+clipboard (Search clipboard history) Files Only
+== Yesterday
+> files: hostname +1
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-t
+clipboard (Search clipboard history) Links Only
+== Pinned
+> link: https://example.org/a
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-t
+clipboard (Search clipboard history) Emails Only
+== Today
+> email: me@example.org
+footer: Copy (enter) · Actions (ctrl-k)
+$ press ctrl-t
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+```
+
+### Tab carries the text, and Escape walks back
+
+Tab takes the field's text to the clipboard screen, where it filters the clips. Escape clears it there, then goes back to the root list, and then closes the window. A copy that fails on the clipboard screen leaves its reason in the footer as Backspace goes back, Tab comes again, and Escape goes back.
+
+```palette clips=history
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type lines
+root "lines"
+No results
+$ press tab
+clipboard "lines" All Types
+== Oct 15
+> text: a note
+footer: Copy (enter) · Actions (ctrl-k)
+$ hold tab
+clipboard "lines" All Types
+== Oct 15
+> text: a note
+footer: Copy (enter) · Actions (ctrl-k)
+$ press tab
+root "lines"
+No results
+$ press tab escape
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press tab
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: failed: not copied: no Wayland compositor
+$ press backspace
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: failed: not copied: no Wayland compositor
+$ press tab escape
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: failed: not copied: no Wayland compositor
+$ press escape
+closed
+```
+
+### Clipboard History in the palette shows the clipboard screen
+
+Enter on Clipboard History shows the clipboard screen with an empty field. Backspace in its empty field goes back to the root list, and a held Backspace's repeats only edit. A summon that opened on the clipboard screen becomes the root list on Tab, and Backspace never closes it.
+
+```palette clips=history
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type clip
+root "clip"
+== Results
+> Clipboard History  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ release enter
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ type qz
+clipboard "qz" All Types
+No clips
+$ hold backspace
+clipboard "q" All Types
+No clips
+$ hold backspace
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ hold backspace
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press backspace
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press escape
+closed
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press backspace
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press tab
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press escape
+closed
+```
+
+### Clipboard History from a client shows the clipboard screen in the open window
+
+A client's Clipboard History shows the clipboard screen in the open window, with an empty field, and Escape goes back to the root list. One that comes while the window is still opening opens it on the clipboard screen.
+
+```palette clips=history
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type fire
+root "fire"
+== Results
+> Firefox  (Application)
+footer: Open (enter) · Actions (ctrl-k)
+$ history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ toggle
+closed
+$ toggle + history
+clipboard (Search clipboard history) All Types
+== Pinned
+  link: https://example.org/a
+== Today
+> text: alpha
+  email: me@example.org
+== Yesterday
+  files: hostname +1
+== Oct 15
+  text: a note
+== Oct 15, 2025
+  image: Image
+footer: Copy (enter) · Actions (ctrl-k)
+$ press escape
+closed
+```
+
+### Tab and Ctrl+T end a question, and do nothing in the menu
+
+A question ends at Ctrl+T and at Tab, as at any key that moves or edits, and on the root list Ctrl+T does nothing else. While the menu is open, Tab and Ctrl+T do nothing.
+
+```palette
+$ open
+root (Search for apps and commands)
+== Suggestions
+> Clipboard History  (Command)
+  8x8  (Application)
+  Firefox  (Application)
+== Commands
+  Lock Screen  (Command)
+  Log Out  (Command)
+  Open Config  (Command)
+  Power Off  (Command)
+  Quit lyncast  (Command)
+  Reboot  (Command)
+  Reload Apps  (Command)
+  Suspend  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ type reboot
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press ctrl-t
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press enter
+root "reboot"
+== Results
+> Reboot  (Command)
+confirm Reboot?
+footer: Reboot (enter) · Cancel (escape)
+$ press tab
+clipboard "reboot" All Types
+No clips
+$ press tab
+root "reboot"
+== Results
+> Reboot  (Command)
+footer: Run (enter) · Actions (ctrl-k)
+$ press ctrl-k tab ctrl-t
+root "reboot"
+== Results
+> Reboot  (Command)
+menu (Search for actions)
+> Run  (enter)
+footer: Run (enter) · Actions (ctrl-k)
+```
+
 ### The summon blocks run under anvil
 
 A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdout is `$RUNTIME/daemon.stdout`, as daemon.md's harness appends it. A block may use clipboard-and-paste.md's lines, such as `seed`, `paste`, `wait-exit`, `freeze-thread`, and `stop-compositor`, and these:
@@ -1633,6 +2275,25 @@ ran cmd:quit
 $ wait-exit
 $ grep -o '"terms":\["fire"\]' data/lyncast/ranking.json
 "terms":["fire"]
+```
+
+### A zone file that never answers leaves the palette on UTC
+
+`TZ` names a FIFO that no one writes, so the zone's load waits on it forever. The start waits 1 s for the zone, warns, and goes on with UTC. Clipboard History opens the clipboard screen and draws it, `status` answers, and Quit stops the daemon.
+
+```summon
+$ mkfifo zone.fifo
+$ TZ=:$TREE/zone.fifo lyncast daemon --trace
+$ lyncast activate cmd:clipboard-history
+ran cmd:clipboard-history
+$ wait-trace frame1_presented 1
+$ lyncast status
+open
+$ wait-stderr lyncast: the time zone did not load within 1 s, so the palette shows times in UTC
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+stderr: lyncast: the time zone did not load within 1 s, so the palette shows times in UTC
 ```
 
 ### Quit from the palette stops the daemon

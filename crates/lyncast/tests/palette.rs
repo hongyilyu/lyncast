@@ -25,8 +25,8 @@ fn every_summon_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        11,
-        "palette.md holds 11 summon blocks, so a lost block fails"
+        12,
+        "palette.md holds 12 summon blocks, so a lost block fails"
     );
     let trees = Path::new(TREES);
     match fs::remove_dir_all(trees) {

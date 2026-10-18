@@ -210,7 +210,9 @@ pub(crate) fn start(record: Option<PathBuf>, bell: Option<Bell>) -> Result<Owner
         .map_err(not_started)?;
     daemon.started(now());
     let runner = record.map_or(Runner::Real, Runner::recorder);
-    Ok(Owner::new(daemon, inbox, claim, events, runner, copier))
+    Ok(Owner::new(
+        daemon, inbox, claim, events, runner, copier, now,
+    ))
 }
 
 /// The daemon, from the environment and the user's files: `config.toml`, the desktop entries,
@@ -267,10 +269,15 @@ pub(crate) fn run_headless(record: Option<PathBuf>) -> Result<(), String> {
 }
 
 /// A daemon's start with no socket, no environment, and no compositor, for the palette's Tier 3
-/// tests: the runner records to `record`, and the claim is a lock file beside it. The events
-/// go to the inbox as a socket's connection threads send them.
+/// tests: the runner records to `record`, the claim is a lock file beside it, and `now` is the
+/// clock. The events go to the inbox as a socket's connection threads send them.
 #[cfg(test)]
-pub(crate) fn detached(daemon: Daemon, record: &Path, bell: Bell) -> (Owner, Events) {
+pub(crate) fn detached(
+    daemon: Daemon,
+    record: &Path,
+    bell: Bell,
+    now: fn() -> Timestamp,
+) -> (Owner, Events) {
     let (inbox_sender, inbox) = mpsc::channel();
     let events = Events {
         inbox: inbox_sender,
@@ -282,7 +289,7 @@ pub(crate) fn detached(daemon: Daemon, record: &Path, bell: Bell) -> (Owner, Eve
         socket: record.with_extension("sock"),
     };
     let runner = Runner::recorder(record.to_owned());
-    let owner = Owner::new(daemon, inbox, claim, events.clone(), runner, None);
+    let owner = Owner::new(daemon, inbox, claim, events.clone(), runner, None, now);
     (owner, events)
 }
 
