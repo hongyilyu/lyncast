@@ -56,16 +56,9 @@ const MAX_ENTRY_BYTES: u64 = 1 << 20;
 /// that are not UTF-8 are ignored, and trailing slashes are dropped, as GLib's
 /// `g_build_filename` drops them.
 fn application_dirs(vars: &Vars) -> Vec<String> {
-    let home = vars.data_home();
-    let dirs = env::split_paths(
-        vars.data_dirs
-            .as_deref()
-            .unwrap_or(OsStr::new("/usr/local/share:/usr/share")),
-    )
-    .filter_map(|dir| dir.into_os_string().into_string().ok())
-    .filter(|dir| dir.starts_with('/'));
-    home.into_iter()
-        .chain(dirs)
+    vars.data_home()
+        .into_iter()
+        .chain(vars.data_dirs())
         .map(|dir| format!("{}/applications", dir.trim_end_matches('/')))
         .collect()
 }

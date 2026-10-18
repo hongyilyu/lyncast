@@ -1,10 +1,12 @@
-//! Elements drawn from their arguments alone: the field's text, a key's cap, a header, a row, and
-//! the card.
+//! Elements drawn from their arguments alone: the field's text, a key's cap, a header, a row, an
+//! icon or its letter square, and the card.
+
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, IntoElement, ParentElement, Pixels, ShapedLine, SharedString, Styled, TextRun,
-    UnderlineStyle, Window, div, font, px, rgb,
+    AnyElement, IntoElement, ParentElement, Pixels, RenderImage, ShapedLine, SharedString, Styled,
+    TextRun, UnderlineStyle, Window, div, font, img, px, rgb,
 };
 use lyncast_core::Row;
 use lyncast_core::calc;
@@ -79,7 +81,7 @@ pub(super) fn header_line(name: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-pub(super) fn row_line(row: &Row, selected: bool) -> AnyElement {
+pub(super) fn row_line(row: &Row, icon: Option<Arc<RenderImage>>, selected: bool) -> AnyElement {
     if let Some(card) = &row.card {
         return card_line(card, selected);
     }
@@ -93,9 +95,38 @@ pub(super) fn row_line(row: &Row, selected: bool) -> AnyElement {
         .justify_between()
         .px_2()
         .rounded(px(6.0))
-        .child(row.title.clone())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(icon_slot(icon, &row.title))
+                .child(row.title.clone()),
+        )
         .children(kind.map(|kind| div().text_sm().text_color(rgb(theme::MUTED)).child(kind)));
     line.when(selected, |line| line.bg(rgb(theme::SELECTED)))
+        .into_any_element()
+}
+
+pub(super) fn icon_slot(icon: Option<Arc<RenderImage>>, title: &str) -> AnyElement {
+    if let Some(icon) = icon {
+        return img(icon)
+            .size(px(theme::ICON))
+            .flex_none()
+            .into_any_element();
+    }
+    let letter: String = title.chars().take(1).flat_map(char::to_uppercase).collect();
+    div()
+        .size(px(theme::ICON))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .bg(rgb(theme::BADGE))
+        .text_xs()
+        .text_color(rgb(theme::MUTED))
+        .child(letter)
         .into_any_element()
 }
 

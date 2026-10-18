@@ -11,14 +11,15 @@ mod list;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext, Bounds, Context, ElementInputHandler, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState, ModifiersChangedEvent,
-    ParentElement, Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, canvas, div,
-    fill, point, px, rgb, size,
+    AnyElement, AppContext, Bounds, Context, ElementInputHandler, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
+    ModifiersChangedEvent, ParentElement, Render, Styled, Subscription, Task, TextAlign,
+    WeakEntity, Window, canvas, div, fill, point, px, rgb, size,
 };
 
 use super::field::Field;
 use super::host::Host;
+use super::icons::Icons;
 use super::model::{self, Cap, Effect, Footer, Input, Landed, Line, Menu, Model};
 use super::trace::Trace;
 use super::{keys, theme};
@@ -38,6 +39,7 @@ enum Asked {
 pub struct PaletteView {
     model: Model,
     host: WeakEntity<Host>,
+    icons: Entity<Icons>,
     focus: FocusHandle,
     list: ListState,
     answer: Option<Task<()>>,
@@ -55,6 +57,7 @@ impl PaletteView {
         window: &mut Window,
         cx: &mut Context<PaletteView>,
         host: &WeakEntity<Host>,
+        icons: Entity<Icons>,
         trace: Trace,
         seq: u32,
     ) -> PaletteView {
@@ -69,6 +72,7 @@ impl PaletteView {
         let mut view = PaletteView {
             model,
             host: host.clone(),
+            icons,
             focus,
             list: ListState::new(0, ListAlignment::Top, px(theme::OVERDRAW)),
             answer: None,

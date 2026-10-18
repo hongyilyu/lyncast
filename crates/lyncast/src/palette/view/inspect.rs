@@ -3,6 +3,7 @@
 use gpui::{Background, Bounds, Context, EntityInputHandler, Pixels, ScaledPixels, Window, rgb};
 
 use super::PaletteView;
+use crate::palette::model::Line;
 use crate::palette::theme;
 
 /// Where in its field the window draws the caret.
@@ -35,6 +36,19 @@ impl PaletteView {
             above.and_then(|above| self.list.bounds_for_item(above)),
             self.list.viewport_bounds(),
         )
+    }
+
+    /// The titles of the rows the list has laid out since it last reset, but for those above
+    /// the first one it shows.
+    pub fn laid_out(&self) -> Vec<String> {
+        let lines = self.model.lines().iter().enumerate();
+        lines
+            .filter(|(at, _)| self.list.bounds_for_item(*at).is_some())
+            .filter_map(|(_, line)| match *line {
+                Line::Row(row) => Some(self.model.row(row).title.clone()),
+                Line::Header(_) => None,
+            })
+            .collect()
     }
 
     /// Where the caret is in `field`, the field that has it, once the window draws the caret

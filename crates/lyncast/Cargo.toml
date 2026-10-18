@@ -24,6 +24,9 @@ wayland-client = { version = "0.31", features = ["log"] }
 # The versions bench/probe measured, pinned exactly. The binary needs only the Wayland backend.
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "wayland", "runtime_shaders"] }
+# The versions gpui-pre builds already. The palette decodes app icons itself (palette/icons.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = { version = "0.46", default-features = false }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

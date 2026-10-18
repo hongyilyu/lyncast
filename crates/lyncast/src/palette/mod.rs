@@ -1,7 +1,9 @@
 mod field;
 mod host;
+mod icons;
 mod keys;
 mod model;
+mod pixels;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -22,6 +24,7 @@ use gpui::{
 
 use crate::daemon::{self, Bell, Owner, Rung, Wake};
 use host::{Host, Next};
+use icons::{IconRoots, Icons};
 use trace::Trace;
 use view::PaletteView;
 
@@ -51,9 +54,11 @@ pub fn run(record: Option<PathBuf>, trace: bool) -> Result<(), String> {
 fn serve(record: Option<PathBuf>, trace: Trace) -> Result<(), String> {
     let (bell, rung) = Bell::new();
     let owner = daemon::start(record, Some(bell))?;
+    let roots = IconRoots::from_vars(owner.daemon().vars());
     let exit = Exit::default();
     let mounted = Mount {
         owner,
+        roots,
         rung,
         trace,
         exit: exit.clone(),
@@ -77,6 +82,7 @@ fn serve(record: Option<PathBuf>, trace: Trace) -> Result<(), String> {
 /// What the palette host starts with.
 struct Mount {
     owner: Owner,
+    roots: IconRoots,
     rung: Rung,
     trace: Trace,
     exit: Exit,
@@ -90,16 +96,18 @@ struct Exit {
     leftover: Rc<RefCell<Option<Owner>>>,
 }
 
-/// Starts the palette host in `cx`: the host, the observer of closed windows, the quit hook,
-/// and the owner task.
+/// Starts the palette host in `cx`: the host with the icons from its roots, the observer of
+/// closed windows, the quit hook, and the owner task.
 fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
     let Mount {
         owner,
+        roots,
         rung,
         trace,
         exit,
     } = mounted;
-    let host = cx.new(|_| Host::new(owner, trace));
+    let icons = cx.new(|_| Icons::new(roots));
+    let host = cx.new(|_| Host::new(owner, icons, trace));
     let weak = host.downgrade();
     let closed = weak.clone();
     cx.on_window_closed(move |cx, id| {
@@ -150,8 +158,9 @@ fn open_window(
     trace: Trace,
     seq: u32,
 ) -> gpui::Result<WindowHandle<PaletteView>> {
+    let icons = host.read_with(cx, |host, _| host.icons())?;
     cx.open_window(options(cx), |window, cx| {
-        cx.new(|cx| PaletteView::new(window, cx, host, trace, seq))
+        cx.new(|cx| PaletteView::new(window, cx, host, icons, trace, seq))
     })
 }
 

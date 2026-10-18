@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use lyncast_core::clip::{Delivery, Handed};
 use lyncast_core::rank::{Index, Timestamp, Visits};
-use lyncast_core::{ActionItem, ClipId, Command, Key, Row, Subject, root};
+use lyncast_core::{ActionItem, AppId, ClipId, Command, Key, Row, Subject, root};
 
 use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
@@ -250,6 +250,16 @@ impl Daemon {
     /// The writer of the clips could not save the new row `id`, so the history drops it.
     pub fn unsaved(&mut self, id: ClipId) {
         self.clips.unsaved(id);
+    }
+
+    /// The environment the daemon read at start.
+    pub fn vars(&self) -> &Vars {
+        &self.vars
+    }
+
+    /// The `Icon=` value of the app with this ID.
+    pub fn icon(&self, id: &AppId) -> Option<&str> {
+        self.index.app(id)?.icon()
     }
 
     /// The jobs handed out that have not finished. A test settles once none is out.

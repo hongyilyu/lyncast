@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -7,14 +8,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
 use gpui::{
     Bounds, Context, Entity, EntityInputHandler, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
-    Modifiers, Pixels, Render, TestAppContext, TestDispatcher, VisualTestContext, Window,
-    WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
+    Modifiers, Pixels, Render, RenderImage, TestAppContext, TestDispatcher, VisualTestContext,
+    Window, WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
 };
 use lyncast_core::AppId;
 use lyncast_core::clip::Retention;
@@ -23,6 +25,7 @@ use lyncast_core::rank::{Index, Visits};
 
 use super::field::MAX_BYTES;
 use super::host::Host;
+use super::icons::{self, CAPACITY, IconRoots, Icons};
 use super::trace::Trace;
 use super::view::inspect::Caret;
 use super::view::{FIELD, PaletteView};
@@ -206,6 +209,70 @@ fn the_selection_stays_in_view() {
     assert!(inside(header, list), "the header at {header:?} is hidden");
 }
 
+#[test]
+fn icons_stay_bounded() {
+    let dir = scratch().join(format!("{}-icons", process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let png = icons::tests::png(48, 48);
+    let apps = (1..=400)
+        .map(|n| {
+            let path = dir.join(format!("icons/hicolor/48x48/apps/zebra-{n:03}.png"));
+            fs::create_dir_all(path.parent().expect("a directory")).unwrap();
+            fs::write(&path, &png).unwrap();
+            let text = format!(
+                "[Desktop Entry]\nType=Application\nName=Zebra {n:03}\nIcon=zebra-{n:03}\nExec=zebra\n"
+            );
+            entry(&format!("share/applications/zebra-{n:03}.desktop"), &text)
+        })
+        .collect();
+    let vars = Vars {
+        data_dirs: Some(dir.clone().into_os_string()),
+        ..Vars::default()
+    };
+    let mut palette = Palette::with_icons(apps, IconRoots::from_vars(&vars), "icons");
+    let mut laid_out = HashSet::new();
+    let mut step = |palette: &mut Palette, step: &str| {
+        palette.step(step).expect("the step runs");
+        laid_out.extend(palette.view(PaletteView::laid_out).unwrap_or_default());
+        let held = palette.icons(Icons::len);
+        let apps = laid_out
+            .iter()
+            .filter(|title| title.starts_with("Zebra"))
+            .count();
+        assert_eq!(
+            held,
+            apps.min(CAPACITY),
+            "{step}: the cache holds {held} icons for {apps} app rows laid out"
+        );
+    };
+    let first = icons::key("zebra-001");
+    step(&mut palette, "open");
+    let image = palette
+        .icons(|icons| icons.peek(&first))
+        .expect("Zebra 001's icon loaded");
+    assert!(palette.in_atlas(&image), "Zebra 001's icon is drawn");
+    step(&mut palette, "toggle");
+    step(&mut palette, "toggle");
+    let again = palette.icons(|icons| icons.peek(&first));
+    assert!(
+        again.is_some_and(|again| Arc::ptr_eq(&again, &image)),
+        "the next summon has the same image"
+    );
+    assert!(palette.in_atlas(&image), "the next summon draws it");
+    step(&mut palette, "insert zebra");
+    for _ in 1..400 {
+        step(&mut palette, "press down");
+    }
+    assert!(palette.icons(|icons| icons.peek(&first)).is_none());
+    assert!(!palette.in_atlas(&image), "Zebra 001's icon left the atlas");
+    let last = palette
+        .icons(|icons| icons.peek(&icons::key("zebra-400")))
+        .expect("Zebra 400's icon loaded");
+    assert!(palette.in_atlas(&last), "Zebra 400's icon is drawn");
+    drop(palette);
+    fs::remove_dir_all(&dir).expect("the icon tree goes");
+}
+
 fn run(apps: Vec<Entry>, block: &Block) -> Vec<String> {
     let mut palette = Palette::new(apps, &block.line.to_string());
     let mut failures = Vec::new();
@@ -291,6 +358,10 @@ struct Palette {
 
 impl Palette {
     fn new(apps: Vec<Entry>, name: &str) -> Palette {
+        Palette::with_icons(apps, IconRoots::default(), name)
+    }
+
+    fn with_icons(apps: Vec<Entry>, roots: IconRoots, name: &str) -> Palette {
         let cx = TestAppContext::build(TestDispatcher::new(0), None);
         // Jobs run on real worker threads, and each wakes the owner task from outside the test
         // scheduler. With parking allowed, the scheduler takes such a wake without recording
@@ -306,6 +377,7 @@ impl Palette {
         let exit = Exit::default();
         let mounted = Mount {
             owner,
+            roots,
             rung,
             trace: Trace::OFF,
             exit: exit.clone(),
@@ -437,6 +509,20 @@ impl Palette {
         window
             .update(&mut self.cx, call)
             .map_err(|error| error.to_string())
+    }
+
+    fn icons<R>(&self, read: impl FnOnce(&Icons) -> R) -> R {
+        let icons = self.host.read_with(&self.cx, |host, _| host.icons());
+        icons.read_with(&self.cx, |icons, _| read(icons))
+    }
+
+    fn in_atlas(&mut self, image: &RenderImage) -> bool {
+        let window = self.window().expect("an open window");
+        window
+            .update(&mut self.cx, |_, window, _| {
+                window.has_image_atlas_entry(image)
+            })
+            .expect("the window takes an update")
     }
 
     fn view<R>(&self, read: impl FnOnce(&PaletteView) -> R) -> Option<R> {
