@@ -102,6 +102,15 @@ impl Host {
         }
     }
 
+    /// The open summon's window, once its deferred open has run.
+    #[cfg(test)]
+    pub fn window(&self) -> Option<WindowHandle<PaletteView>> {
+        match self.summons.shown {
+            Shown::Open(handle) => Some(handle),
+            Shown::Closed | Shown::Opening(_) => None,
+        }
+    }
+
     /// The quit hook's: the owner, for a stop that runs once GPUI's loop has ended.
     pub fn take_owner(&mut self) -> Option<Owner> {
         self.owner.take()

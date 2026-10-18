@@ -266,6 +266,34 @@ pub(crate) fn run_headless(record: Option<PathBuf>) -> Result<(), String> {
     start(record, None)?.serve_blocking(&mut Windowless(Summon::Closed))
 }
 
+/// A daemon's start with no socket, no environment, and no compositor, for the palette's Tier 3
+/// tests: the runner records to `record`, and the claim is a lock file beside it. The events
+/// go to the inbox as a socket's connection threads send them.
+#[cfg(test)]
+pub(crate) fn detached(daemon: Daemon, record: &Path, bell: Bell) -> (Owner, Events) {
+    let (inbox_sender, inbox) = mpsc::channel();
+    let events = Events {
+        inbox: inbox_sender,
+        bell: Some(bell),
+    };
+    let lock = File::create(record.with_extension("lock")).expect("a scratch lock file");
+    let claim = Claim {
+        lock: Lock(lock),
+        socket: record.with_extension("sock"),
+    };
+    let runner = Runner::recorder(record.to_owned());
+    let owner = Owner::new(daemon, inbox, claim, events.clone(), runner, None);
+    (owner, events)
+}
+
+/// A request as a connection thread hands it over, from a client that reads no reply.
+#[cfg(test)]
+pub(crate) fn from_socket(request: Request) -> Event {
+    let (reply, _) = mpsc::channel();
+    let (_, written) = mpsc::channel();
+    Event::Request(request, ReplyTo::Socket(Socket { reply, written }))
+}
+
 /// The reason the daemon gives when `WAYLAND_SOCKET` is set, when a thread it needs cannot start,
 /// or when the compositor cannot be reached or offers no seat or neither data-control protocol.
 fn not_started(error: impl fmt::Display) -> String {

@@ -60,7 +60,14 @@ pub const CLIPBOARD: Doc = Doc {
 
 pub const PALETTE: Doc = Doc {
     file: "palette.md",
-    kinds: &["env", "desktop", "executable", "summon", "geometry"],
+    kinds: &[
+        "env",
+        "desktop",
+        "executable",
+        "palette",
+        "summon",
+        "geometry",
+    ],
     prose: &["", "text"],
 };
 
