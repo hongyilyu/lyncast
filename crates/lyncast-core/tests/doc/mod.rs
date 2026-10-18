@@ -66,6 +66,8 @@ pub const PALETTE: Doc = Doc {
         "executable",
         "palette",
         "summon",
+        "icon",
+        "icons",
         "geometry",
     ],
     prose: &["", "text"],

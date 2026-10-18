@@ -5,8 +5,10 @@ use std::mem;
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use gpui::{App, Context, WeakEntity, WindowHandle, WindowId};
+use gpui::{App, Context, Entity, WeakEntity, WindowHandle, WindowId};
+use lyncast_core::AppId;
 
+use super::icons::Icons;
 use super::trace::Trace;
 use super::view::PaletteView;
 use crate::daemon::{Answer, Face, IsOpen, Owner, Wait};
@@ -34,6 +36,7 @@ pub struct Host {
     owner: Option<Owner>,
     summons: Summons,
     windows: Vec<(WindowId, u32)>,
+    icons: Entity<Icons>,
 }
 
 struct Summons {
@@ -43,7 +46,7 @@ struct Summons {
 }
 
 impl Host {
-    pub fn new(owner: Owner, trace: Trace) -> Host {
+    pub fn new(owner: Owner, icons: Entity<Icons>, trace: Trace) -> Host {
         Host {
             owner: Some(owner),
             summons: Summons {
@@ -52,12 +55,25 @@ impl Host {
                 trace,
             },
             windows: Vec::new(),
+            icons,
         }
     }
 
-    /// The palette's one way into the daemon. The answer is in the receiver at once unless the
-    /// request starts a job, and then it comes when the job ends. `None` once the stop has
-    /// finished.
+    pub fn icons(&self) -> Entity<Icons> {
+        self.icons.clone()
+    }
+
+    /// The `Icon=` value of the app with this ID. `None` too once the stop has finished.
+    pub fn icon(&self, id: &AppId) -> Option<&str> {
+        self.owner.as_ref()?.daemon().icon(id)
+    }
+
+    /// How the palette sends the daemon a request, which may change it. The answer is in the
+    /// receiver at once unless the request starts a job, and then it comes when the job ends.
+    /// `None` once the stop has finished. The root list's query comes here too, as a `query`
+    /// request, so [`Daemon::handle`](crate::daemon::Daemon::handle) gives the palette the rows
+    /// it gives a socket client. Any other read that changes nothing, such as [`Host::icon`],
+    /// goes to the daemon with no request.
     pub fn ask(
         &mut self,
         request: Request,

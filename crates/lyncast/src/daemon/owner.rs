@@ -154,7 +154,6 @@ impl Owner {
     }
 
     /// The daemon, for reads that change nothing.
-    #[cfg(test)]
     pub(crate) fn daemon(&self) -> &Daemon {
         &self.daemon
     }

@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 /// The environment the daemon reads at start. The app scan reads all of it but
 /// `XDG_CONFIG_HOME` and `WAYLAND_DISPLAY`. An empty variable counts as unset, except `PATH`. A
@@ -59,6 +59,16 @@ impl Vars {
     /// XDG Base Directory spec asks.
     pub fn data_home(&self) -> Option<String> {
         self.base_dir(self.data_home.as_deref(), ".local/share")
+    }
+
+    /// Each `XDG_DATA_DIRS` entry, by default `/usr/local/share` and `/usr/share`. An entry that
+    /// is relative or not UTF-8 is dropped.
+    pub fn data_dirs(&self) -> Vec<String> {
+        let dirs = self.data_dirs.as_deref();
+        env::split_paths(dirs.unwrap_or(OsStr::new("/usr/local/share:/usr/share")))
+            .filter_map(|dir| dir.into_os_string().into_string().ok())
+            .filter(|dir| dir.starts_with('/'))
+            .collect()
     }
 
     /// An absolute `XDG_CONFIG_HOME`, else `$HOME/.config` for an absolute `HOME`.

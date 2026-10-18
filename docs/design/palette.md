@@ -8,7 +8,7 @@ This page describes the palette, lyncast's GPUI window, for a maintainer and for
 
 The daemon starts as the headless one does: the lock, the scan, the visits, the clips, the capture thread, and the socket, in daemon.md's order. Then GPUI's app runs, with `QuitMode::Explicit`, so the process stays when the last window closes and keeps the clipboard selection it serves. A client that connects before GPUI runs waits in the daemon's channel until GPUI takes it.
 
-The daemon lives on GPUI's main thread. One task there, the owner task, hands it every event that the connection threads, the workers, the copier, the capture thread, and the writers queue, and each of them rings a bell that wakes the task once its event is queued. The palette's own requests go to the daemon through one `Host::ask`, on the same thread, and get the daemon's typed answer back. Quit runs through the same `Owner` as the headless host's, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`: the socket goes, the work in flight and the last writes get 5 s, then the reply.
+The daemon lives on GPUI's main thread. One task there, the owner task, hands it every event that the connection threads, the workers, the copier, the capture thread, and the writers queue, and each of them rings a bell that wakes the task once its event is queued. The palette's own requests go to the daemon through `Host::ask`, on the same thread, and get the daemon's typed answer back. A read that changes nothing, such as an app's icon, goes to the daemon with no request. The root list's query is the one read that goes through `Host::ask`, as a `query` request, so `Daemon::handle` gives the palette the rows it gives a socket client's `query`. Quit runs through the same `Owner` as the headless host's, in `Owner::stop`, `Stopping::wait`, `Owner::drain`, and `Owner::finish_blocking`: the socket goes, the work in flight and the last writes get 5 s, then the reply.
 
 ## A summon opens one window
 
@@ -48,6 +48,23 @@ Ctrl+K opens the selected row's Actions menu over the bottom right of the list, 
 
 Opening the menu ends the root field's composition, and the composing text stays as typed. Enter or Ctrl+Enter sends `activate` with the selected item's verb, and the activation goes on as one sent by Enter does: the window closes after a success, a failure shows in the footer, and a command that asks first asks. Escape, Ctrl+K, and Backspace in an empty filter close the menu, and the repeats of a held Ctrl+K or Backspace do not. Opening and closing the menu leave a failure's reason in the footer. The root field keeps its text throughout, and the footer names the menu's selected item while no failure shows there.
 
+## Rows show their app's icon
+
+Each app row and command row starts with an icon 24 logical pixels wide. An app's icon comes from the `Icon=` key of its desktop entry. A command, and an app whose icon does not load, shows a rounded square with the first letter of its title instead. The list asks for an icon only as it lays out the icon's row, so a row it has not laid out reads nothing. It lays out the rows on screen and those within `theme::OVERDRAW`, 200 logical pixels, past its edges.
+
+An `Icon=` value that starts with `/` names the file to read. Any other value names an icon, which lyncast looks up in two places:
+
+1. The hicolor theme, at the sizes 48x48, scalable, 64x64, 128x128, 256x256, 512x512, 32x32, 24x24, and 16x16, in that order. At each size it tries `$XDG_DATA_HOME/icons`, `$HOME/.icons`, and each `XDG_DATA_DIRS` entry's `icons`, in that order, before it tries the next size. A scalable icon is `hicolor/scalable/apps/<name>.svg`, and any other is `hicolor/<size>/apps/<name>.png`.
+2. Each `XDG_DATA_DIRS` entry's `pixmaps`, as `<name>.png` and then as `<name>.svg`.
+
+lyncast has no icon-theme setting yet, so an icon that only a theme such as Adwaita holds does not show.
+
+The first file that reads and decodes is the icon. lyncast reads each file as the app scan reads a desktop entry: it skips a FIFO, a device, and a file over 1 MiB, and it never opens them. A file whose name ends in `.svg` is an SVG. Any other file decodes by its content, as a PNG or any other format the `image` crate reads, if it is at most 1,024 pixels on each side. An SVG is drawn 48 pixels on its longer side. A raster icon larger than that is scaled down to fit, and a smaller one keeps its size. An icon that draws no pixel at all counts as no icon, and the lookup goes on to the next file.
+
+lyncast draws an SVG with resvg itself, with no fonts and no way to resolve an image. An `<image>` or `<feImage>` element draws nothing, whether it names a file or holds the image's data, and text draws nothing either. GPUI's SVG renderer parses with usvg's default options, whose resolver reads the path that an `<image>` or a `<feImage>` names with `fs::read` (`usvg` 0.46.0 `src/parser/image.rs:85-110` and `src/parser/filter.rs:860`), and that read waits on a FIFO. usvg unzips a gzipped SVG before it parses it (`src/parser/mod.rs:98-106`), so a check of the file's bytes for `<image` would miss both cases. GPUI's image loader reads a path with `fs::read` too (`gpui-pre` 0.3.9 `src/elements/img.rs:634`), so lyncast hands GPUI decoded images only. All of these were read in source.
+
+Icons load on GPUI's background executor, and a row draws its icon once it has loaded. The palette host keeps the 128 icons that rows asked for most recently, loaded or not, so the next summon draws the icons it holds at once. 128 icons of 48 by 48 pixels hold 1.1 MiB of pixels. An icon that leaves the cache leaves the atlas of every window too, so a long scroll keeps no more icons in a window's atlas than the cache holds.
+
 ## The compositor's end stops the daemon
 
 When the compositor goes, GPUI's event loop ends and calls GPUI's quit hooks (`gpui-pre-linux` 0.3.9 `src/linux/platform.rs:608-624`). GPUI then drops its windows without calling `on_window_closed` (`gpui-pre` 0.3.9 `src/app.rs:1168-1184`), and runs no task on the main thread again. These were read in source. lyncast's quit hook takes the daemon from the host. Once GPUI's run returns, the daemon stops as the headless host does, with the summon closed, because its windows went with the loop. The capture thread sees the compositor go too, and that stops the daemon as Quit does. It prints `lyncast: the Wayland connection closed` and exits 1.
@@ -71,7 +88,7 @@ Each line's time is read as its event happens, and one thread writes the lines, 
 
 ## The fixtures
 
-Four tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop` and `palette` blocks, and `the_window_is_placed_as_the_geometry_block_says` there and `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` read the `geometry` block. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
+Five tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop` and `palette` blocks, and `the_window_is_placed_as_the_geometry_block_says` there and `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` read the `geometry` block. `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
 
 ```env
 HOME=$TREE/home
@@ -1702,6 +1719,151 @@ $ drain-stdout
 $ wait-exit
 $ wait-trace app_ready 0
 ```
+
+### The icon blocks load without a display
+
+`every_icon_loads_as_the_doc_says` makes a tree from the `icon` blocks and loads each line of the `icons` block, with the `env` block's `XDG_DATA_HOME`, `XDG_DATA_DIRS`, and `HOME`. An `icon <path>` block makes the file at `<path>` under `$TREE`:
+
+- `png <w>x<h>` writes an opaque PNG of that size, and `png <w>x<h> <bytes>` pads the file with zeros to that many bytes.
+- `fifo` makes a FIFO, and a program writes a byte to it each time something opens it to read.
+- Any other line is the file's text, with `$TREE` replaced.
+
+Each line of the `icons` block is an `Icon=` value, `=>`, and then the file the icon loaded from and the icon's size in pixels, or nothing when no icon loads. The test also fails when a load opened a FIFO, also through an SVG's `<image>` or `<feImage>`.
+
+Firefox's hicolor icon wins over its pixmap. A 48x48 icon wins over a scalable one, and a scalable one over a larger one. A size comes before a root, so `deep`'s 48x48 icon in `XDG_DATA_DIRS` wins over its 256x256 one in `XDG_DATA_HOME`, and at one size `XDG_DATA_HOME` comes first, then `~/.icons`. `big` and `electron` are scaled down to 48 pixels on their longer side, `term` keeps its 32 pixels, and the 16 by 8 `sketch` is drawn 48 by 24. `huge` is over 1,024 pixels on a side, and `heavy` is over 1 MiB. `piped`'s 48x48 file is a FIFO, so its scalable one loads. `linked`'s SVG holds only an `<image>`, so it draws nothing, and its 64x64 PNG loads. `filtered` holds only a `<feImage>`, and `lettered` only text.
+
+```icon share/icons/hicolor/48x48/apps/firefox.png
+png 48x48
+```
+
+```icon share/pixmaps/firefox.png
+png 32x32
+```
+
+```icon share/icons/hicolor/scalable/apps/editor.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#5e8bff"/></svg>
+```
+
+```icon share/icons/hicolor/48x48/apps/both.png
+png 48x48
+```
+
+```icon share/icons/hicolor/scalable/apps/both.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#5e8bff"/></svg>
+```
+
+```icon share/icons/hicolor/256x256/apps/big.png
+png 256x128
+```
+
+```icon data/icons/hicolor/256x256/apps/deep.png
+png 256x256
+```
+
+```icon share/icons/hicolor/48x48/apps/deep.png
+png 48x48
+```
+
+```icon data/icons/hicolor/48x48/apps/mine.png
+png 48x48
+```
+
+```icon home/.icons/hicolor/48x48/apps/mine.png
+png 48x48
+```
+
+```icon share/icons/hicolor/48x48/apps/mine.png
+png 48x48
+```
+
+```icon home/.icons/hicolor/48x48/apps/old.png
+png 48x48
+```
+
+```icon share/icons/hicolor/48x48/apps/old.png
+png 48x48
+```
+
+```icon share/pixmaps/term.png
+png 32x32
+```
+
+```icon share/pixmaps/term.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#5e8bff"/></svg>
+```
+
+```icon share/pixmaps/sketch.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><rect width="16" height="8" fill="#5e8bff"/></svg>
+```
+
+```icon share/pixmaps/electron.png
+png 1024x1024
+```
+
+```icon share/pixmaps/huge.png
+png 2048x2048
+```
+
+```icon share/pixmaps/heavy.png
+png 48x48 1048577
+```
+
+```icon opt/logo
+png 64x64
+```
+
+```icon share/icons/hicolor/48x48/apps/piped.png
+fifo
+```
+
+```icon share/icons/hicolor/scalable/apps/piped.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#5e8bff"/></svg>
+```
+
+```icon share/pixmaps/fifo.png
+fifo
+```
+
+```icon share/icons/hicolor/scalable/apps/linked.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><image href="$TREE/share/pixmaps/fifo.png" width="64" height="64"/></svg>
+```
+
+```icon share/icons/hicolor/64x64/apps/linked.png
+png 64x64
+```
+
+```icon share/pixmaps/filtered.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><filter id="f"><feImage href="$TREE/share/pixmaps/fifo.png"/></filter><rect width="64" height="64" filter="url(#f)"/></svg>
+```
+
+```icon share/pixmaps/lettered.svg
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><text x="8" y="56" font-family="DejaVu Sans" font-size="56">A</text></svg>
+```
+
+```icons
+firefox => share/icons/hicolor/48x48/apps/firefox.png 48x48
+editor => share/icons/hicolor/scalable/apps/editor.svg 48x48
+both => share/icons/hicolor/48x48/apps/both.png 48x48
+big => share/icons/hicolor/256x256/apps/big.png 48x24
+deep => share/icons/hicolor/48x48/apps/deep.png 48x48
+mine => data/icons/hicolor/48x48/apps/mine.png 48x48
+old => home/.icons/hicolor/48x48/apps/old.png 48x48
+term => share/pixmaps/term.png 32x32
+sketch => share/pixmaps/sketch.svg 48x24
+electron => share/pixmaps/electron.png 48x48
+huge =>
+heavy =>
+$TREE/share/icons/hicolor/48x48/apps/firefox.png => share/icons/hicolor/48x48/apps/firefox.png 48x48
+$TREE/opt/logo => opt/logo 48x48
+piped => share/icons/hicolor/scalable/apps/piped.svg 48x48
+fifo =>
+linked => share/icons/hicolor/64x64/apps/linked.png 48x48
+filtered =>
+lettered =>
+nothing =>
+```
+
+`icons_stay_bounded` in `crates/lyncast/src/palette/tests.rs` puts 400 apps with an icon each in the list and moves the selection from the first app to the last. After each step the cache holds the icons of the rows the list has laid out and no others, up to 128. The first app's icon is in the window's atlas once it has loaded. The next summon's window draws the same image. At the end that icon has left the cache and the atlas, and the last app's icon is in both.
 
 ### The window's size and margins
 

@@ -38,6 +38,9 @@ pub const HEADER: f32 = 28.0;
 pub const ROW: f32 = 40.0;
 pub const CARD: f32 = 84.0;
 
+/// The side of a row's icon, and of the letter square that stands in for one.
+pub const ICON: f32 = 24.0;
+
 /// How far past the list's edges it lays out rows, so the row a key selects next has its
 /// height before the list scrolls to it.
 pub const OVERDRAW: f32 = 200.0;

@@ -1,11 +1,14 @@
 //! The list, which draws a line as GPUI's `list()` asks for it.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, list, rgb};
+use std::sync::Arc;
+
+use gpui::{AnyElement, Context, IntoElement, ParentElement, RenderImage, Styled, div, list, rgb};
+use lyncast_core::{Row, Subject};
 
 use super::PaletteView;
 use super::draw::{header_line, row_line};
 use crate::palette::model::{self, Line};
-use crate::palette::theme;
+use crate::palette::{icons, theme};
 
 impl PaletteView {
     pub(super) fn rows(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -21,7 +24,7 @@ impl PaletteView {
         }
         list(
             self.list.clone(),
-            cx.processor(|view: &mut PaletteView, index, _, _| view.line(index)),
+            cx.processor(|view: &mut PaletteView, index, _, cx| view.line(index, cx)),
         )
         .flex_1()
         .px_2()
@@ -29,10 +32,24 @@ impl PaletteView {
         .into_any_element()
     }
 
-    fn line(&self, index: usize) -> AnyElement {
+    fn line(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.model.lines()[index] {
             Line::Header(name) => header_line(name),
-            Line::Row(row) => row_line(self.model.row(row), self.model.is_selected(row)),
+            Line::Row(at) => {
+                let row = self.model.row(at);
+                row_line(row, self.icon(row, cx), self.model.is_selected(at))
+            }
         }
+    }
+
+    /// The window draws again when the icons change, because GPUI redraws a window when an
+    /// entity it read while drawing notifies.
+    fn icon(&self, row: &Row, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+        let Subject::App { id, .. } = &row.subject else {
+            return None;
+        };
+        let host = self.host.upgrade()?;
+        let key = icons::key(host.read(cx).icon(id)?);
+        self.icons.update(cx, |icons, cx| icons.get(&key, cx))
     }
 }
