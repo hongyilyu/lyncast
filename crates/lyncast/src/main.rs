@@ -6,6 +6,7 @@ mod apps;
 mod client;
 mod daemon;
 mod files;
+mod permit;
 #[cfg(test)]
 #[path = "../tests/common/pipe.rs"]
 mod pipe;

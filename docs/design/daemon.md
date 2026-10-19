@@ -149,6 +149,8 @@ A client connects, writes one request as compact JSON and a newline, and reads o
 
 A request line holds at most 1 MiB, with its newline. A line with no newline in its first 1 MiB gets `failed` with `bad request: no newline in the first 1 MiB`, and the daemon runs none of it, even when the bytes before the cut are a whole request. A request that does not parse gets a `failed` reply that names the error. Either way the daemon keeps serving. The daemon closes a connection without a reply when 5 s pass with no byte of its request, and it stops writing a reply when 5 s pass with no room in the socket to write it. These limits apply to each read and write, so a client that sends slowly is still served.
 
+Each connection holds a thread of the daemon until its reply is written, and a client that sends a byte at a time holds its thread for good, so the daemon serves 128 connections at most at once. It answers each connection past those with `failed` and `busy: 128 connections are open` before it reads the request, and closes it, so it starts no thread for it. A connection whose thread cannot start gets `failed` with `not served: <error>` the same way. A connection's place comes back once its thread ends, or at once when its thread does not start. The reply can come before the client has written its request, so a client still reads the reply when its write fails on the closed connection. A session cannot time that, so `a_reply_sent_before_the_request_reads_after_the_write_fails` in `crates/lyncast/src/client.rs` closes the daemon's end before the client writes.
+
 Requests:
 
 | Request | Fields |
@@ -220,6 +222,8 @@ A `session` block is a terminal transcript against one environment:
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
 - `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, as the `THREAD` constant in `crates/lyncast/src/daemon/store.rs` spells it. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` lets it go on n seconds later and goes on to the next line at once.
+- `$ hold-connections <n>` opens n connections to the newest daemon, one at a time, that each send `{"request":"status"` and no newline. It returns once each has a thread of its own, one that the daemon did not have before the connection, waiting in `recvfrom` to read the rest. The test sends each a space every second, so the 5 s that the daemon waits for each byte never run out, until the block ends. A connection that the daemon answers instead is opened again, because the connection with which the test waited for the socket can still hold its place for a moment. `$ half-connection` opens one more such connection, which the test feeds too and closes only when the block ends. It prints the reply line that the daemon sends it, or nothing once a new thread of the daemon waits to read it. `$ close-connection` closes the newest connection of `hold-connections` and returns once the thread that read it has ended.
+- `$ deny-threads` gives the newest daemon an `RLIMIT_NPROC` of 0 from then on, as `no-threads` gives the next one, so each thread that it starts fails, and `$ allow-threads` gives it back the limit it had. A kernel that exempts the user skips the rest of the block, as with `no-threads`.
 
 At the end of a block the test stops any daemon still running.
 
@@ -935,6 +939,51 @@ A `wire full` block pads each `>` line with spaces to 1 MiB with its newline, th
 ```wire full
 > {"request":"status"}
 < {"reply":"summon","state":"closed"}
+```
+
+### A daemon serves 128 connections at most
+
+Here the test holds 128 connections that each sent half a request. The next connection gets `busy` while it is still open, and so does the next client, and the daemon has no thread more. A client gets `busy` even while the daemon can start no thread, so the daemon writes the reply without starting one. Once one of the 128 closes, its place comes back. A client whose thread cannot start gets `not served` and gives the place back too, so once threads start again the next client is served.
+
+```session
+$ lyncast daemon --headless
+$ hold-connections 128
+$ ls /proc/$DAEMON/task | wc -l > threads
+$ half-connection
+{"reply":"failed","reason":"busy: 128 connections are open"}
+$ lyncast status
+stderr: lyncast: busy: 128 connections are open
+exit: 1
+$ [ $(ls /proc/$DAEMON/task | wc -l) -le $(cat threads) ] && echo no thread more
+no thread more
+$ deny-threads
+$ lyncast status
+stderr: lyncast: busy: 128 connections are open
+exit: 1
+$ close-connection
+$ lyncast status
+stderr: lyncast: not served: Resource temporarily unavailable (os error 11)
+exit: 1
+$ allow-threads
+$ lyncast status
+closed
+```
+
+### A connection holds its place while its thread reads it
+
+Here the test holds 127 connections that each sent half a request, and one more such connection takes the last place, so the next gets `busy`. The test sends that one a space every second too, so it still holds its place once more than the 5 s that the daemon waits for each byte have passed. Once one of the 127 closes, a new connection takes its place, and the daemon is at its cap again.
+
+```session
+$ lyncast daemon --headless
+$ hold-connections 127
+$ half-connection
+$ half-connection
+{"reply":"failed","reason":"busy: 128 connections are open"}
+$ sleep 6
+$ close-connection
+$ hold-connections 1
+$ half-connection
+{"reply":"failed","reason":"busy: 128 connections are open"}
 ```
 
 ### Quit finishes the work in flight
