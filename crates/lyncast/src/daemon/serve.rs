@@ -1,9 +1,9 @@
 //! The socket and the threads around the daemon's state. An accept thread starts one thread per
-//! connection, which reads the request line, parses it, and passes it to the owner loop over a
-//! channel. The owner loop holds the [`Daemon`] and never touches a socket. Work that blocks runs
-//! on a worker thread, whose result comes back over the same channel. No [`Daemon`] method
-//! blocks, and only this headless host waits, on its channel. Plan step 7 makes the same calls
-//! from a GPUI task that reads an async channel.
+//! connection, for [`MAX_CONNECTIONS`] at most at once, which reads the request line, parses it,
+//! and passes it to the owner loop over a channel. The owner loop holds the [`Daemon`] and never
+//! touches a socket. Work that blocks runs on a worker thread, whose result comes back over the
+//! same channel. No [`Daemon`] method blocks, and only this headless host waits, on its channel.
+//! Plan step 7 makes the same calls from a GPUI task that reads an async channel.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -22,6 +22,7 @@ use super::runner::Runner;
 use super::store::Store;
 use super::{Daemon, Done, Handled, Job, QUIT_WAIT, Success, quitting};
 use crate::apps;
+use crate::permit::Permits;
 use crate::vars::Vars;
 use crate::warning;
 use crate::wire::{self, Reply, Request};
@@ -52,6 +53,10 @@ const ALONE_WRITE_WAIT: Duration = Duration::from_secs(1);
 
 /// The most bytes a request line may hold, with its newline.
 const MAX_REQUEST: u64 = 1 << 20;
+
+/// The most connections open at once. Each holds a thread, and [`TIMEOUT`] bounds each read, not
+/// the request, so a client that sends a byte at a time holds its thread for good.
+const MAX_CONNECTIONS: u64 = 128;
 
 /// What the owner loop reads.
 enum Event {
@@ -277,38 +282,75 @@ impl Host {
     /// cannot start finishes at once, failed.
     fn start(&mut self, daemon: &mut Daemon, job: Job, reply_to: ReplyTo) {
         let (events, runner) = (self.events.clone(), self.runner.clone());
-        // The job goes to the thread once it runs, so a thread that cannot start leaves it here.
-        let (hand, handed) = mpsc::channel();
-        let started = thread::Builder::new().spawn(move || {
-            if let Ok((Job { work, success }, reply_to)) = handed.recv() {
-                let done = work.run(&runner);
-                let _ = events.send(Event::Finished(success, done, reply_to));
-            }
+        let started = spawn_with((job, reply_to), move |(Job { work, success }, reply_to)| {
+            let done = work.run(&runner);
+            let _ = events.send(Event::Finished(success, done, reply_to));
         });
-        match started {
-            Ok(_) => {
-                let _ = hand.send((job, reply_to));
-            }
-            Err(error) => {
-                let done = Err(format!("not run: {error}"));
-                let reply = daemon.finish(job.success, done, now());
-                self.unwritten.send(reply_to, reply);
-            }
+        if let Err(((job, reply_to), error)) = started {
+            let done = Err(format!("not run: {error}"));
+            let reply = daemon.finish(job.success, done, now());
+            self.unwritten.send(reply_to, reply);
         }
     }
 }
 
 fn accept(listener: &UnixListener, events: &Sender<Event>) {
+    let places = Permits::new(MAX_CONNECTIONS);
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             // An error such as EMFILE repeats until a descriptor frees, so wait instead of spinning.
             thread::sleep(Duration::from_millis(10));
             continue;
         };
+        let Some(place) = places.take(1) else {
+            turn_away(
+                &stream,
+                &format!("busy: {MAX_CONNECTIONS} connections are open"),
+            );
+            continue;
+        };
         let events = events.clone();
-        // A connection whose thread cannot start, or that fails to read or write, ends alone.
-        let _ = thread::Builder::new().spawn(move || connection(stream, &events));
+        let started = spawn_with((stream, place), move |(stream, _place)| {
+            // A connection that fails to read or write ends alone.
+            let _ = connection(stream, &events);
+        });
+        if let Err(((stream, _place), error)) = started {
+            turn_away(&stream, &format!("not served: {error}"));
+        }
     }
+}
+
+/// Starts a thread that runs `work` on `value`, or gives `value` back with the error when the
+/// thread cannot start. `thread::Builder::spawn` takes its closure even when the thread cannot
+/// start, so `value` goes to the thread over a channel once it runs.
+fn spawn_with<T: Send + 'static>(
+    value: T,
+    work: impl FnOnce(T) + Send + 'static,
+) -> Result<(), (T, io::Error)> {
+    let (hand, handed) = mpsc::channel();
+    let started = thread::Builder::new().spawn(move || {
+        if let Ok(value) = handed.recv() {
+            work(value);
+        }
+    });
+    match started {
+        Ok(_) => {
+            let _ = hand.send(value);
+            Ok(())
+        }
+        Err(error) => Err((value, error)),
+    }
+}
+
+/// Fails a connection that gets no thread, before its request is read, without waiting, so the
+/// accept thread never blocks. A new connection has room for the line.
+fn turn_away(stream: &UnixStream, reason: &str) {
+    let failed = Reply::Failed {
+        reason: reason.to_owned(),
+    };
+    let _ = stream
+        .set_nonblocking(true)
+        .and_then(|()| (&*stream).write_all(&reply_line(&failed)));
 }
 
 /// Reads one request line, hands it to the owner loop, and writes the reply line. A line that
@@ -335,11 +377,15 @@ fn connection(stream: UnixStream, events: &Sender<Event>) -> io::Result<()> {
         }
         Err(reason) => Reply::Failed { reason },
     };
-    let mut out = serde_json::to_vec(&reply).expect("a reply serializes");
-    out.push(b'\n');
-    (&stream).write_all(&out)?;
+    (&stream).write_all(&reply_line(&reply))?;
     let _ = written.send(());
     Ok(())
+}
+
+fn reply_line(reply: &Reply) -> Vec<u8> {
+    let mut line = serde_json::to_vec(reply).expect("a reply serializes");
+    line.push(b'\n');
+    line
 }
 
 /// The request on a line that `read_until` read. The line has no newline when the client

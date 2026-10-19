@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+mod connections;
 #[path = "../../../lyncast-core/tests/doc/mod.rs"]
 pub mod doc;
 mod pipe;
@@ -24,6 +25,8 @@ use std::ptr;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use connections::Connections;
 
 /// The binary under test.
 pub const LYNCAST: &str = env!("CARGO_BIN_EXE_lyncast");
@@ -747,6 +750,7 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
     let mut stall = false;
     let mut threadless = false;
     let mut frozen: Vec<Frozen> = Vec::new();
+    let mut connections = Connections::default();
     let mut rest = block.lines.as_slice();
     while let [command, after @ ..] = rest {
         let number = block.line + 1 + block.lines.len() - rest.len();
@@ -765,16 +769,16 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
                 stall = true;
                 Some((Vec::new(), Vec::new(), Some(0)))
             }
+            "$ no-threads" | "$ deny-threads" if limit_exempt() => {
+                // libtest hides what eprintln! prints in a test that passes, and the skip has to
+                // show.
+                let _ = writeln!(
+                    io::stderr(),
+                    "line {number}: the rest of the block skipped: RLIMIT_NPROC does not limit this user"
+                );
+                break;
+            }
             "$ no-threads" => {
-                if limit_exempt() {
-                    // libtest hides what eprintln! prints in a test that passes, and the skip has
-                    // to show.
-                    let _ = writeln!(
-                        io::stderr(),
-                        "line {number}: the rest of the block skipped: RLIMIT_NPROC does not limit this user"
-                    );
-                    break;
-                }
                 threadless = true;
                 Some((Vec::new(), Vec::new(), Some(0)))
             }
@@ -789,7 +793,9 @@ pub fn session(world: &World, block: &doc::Block) -> Vec<String> {
                     .finish()
                     .map(|(stderr, code)| (Vec::new(), stderr, code))
             }
-            _ => match hold_line(command, daemons.last(), &mut frozen) {
+            _ => match hold_line(command, daemons.last(), &mut frozen)
+                .or_else(|| connections.line(command, daemons.last(), &world.runtime))
+            {
                 Some(ran) => Some(ran),
                 None => {
                     let (mut run, args) = world.command(command);
