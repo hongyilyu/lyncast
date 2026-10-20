@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use super::{Daemon, Ran, Runtime, poll};
+use super::{Daemon, Ran, Runtime, failed, poll};
 
 /// What a block's `hold-connections`, `half-connection`, `close-connection`, `deny-threads`, and
 /// `allow-threads` lines keep from one line to the next.
@@ -68,7 +68,7 @@ impl Connections {
         };
         Some(match printed {
             Ok(stdout) => (stdout, Vec::new(), Some(0)),
-            Err(why) => (Vec::new(), format!("{why}\n").into_bytes(), Some(1)),
+            Err(why) => failed(why),
         })
     }
 }
