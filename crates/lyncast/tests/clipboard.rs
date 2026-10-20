@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::doc::{self, Block};
 use common::{
-    BUDGET, Daemon, Ran, Runtime, World, named_thread, poll, run_bounded, session, session_with,
+    BUDGET, Daemon, OK, Ran, World, failed, named_thread, poll, run_bounded, session, session_with,
 };
 use wl_clipboard_rs::copy::{self, MimeSource, MimeType, Source};
 use wl_clipboard_rs::paste::{self, ClipboardType, Seat};
@@ -59,6 +59,12 @@ fn fresh(name: &str) -> PathBuf {
     trees
 }
 
+/// A headless daemon in `world`, once it serves.
+fn headless(world: &World) -> Daemon {
+    let (daemon, _) = world.command("$ lyncast daemon --headless");
+    Daemon::start(daemon, &world.runtime).unwrap()
+}
+
 fn assert_passed(failures: &[String]) {
     assert!(
         failures.is_empty(),
@@ -93,10 +99,7 @@ fn every_clipboard_block_runs_as_the_doc_says() {
     let failures: Vec<String> = blocks(&fixtures, "clipboard", 32)
         .into_iter()
         .flat_map(|block| {
-            let (runtime, display) = Runtime::compositor();
-            let wayland = vec![("WAYLAND_DISPLAY".to_owned(), display)];
-            let tree = trees.join(block.line.to_string());
-            let world = World::within(&fixtures, tree, runtime, &wayland);
+            let world = World::compositor(&fixtures, trees.join(block.line.to_string()));
             let mut helpers = Helpers::new(&world);
             let failures =
                 session_with(&world, block, &mut |line, newest| helpers.run(line, newest));
@@ -116,13 +119,8 @@ const QUIT_AFTER: Duration = Duration::from_millis(2500);
 
 #[test]
 fn quit_reads_no_offer_queued_behind_the_one_in_hand() {
-    let fixtures = fixtures();
-    let (runtime, display) = Runtime::compositor();
-    let wayland = [("WAYLAND_DISPLAY".to_owned(), display)];
-    let tree = fresh("quit").join("tree");
-    let world = World::within(&fixtures, tree, runtime, &wayland);
-    let (daemon, _) = world.command("$ lyncast daemon --headless");
-    let mut daemon = Daemon::start(daemon, &world.runtime).unwrap();
+    let world = World::compositor(&fixtures(), fresh("quit").join("tree"));
+    let mut daemon = headless(&world);
     let mut helpers = Helpers::new(&world);
     let mut first = None;
     for text in ["one", "two", "three", "four"] {
@@ -132,7 +130,7 @@ fn quit_reads_no_offer_queued_behind_the_one_in_hand() {
             "$ stop-seed",
         ] {
             let ran = helpers.run(line, Some(daemon.id())).expect(line);
-            assert_eq!(ran, (Vec::new(), Vec::new(), Some(0)), "{line}");
+            assert_eq!(ran, OK, "{line}");
         }
         drop(frozen);
         first.get_or_insert_with(Instant::now);
@@ -158,23 +156,17 @@ const ROUNDS: usize = 10;
 
 #[test]
 fn copies_at_once_record_in_the_order_the_compositor_took_them() {
-    let fixtures = fixtures();
-    let (runtime, display) = Runtime::compositor();
-    let wayland = [("WAYLAND_DISPLAY".to_owned(), display)];
-    let tree = fresh("at-once").join("tree");
-    let world = World::within(&fixtures, tree, runtime, &wayland);
-    let (daemon, _) = world.command("$ lyncast daemon --headless");
-    let daemon = Daemon::start(daemon, &world.runtime).unwrap();
+    let world = World::compositor(&fixtures(), fresh("at-once").join("tree"));
+    let daemon = headless(&world);
     let mut helpers = Helpers::new(&world);
     let mut run = |line: &str| helpers.run(line, Some(daemon.id())).expect(line);
-    let ok = (Vec::new(), Vec::new(), Some(0));
     for line in [
         "$ seed text/plain;charset=utf-8 alpha",
         "$ wait-clips 1",
         "$ seed text/plain;charset=utf-8 beta",
         "$ wait-clips 2",
     ] {
-        assert_eq!(run(line), ok, "{line}");
+        assert_eq!(run(line), OK, "{line}");
     }
     for round in 0..ROUNDS {
         let copies: Vec<(Child, PathBuf)> = [1, 2]
@@ -201,7 +193,7 @@ fn copies_at_once_record_in_the_order_the_compositor_took_them() {
         let (list, _, _) = run_bounded(list, &world.out).unwrap();
         let first = String::from_utf8(list).unwrap();
         let first = first.lines().next().unwrap().to_owned();
-        assert_eq!(run("$ paste text/plain;charset=utf-8 got"), ok);
+        assert_eq!(run("$ paste text/plain;charset=utf-8 got"), OK);
         let pasted = fs::read_to_string(world.tree.join("got")).unwrap();
         assert!(
             first.ends_with(&format!("\"preview\":\"{pasted}\"}}")),
@@ -284,7 +276,7 @@ impl<'w> Helpers<'w> {
                 match self.ready(holder) {
                     Ok(holder) => {
                         self.holders.push(holder);
-                        (Vec::new(), Vec::new(), Some(0))
+                        OK
                     }
                     Err(failed) => failed,
                 }
@@ -295,7 +287,7 @@ impl<'w> Helpers<'w> {
                     let _ = holder.wait();
                 }
                 self.holders.clear();
-                (Vec::new(), Vec::new(), Some(0))
+                OK
             }
             ["wait-clips", count] => {
                 let count: usize = count.parse().expect("wait-clips <n>");
@@ -319,13 +311,12 @@ impl<'w> Helpers<'w> {
                         && libc::WIFSTOPPED(status)
                 };
                 if stopped {
-                    (Vec::new(), Vec::new(), Some(0))
+                    OK
                 } else {
-                    let why = format!(
-                        "seeder {pid} did not stop: {}\n",
+                    failed(format!(
+                        "seeder {pid} did not stop: {}",
                         io::Error::last_os_error()
-                    );
-                    (Vec::new(), why.into_bytes(), Some(1))
+                    ))
                 }
             }
             ["cont-seed-at-quit"] => {
@@ -340,11 +331,11 @@ impl<'w> Helpers<'w> {
                     // SAFETY: kill takes a pid and a signal, and touches no memory.
                     unsafe { libc::kill(pid, libc::SIGCONT) };
                 }));
-                (Vec::new(), Vec::new(), Some(0))
+                OK
             }
             ["wait-read"] => match newest {
                 Some(pid) => wait_read(pid),
-                None => (Vec::new(), b"no daemon to wait for\n".to_vec(), Some(1)),
+                None => failed("no daemon to wait for"),
             },
             ["wait-stderr", ..] => {
                 let line = self.world.substitute(&line["$ wait-stderr ".len()..]);
@@ -371,7 +362,7 @@ impl<'w> Helpers<'w> {
                 match self.ready(compositor) {
                     Ok(compositor) => {
                         self.compositors.push(compositor);
-                        (Vec::new(), Vec::new(), Some(0))
+                        OK
                     }
                     Err(failed) => failed,
                 }
@@ -412,7 +403,7 @@ impl<'w> Helpers<'w> {
         match self.ready(seeder) {
             Ok(seeder) => {
                 self.seeders.push(seeder);
-                (Vec::new(), Vec::new(), Some(0))
+                OK
             }
             Err(failed) => failed,
         }
@@ -474,11 +465,7 @@ impl<'w> Helpers<'w> {
             .filter_map(|pid| pid.parse::<libc::pid_t>().ok())
             .find(named_anvil)
         else {
-            return (
-                Vec::new(),
-                b"no anvil pid in $RUNTIME/pids\n".to_vec(),
-                Some(1),
-            );
+            return failed("no anvil pid in $RUNTIME/pids");
         };
         // SAFETY: kill takes a pid and a signal, and touches no memory.
         let sent = unsafe { libc::kill(anvil, signal) };
@@ -489,7 +476,7 @@ impl<'w> Helpers<'w> {
         let stderr = self.world.runtime.path().join("daemon.stderr");
         let read = || fs::read_to_string(&stderr).unwrap_or_default();
         match poll(|| read().lines().any(|held| held == line).then_some(())) {
-            Some(()) => (Vec::new(), Vec::new(), Some(0)),
+            Some(()) => OK,
             None => (Vec::new(), read().into_bytes(), Some(1)),
         }
     }
@@ -503,7 +490,7 @@ impl<'w> Helpers<'w> {
             };
             let list = String::from_utf8_lossy(&stdout);
             if code == Some(0) && done(&list) {
-                return (Vec::new(), Vec::new(), Some(0));
+                return OK;
             }
             if Instant::now() > deadline {
                 let failed = match code {
@@ -522,7 +509,6 @@ impl<'w> Helpers<'w> {
 /// gives the number of the call a thread waits in and then its arguments, the second of which
 /// counts the descriptors.
 fn wait_read(pid: u32) -> Ran {
-    let failed = |why: String| (Vec::new(), format!("{why}\n").into_bytes(), Some(1));
     let tid = match named_thread(pid, CAPTURE) {
         Ok(tid) => tid,
         Err(why) => return failed(why),
@@ -537,7 +523,7 @@ fn wait_read(pid: u32) -> Ran {
         matches!(number, Some(libc::SYS_poll | libc::SYS_ppoll)) && words.nth(1) == Some("0x1")
     };
     match poll(|| reading().then_some(())) {
-        Some(()) => (Vec::new(), Vec::new(), Some(0)),
+        Some(()) => OK,
         None => failed(format!(
             "the capture thread of process {pid} reads no offer"
         )),
@@ -546,18 +532,12 @@ fn wait_read(pid: u32) -> Ran {
 
 #[test]
 fn wait_read_waits_past_a_served_copy() {
-    let fixtures = fixtures();
-    let (runtime, display) = Runtime::compositor();
-    let wayland = [("WAYLAND_DISPLAY".to_owned(), display)];
-    let tree = fresh("wait-read").join("tree");
-    let world = World::within(&fixtures, tree, runtime, &wayland);
-    let (daemon, _) = world.command("$ lyncast daemon --headless");
-    let daemon = Daemon::start(daemon, &world.runtime).unwrap();
+    let world = World::compositor(&fixtures(), fresh("wait-read").join("tree"));
+    let daemon = headless(&world);
     let pid = daemon.id();
     let mut helpers = Helpers::new(&world);
-    let ok = (Vec::new(), Vec::new(), Some(0));
     for line in ["$ seed text/plain;charset=utf-8 alpha", "$ wait-clips 1"] {
-        assert_eq!(helpers.run(line, Some(pid)).expect(line), ok, "{line}");
+        assert_eq!(helpers.run(line, Some(pid)).expect(line), OK, "{line}");
     }
     let (copy, _) = world.command("$ lyncast activate clip:1");
     let copied = run_bounded(copy, &world.out).expect("the copy replies");
@@ -570,10 +550,10 @@ fn wait_read_waits_past_a_served_copy() {
     );
     let frozen = common::Frozen::new(pid, CAPTURE).unwrap();
     for line in ["$ seed text/plain;charset=utf-8 late", "$ stop-seed"] {
-        assert_eq!(helpers.run(line, Some(pid)).expect(line), ok, "{line}");
+        assert_eq!(helpers.run(line, Some(pid)).expect(line), OK, "{line}");
     }
     drop(frozen);
-    assert_eq!(waited.recv_timeout(BUDGET).expect("wait-read returns"), ok);
+    assert_eq!(waited.recv_timeout(BUDGET).expect("wait-read returns"), OK);
     drop(helpers);
     drop(daemon);
     world.passed();
