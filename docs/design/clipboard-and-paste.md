@@ -2320,7 +2320,7 @@ $ wait-clips 1
 $ freeze-thread visits
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ thaw-thread 1s
 $ stop-compositor
 $ wait-exit

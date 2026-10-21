@@ -22,6 +22,7 @@ use std::time::Duration;
 use lyncast_core::clip::{Delivery, Handed};
 use lyncast_core::rank::{Index, Timestamp, Visits};
 use lyncast_core::{ActionItem, AppId, ClipId, Command, Key, Row, Subject, root};
+use niri_ipc::Action;
 
 use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
@@ -132,8 +133,8 @@ pub enum Work {
 
 /// Work that blocks, for a worker thread.
 pub enum Task {
-    /// Starts the argv through the runner.
-    Spawn(Vec<String>),
+    /// Sends the action to niri through the runner: a program's Spawn, or Log Out's Quit.
+    Act(Action),
     /// Creates the config file if it is missing, then opens it.
     OpenConfig(PathBuf),
     /// Scans the apps again and indexes them.
@@ -377,7 +378,9 @@ impl Daemon {
                 .and_then(|app| app.argv_for(item))
                 .expect("an app's row offers only its own Open and Desktop Actions");
             Handled::Job(Job {
-                work: Work::Task(Task::Spawn(argv.to_vec())),
+                work: Work::Task(Task::Act(Action::Spawn {
+                    command: argv.to_vec(),
+                })),
                 success: success(message),
             })
         };
@@ -413,7 +416,11 @@ impl Daemon {
 
     /// What each command does, as the table in docs/design/daemon.md lists it.
     fn command(&mut self, command: Command, success: Success, now: Timestamp) -> Handled {
-        let spawn = |argv: &[&str]| Task::Spawn(argv.iter().map(|&arg| arg.to_owned()).collect());
+        let spawn = |argv: &[&str]| {
+            Task::Act(Action::Spawn {
+                command: argv.iter().map(|&arg| arg.to_owned()).collect(),
+            })
+        };
         let task = match command {
             Command::ClipboardHistory => {
                 return Handled::Answer(self.succeed(success, After::ShowClipboard, now));
@@ -443,7 +450,10 @@ impl Daemon {
             }
             Command::LockScreen => spawn(&["loginctl", "lock-session"]),
             Command::Suspend => spawn(&["systemctl", "suspend"]),
-            Command::LogOut => spawn(&["niri", "msg", "action", "quit", "--skip-confirmation"]),
+            // lyncast has asked already, so niri's own prompt would ask again.
+            Command::LogOut => Task::Act(Action::Quit {
+                skip_confirmation: true,
+            }),
             Command::Reboot => spawn(&["systemctl", "reboot"]),
             Command::PowerOff => spawn(&["systemctl", "poweroff"]),
         };

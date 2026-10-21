@@ -51,7 +51,8 @@ enum Cmd {
         /// Run without the palette, and without a compositor if need be.
         #[arg(long)]
         headless: bool,
-        /// Append each program the daemon would start to FILE, as a JSON array, and start none.
+        /// Append to FILE the line the daemon would send to niri for each program and for Log Out,
+        /// instead of sending it.
         #[arg(long, value_name = "FILE")]
         record: Option<PathBuf>,
         /// Print the bench's PROBE lines on stdout.

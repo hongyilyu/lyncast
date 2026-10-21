@@ -131,7 +131,7 @@ enum Step<'b> {
     Send(usize, &'b str),
     /// `N< reply`: the reply that connection N reads.
     Reply(usize, &'b str),
-    /// `record: argv`: the next line the recorder gets.
+    /// `record: <line>`: the next line the recorder gets.
     Record(&'b str),
 }
 
@@ -151,7 +151,7 @@ impl Step<'_> {
     }
 }
 
-/// The byte that fills a `wire fifo` block's recorder. No recorded argv starts with it.
+/// The byte that fills a `wire fifo` block's recorder. No recorded line starts with it.
 const FILLER: u8 = b'#';
 
 /// How soon after its last `record:` line a `wire fifo` block's daemon exits. It is half of
@@ -372,7 +372,7 @@ fn every_session_and_wire_block_runs_as_the_doc_says() {
 /// Two launches at once, each of an argv longer than the 4 KiB that a FIFO takes in one write,
 /// record one whole line each. A session runs one command at a time, so this test starts the
 /// two itself, with two apps added to the doc's tree, and expects what the launch session
-/// shows: each success line, and each argv as one compact JSON array on a line of its own.
+/// shows: each success line, and each request on a line of its own.
 #[test]
 fn launches_at_once_record_whole_lines() {
     let fixtures = doc::DAEMON.read(&doc::DAEMON.text()).unwrap();
@@ -386,7 +386,10 @@ fn launches_at_once_record_whole_lines() {
                 "[Desktop Entry]\nType=Application\nName={letter}\nExec=firefox {argument}\n"
             );
             fs::write(world.tree.join("share/applications").join(&id), entry).unwrap();
-            (id, format!("[\"firefox\",\"{argument}\"]"))
+            let request = format!(
+                "{{\"Action\":{{\"Spawn\":{{\"command\":[\"firefox\",\"{argument}\"]}}}}}}"
+            );
+            (id, request)
         })
         .collect();
     let fifo = world.runtime.runs();
@@ -424,7 +427,7 @@ fn launches_at_once_record_whole_lines() {
     };
     assert!(
         got == want,
-        "the recorder got lines of {:?} bytes that are not the two argvs, of {:?}",
+        "the recorder got lines of {:?} bytes that are not the two requests, of {:?}",
         lengths(&got),
         lengths(&want)
     );

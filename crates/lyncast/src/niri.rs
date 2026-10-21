@@ -37,14 +37,16 @@ enum Failure {
 }
 
 /// The line that a request goes to niri as.
-fn line(request: &Request) -> Vec<u8> {
+pub fn line(request: &Request) -> Vec<u8> {
     let mut line = serde_json::to_vec(request).expect("a niri request serializes");
     line.push(b'\n');
     line
 }
 
 /// Sends `action` to the niri at `socket` and waits for its `Handled`, which niri sends once the
-/// action has run on its event loop. The error is the reason the CLI prints after `lyncast: `.
+/// action has run on its event loop. niri stops its loop in the turn that runs Quit, before it
+/// writes the answer, so niri's close is Quit's answer. The error is the reason the CLI prints
+/// after `lyncast: `.
 pub fn act(socket: Option<&Path>, action: Action) -> Result<(), String> {
     let Some(socket) = socket else {
         return Err("not run: NIRI_SOCKET is not set".to_owned());
@@ -61,11 +63,15 @@ pub fn act(socket: Option<&Path>, action: Action) -> Result<(), String> {
         };
         format!("not run: {why}")
     };
-    match send(socket, &Request::Action(action), ACTION_WAIT).map_err(failed)? {
-        Response::Handled => Ok(()),
-        _ => Err(failed(Failure::Bad(
+    let quits = matches!(action, Action::Quit { .. });
+    match send(socket, &Request::Action(action), ACTION_WAIT) {
+        Ok(Response::Handled) => Ok(()),
+        // A close with the request unread fails the read with a reset, so niri has read this one.
+        Err(Failure::Closed) if quits => Ok(()),
+        Ok(_) => Err(failed(Failure::Bad(
             "not an answer to an action".to_owned(),
         ))),
+        Err(failure) => Err(failed(failure)),
     }
 }
 
