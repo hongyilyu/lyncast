@@ -29,8 +29,7 @@ impl PaletteView {
 
     fn preview_line(&self, cx: &App) -> Option<String> {
         let id = self.model.selected_clip()?.id;
-        let preview = self.preview(cx)?;
-        Some(match preview.read(cx).shown() {
+        Some(match self.shared.preview.read(cx).shown() {
             None => "none".to_owned(),
             Some(Shown::Text) => format!("text {:?}", self.clip_preview(id, cx)?),
             Some(Shown::Files) => format!("files {:?}", self.clip_preview(id, cx)?),
@@ -55,7 +54,7 @@ impl PaletteView {
 
     /// The image the preview pane shows, if it shows one.
     pub fn preview_image(&self, cx: &App) -> Option<Arc<RenderImage>> {
-        match self.preview(cx)?.read(cx).shown()? {
+        match self.shared.preview.read(cx).shown()? {
             Shown::Image { image, .. } => Some(Arc::clone(image)),
             _ => None,
         }

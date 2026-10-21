@@ -12,37 +12,10 @@ use std::path::Path;
 
 use super::connections::Connections;
 use super::frozen::Holds;
+use super::steps::{Printed, Step, steps};
 use super::{
     Daemon, NextDaemon, OK, Output, Ran, Threads, World, doc, failed, limit_exempt, run_bounded,
 };
-
-/// What a command printed, each line with its newline, and the lines it added to the recorder.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Printed {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit: i32,
-    pub record: String,
-}
-
-impl Printed {
-    /// The lines after a command in a session block.
-    pub fn expected(lines: &[String]) -> Printed {
-        let mut printed = Printed::default();
-        for line in lines {
-            if let Some(line) = line.strip_prefix("stderr: ") {
-                printed.stderr += &format!("{line}\n");
-            } else if let Some(code) = line.strip_prefix("exit: ") {
-                printed.exit = code.parse().expect("exit: <n>");
-            } else if let Some(argv) = line.strip_prefix("record: ") {
-                printed.record += &format!("{argv}\n");
-            } else {
-                printed.stdout += &format!("{line}\n");
-            }
-        }
-        printed
-    }
-}
 
 /// A command line that a doc's own fixtures define, such as a clipboard block's `seed`, given the
 /// newest daemon's process ID, which gives what it printed, or `None` for a line it does not
@@ -71,22 +44,20 @@ pub fn session_later(
     let mut failures = Vec::new();
     let mut session = Session::default();
     let mut recorded_before_later = None;
-    let mut rest = block.lines.as_slice();
-    while let [command, after @ ..] = rest {
-        let number = block.line + 1 + block.lines.len() - rest.len();
-        let printed = after
-            .iter()
-            .take_while(|line| !line.starts_with("$ "))
-            .count();
+    for Step {
+        line: number,
+        command,
+        after,
+    } in steps(block)
+    {
         let newest = session.daemons.last().map(|daemon| daemon.id().to_string());
-        let want: Vec<String> = after[..printed]
+        let want: Vec<String> = after
             .iter()
             .map(|line| match &newest {
                 Some(pid) => world.substitute(line).replace("$DAEMON", pid),
                 None => world.substitute(line),
             })
             .collect();
-        rest = &after[printed..];
         let before = recorded_before_later
             .take()
             .unwrap_or_else(|| world.recorded().len());

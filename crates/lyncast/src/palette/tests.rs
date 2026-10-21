@@ -36,6 +36,7 @@ use super::{Exit, Mount};
 use crate::clip::{self, Clips, Seen};
 use crate::daemon::{self, Bell, Daemon, Event, Events};
 use crate::doc::{self, Block};
+use crate::steps::{Printed, Step, steps};
 use crate::vars::Vars;
 use crate::wire::{Request, Via};
 
@@ -191,8 +192,46 @@ fn the_caret_stays_in_the_field() {
     }
 }
 
+fn inside(bounds: Option<Bounds<Pixels>>, list: Bounds<Pixels>) -> bool {
+    bounds.is_some_and(|bounds| bounds.top() >= list.top() && bounds.bottom() <= list.bottom())
+}
+
+/// The bounds of the selected line, of the line before it, and of the list.
+fn selected(
+    palette: &Palette,
+) -> (
+    Option<Bounds<Pixels>>,
+    Option<Bounds<Pixels>>,
+    Bounds<Pixels>,
+) {
+    palette
+        .view(|view, _| view.selected_bounds())
+        .expect("an open window")
+}
+
+/// Runs each step and checks that the selected line is inside the list after it.
+fn keeps_in_view<'s>(palette: &mut Palette, steps: impl IntoIterator<Item = &'s str>) {
+    for step in steps {
+        palette.step(step).expect("the step runs");
+        let (row, _, list) = selected(palette);
+        assert!(
+            inside(row, list),
+            "{step}: the line at {row:?} is outside the list at {list:?}"
+        );
+    }
+}
+
+/// 20 clips that are pinned, then the newest one that is not.
+fn pins() -> Vec<String> {
+    let pins = (1..=20).map(|n| format!("text pin {n:02} 2026-10-17T08:{n:02}"));
+    let pinned = (1..=20).map(|n| format!("pin {n} 2026-10-17T09:{n:02}"));
+    pins.chain(pinned)
+        .chain(["text landing 2026-10-17T10:00".to_owned()])
+        .collect()
+}
+
 #[test]
-fn the_selection_stays_in_view() {
+fn the_root_list_keeps_the_selection_in_view() {
     let apps = (1..=300)
         .map(|n| {
             let text = format!("[Desktop Entry]\nType=Application\nName=App {n:03}\nExec=app\n");
@@ -200,51 +239,34 @@ fn the_selection_stays_in_view() {
         })
         .collect();
     let mut palette = Palette::new(apps, "in-view");
-    let inside = |bounds: Option<Bounds<Pixels>>, list: Bounds<Pixels>| {
-        bounds.is_some_and(|bounds| bounds.top() >= list.top() && bounds.bottom() <= list.bottom())
-    };
     let steps = ["open", "type app"].into_iter();
-    for step in steps.chain(["press down"; 250]).chain(["press up"; 250]) {
-        palette.step(step).expect("the step runs");
-        let (row, _, list) = palette
-            .view(|view, _| view.selected_bounds())
-            .expect("an open window");
-        assert!(
-            inside(row, list),
-            "{step}: the row at {row:?} is outside the list at {list:?}"
-        );
-    }
-    let (_, header, list) = palette
-        .view(|view, _| view.selected_bounds())
-        .expect("an open window");
+    keeps_in_view(
+        &mut palette,
+        steps.chain(["press down"; 250]).chain(["press up"; 250]),
+    );
+    let (_, header, list) = selected(&palette);
     assert!(inside(header, list), "the header at {header:?} is hidden");
+}
 
-    let pins = (1..=20).map(|n| format!("text pin {n:02} 2026-10-17T08:{n:02}"));
-    let pinned = (1..=20).map(|n| format!("pin {n} 2026-10-17T09:{n:02}"));
-    let clips: Vec<String> = pins
-        .chain(pinned)
-        .chain(["text landing 2026-10-17T10:00".to_owned()])
-        .collect();
-    let mut palette = Palette::build(Vec::new(), IconRoots::default(), &clips, "in-view-clips");
-    let selected = |palette: &Palette| {
-        palette
-            .view(|view, _| view.selected_bounds())
-            .expect("an open window")
-    };
-    for step in ["history"].into_iter().chain(["press up"; 20]) {
-        palette.step(step).expect("the step runs");
-        let (row, _, list) = selected(&palette);
-        assert!(
-            inside(row, list),
-            "{step}: the clip at {row:?} is outside the list at {list:?}"
-        );
-    }
+#[test]
+fn the_clipboard_screen_keeps_the_pinned_header_in_view() {
+    let mut palette = Palette::build(Vec::new(), IconRoots::default(), &pins(), "in-view-pins");
+    keeps_in_view(
+        &mut palette,
+        ["history"].into_iter().chain(["press up"; 20]),
+    );
     let (_, header, list) = selected(&palette);
     assert!(
         inside(header, list),
         "the Pinned header at {header:?} is hidden"
     );
-    for step in ["press down"; 10].into_iter().chain(["press up"; 3]) {
+}
+
+#[test]
+fn a_refresh_keeps_the_scroll_and_the_selection_in_view() {
+    let mut palette = Palette::build(Vec::new(), IconRoots::default(), &pins(), "in-view-refresh");
+    let steps = ["history"].into_iter().chain(["press up"; 20]);
+    for step in steps.chain(["press down"; 10]).chain(["press up"; 3]) {
         palette.step(step).expect("the step runs");
     }
     let (before, _, _) = selected(&palette);
@@ -261,19 +283,19 @@ fn the_selection_stays_in_view() {
         inside(row, list),
         "a capture above the selection pushed its row to {row:?}, outside the list at {list:?}"
     );
+}
+
+#[test]
+fn the_clipboard_screen_keeps_the_day_header_in_view() {
     let today: Vec<String> = (1..=30)
         .map(|n| format!("text clip {n:02} 2026-10-17T09:{n:02}"))
         .collect();
     let mut days = Palette::build(Vec::new(), IconRoots::default(), &today, "in-view-days");
     let steps = ["history"].into_iter();
-    for step in steps.chain(["press down"; 20]).chain(["press up"; 20]) {
-        days.step(step).expect("the step runs");
-        let (row, _, list) = selected(&days);
-        assert!(
-            inside(row, list),
-            "{step}: the clip at {row:?} is outside the list at {list:?}"
-        );
-    }
+    keeps_in_view(
+        &mut days,
+        steps.chain(["press down"; 20]).chain(["press up"; 20]),
+    );
     let (_, header, list) = selected(&days);
     assert!(
         inside(header, list),
@@ -477,48 +499,39 @@ fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
         &block.line.to_string(),
     );
     let mut failures = Vec::new();
-    let mut rest = block.lines.as_slice();
-    while let [step, after @ ..] = rest {
-        let shown = after
-            .iter()
-            .take_while(|line| !line.starts_with("$ "))
-            .count();
-        let (want, rest_after) = after.split_at(shown);
-        rest = rest_after;
-        let Some(step) = step.strip_prefix("$ ") else {
-            failures.push(format!("line {}: not a step: {step}", block.line));
+    for Step {
+        line,
+        command,
+        after,
+    } in steps(block)
+    {
+        let Some(step) = command.strip_prefix("$ ") else {
+            failures.push(format!("line {line}: not a step: {command}"));
             break;
         };
         let before = palette.recorded().len();
         if let Err(error) = palette.step(step) {
-            failures.push(format!("line {}: $ {step}\n  {error}", block.line));
+            failures.push(format!("line {line}: {command}\n  {error}"));
             break;
         }
-        let record = |line: &&String| line.starts_with("record: ");
-        let want_dump: String = want
-            .iter()
-            .filter(|line| !record(line))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        let want_record: String = want
-            .iter()
-            .filter(record)
-            .map(|line| format!("{}\n", &line["record: ".len()..]))
-            .collect();
-        let mut got_dump = palette.dump();
+        let want = Printed::expected(after);
+        let mut dump = palette.dump();
         if counts {
             let counts = palette.preview(Preview::counts);
-            got_dump += &format!(
+            dump += &format!(
                 "loads: {} started, {} stopped, {} decoded, at most {} out\n",
                 counts.started, counts.stopped, counts.decoded, counts.most_out
             );
         }
         let recorded = palette.recorded();
-        let got_record = String::from_utf8_lossy(recorded.get(before..).unwrap_or_default());
-        if got_dump != want_dump || got_record != want_record {
+        let got = Printed {
+            stdout: dump,
+            record: String::from_utf8_lossy(recorded.get(before..).unwrap_or_default()).into(),
+            ..Printed::default()
+        };
+        if got != want {
             failures.push(format!(
-                "line {}: $ {step}\n  want {want_dump:?} record {want_record:?}\n  got  {got_dump:?} record {got_record:?}",
-                block.line
+                "line {line}: {command}\n  want {want:?}\n  got  {got:?}"
             ));
         }
     }
@@ -777,12 +790,14 @@ impl Palette {
     }
 
     fn icons<R>(&self, read: impl FnOnce(&Icons) -> R) -> R {
-        let icons = self.host.read_with(&self.cx, |host, _| host.icons());
+        let icons = self.host.read_with(&self.cx, |host, _| host.shared().icons);
         icons.read_with(&self.cx, |icons, _| read(icons))
     }
 
     fn preview<R>(&self, read: impl FnOnce(&Preview) -> R) -> R {
-        let preview = self.host.read_with(&self.cx, |host, _| host.preview());
+        let preview = self
+            .host
+            .read_with(&self.cx, |host, _| host.shared().preview);
         preview.read_with(&self.cx, |preview, _| read(preview))
     }
 
@@ -874,7 +889,7 @@ fn png_header(width: u32, height: u32) -> Vec<u8> {
         [
             &length.to_be_bytes()[..],
             &body,
-            &crc32(&body).to_be_bytes(),
+            &crc32fast::hash(&body).to_be_bytes(),
         ]
         .concat()
     };
@@ -891,21 +906,6 @@ fn png_header(width: u32, height: u32) -> Vec<u8> {
         &chunk(b"IEND", &[]),
     ]
     .concat()
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
 }
 
 impl Drop for Palette {
@@ -928,7 +928,7 @@ fn tree(name: &str) -> PathBuf {
     PathBuf::from(format!("{start}{}", "x".repeat(pad)))
 }
 
-fn mkfifo(path: &Path) -> Result<(), String> {
+pub(super) fn mkfifo(path: &Path) -> Result<(), String> {
     let path = CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
     // SAFETY: `path` is a NUL-terminated string that lives through the call.
     if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {

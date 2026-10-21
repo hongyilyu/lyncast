@@ -115,6 +115,22 @@ pub struct Counts {
     out: usize,
 }
 
+#[cfg(test)]
+impl Counts {
+    fn started(&mut self) {
+        self.started += 1;
+        self.out += 1;
+        self.most_out = self.most_out.max(self.out);
+    }
+
+    fn landed(&mut self, loaded: &Loaded, out: Option<&(Arc<Out>, Task<()>)>) {
+        self.out -= 1;
+        self.stopped += usize::from(matches!(loaded, Loaded::Stopped));
+        self.decoded +=
+            usize::from(out.is_some_and(|(out, _)| out.decoded.load(Ordering::Acquire)));
+    }
+}
+
 impl Preview {
     /// The clip the pane shows.
     pub fn of(&self) -> Option<ClipId> {
@@ -167,15 +183,7 @@ impl Preview {
 
     fn land(&mut self, id: ClipId, loaded: Loaded, cx: &mut Context<Preview>) {
         #[cfg(test)]
-        {
-            let decoded = self
-                .out
-                .as_ref()
-                .is_some_and(|(out, _)| out.decoded.load(Ordering::Acquire));
-            self.counts.out -= 1;
-            self.counts.stopped += usize::from(matches!(loaded, Loaded::Stopped));
-            self.counts.decoded += usize::from(decoded);
-        }
+        self.counts.landed(&loaded, self.out.as_ref());
         self.out = None;
         if let (Some((of, held @ Shown::Loading)), Loaded::Shown(shown)) = (&mut self.slot, loaded)
             && *of == id
@@ -200,11 +208,7 @@ impl Preview {
         });
         self.out = Some((out, task));
         #[cfg(test)]
-        {
-            self.counts.started += 1;
-            self.counts.out += 1;
-            self.counts.most_out = self.counts.most_out.max(self.counts.out);
-        }
+        self.counts.started();
     }
 }
 

@@ -18,6 +18,7 @@ mod frozen;
 mod pipe;
 mod runtime;
 mod session;
+mod steps;
 mod tree;
 mod world;
 
@@ -28,7 +29,7 @@ pub use self::{
     frozen::{Frozen, named_thread},
     pipe::fill,
     runtime::Runtime,
-    session::{Printed, Verbs, session, session_later, session_with},
+    session::{Verbs, session, session_later, session_with},
     tree::{environment, materialize, mkfifo, raw_bytes, substitute},
     world::{CommandLine, World, command_line},
 };

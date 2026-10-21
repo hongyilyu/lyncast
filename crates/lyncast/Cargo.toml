@@ -30,4 +30,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 resvg = { version = "0.46", default-features = false }
 
 [dev-dependencies]
+# The version gpui-pre builds already, for the PNG headers of the Tier 3 tests.
+crc32fast = "1.5"
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

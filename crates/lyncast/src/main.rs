@@ -17,6 +17,9 @@ mod permit;
 #[cfg(test)]
 #[path = "../tests/common/pipe.rs"]
 mod pipe;
+#[cfg(test)]
+#[path = "../tests/common/steps.rs"]
+mod steps;
 mod vars;
 mod view;
 mod warning;
