@@ -355,8 +355,8 @@ fn apply(
                     )?;
                     transaction.execute(
                         "INSERT INTO clips
-                        (id, kind, mime, bytes, body, hash, preview, created, used, pinned, seq)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, ?9)",
+                        (id, kind, mime, bytes, body, hash, preview, created, used, pinned, seq, source)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, ?9, ?10)",
                         params![
                             id.0,
                             meta.content,
@@ -366,7 +366,8 @@ fn apply(
                             meta.hash,
                             meta.preview,
                             at.0,
-                            seq
+                            seq,
+                            meta.source
                         ],
                     )?;
                     transaction.commit()
@@ -510,7 +511,7 @@ mod tests {
         connection.execute_batch(SCHEMA).unwrap();
         connection
             .execute(
-                "INSERT INTO clips VALUES (1, 'image', 'image/png', 5, NULL, ?1, NULL, 0, 0, 0, 1)",
+                "INSERT INTO clips VALUES (1, 'image', 'image/png', 5, NULL, ?1, NULL, 0, 0, 0, 1, NULL)",
                 [image],
             )
             .unwrap();
@@ -598,8 +599,8 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO clips VALUES
-                (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', ?1, 'alpha', 0, 0, 0, 1),
-                (2, 'text', 'text/plain;charset=utf-8', 4, 'beta', ?2, 'beta', 0, 0, 0, 2)",
+                (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', ?1, 'alpha', 0, 0, 0, 1, NULL),
+                (2, 'text', 'text/plain;charset=utf-8', 4, 'beta', ?2, 'beta', 0, 0, 0, 2, NULL)",
                 [Hash::of(b"alpha"), Hash::of(b"beta")],
             )
             .unwrap();

@@ -63,6 +63,7 @@ pub struct ClipView {
     mime: String,
     bytes: u64,
     preview: Option<String>,
+    source: Option<String>,
 }
 
 /// The wire reply that spells `answer`. `summon` is the host's summon once the answer has
@@ -91,6 +92,7 @@ fn clips(rows: &[clip::Row]) -> Vec<ClipView> {
             mime: row.mime.clone(),
             bytes: row.bytes,
             preview: row.preview.clone(),
+            source: row.source.clone(),
         })
         .collect()
 }

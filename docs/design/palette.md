@@ -222,7 +222,7 @@ loads: 12 started, 4 stopped, 8 decoded, at most 1 out
 
 No preview goes through GPUI's image loader, which reads a path with `fs::read` and so waits on a FIFO (`gpui-pre` 0.3.9 `src/elements/img.rs:634`, read in source).
 
-The information panel under the pane gives the clip's Source, Type, Path for a file list, Size, and Copied. Source shows `—` until plan step 8 brings the focused app from niri. Type is Text, Link, Email, Image, or Files. Path is the first file's path. Size is in bytes under 1,000, then in kB and MB of 1,000, with one decimal. Copied is the day and time of the clip's last use, which a capture, a copy, a pin, and an unpin set, because the daemon keeps no other time of a clip in memory.
+The information panel under the pane gives the clip's Source, Type, Path for a file list, Size, and Copied. Source is the app ID of the window that had the focus when the capture that added the clip took it, which later captures of the clip keep ([clipboard and paste](clipboard-and-paste.md#source-is-the-focused-windows-app-id)), or `—` without one. Type is Text, Link, Email, Image, or Files. Path is the first file's path. Size is in bytes under 1,000, then in kB and MB of 1,000, with one decimal. Copied is the day and time of the clip's last use, which a capture, a copy, a pin, and an unpin set, because the daemon keeps no other time of a clip in memory.
 
 ## Rows show their app's icon
 
@@ -1661,13 +1661,13 @@ closed
 
 ### The clipboard screen's blocks start with a history
 
-A `clips <name>` block is a history for `palette clips=<name>`, or for a test that names it. Each line is a capture at a wall time of the test clock's, in order, so the clips take the ids 1, 2, and so on: `text <text>`, `files <URI list>`, or `image <w>x<h>`, with `\n` for a line break, and the time last. An image is an orange PNG of that size, and one over 32 million pixels is a PNG's header alone, which only the size check reads. `pin <id> <time>` pins a clip. A `$ capture` step takes the same kinds and values, with no time. `$TREE` is a directory of the block's own, with `photo.png`, an orange PNG of 3 by 2, `fifo.png`, a FIFO, and `big.png`, a byte over 25 MiB. Its path is 240 bytes long, so the size of a file list that names a file in it, which counts the list's bytes, reads the same on every machine.
+A `clips <name>` block is a history for `palette clips=<name>`, or for a test that names it. Each line is a capture at a wall time of the test clock's, in order, so the clips take the ids 1, 2, and so on: `text <text>`, `files <URI list>`, or `image <w>x<h>`, with `\n` for a line break, and the time last, then `from=<app id>` for a clip that came while that app had the focus. An image is an orange PNG of that size, and one over 32 million pixels is a PNG's header alone, which only the size check reads. `pin <id> <time>` pins a clip. A `$ capture` step takes the same kinds and values, with no time. `$TREE` is a directory of the block's own, with `photo.png`, an orange PNG of 3 by 2, `fifo.png`, a FIFO, and `big.png`, a byte over 25 MiB. Its path is 240 bytes long, so the size of a file list that names a file in it, which counts the list's bytes, reads the same on every machine.
 
 ```clips history
 image 2x1 2025-10-15T12:00
 text a note\nwith two lines 2026-10-15T12:00
 files file:///etc/hostname\nfile:///etc/os-release 2026-10-16T18:30
-text https://example.org/a 2026-10-17T08:00
+text https://example.org/a 2026-10-17T08:00 from=org.mozilla.firefox
 text me@example.org 2026-10-17T08:30
 text \n  alpha\nbeta 2026-10-17T09:00
 pin 4 2026-10-17T10:00
@@ -1708,7 +1708,7 @@ clipboard (Search clipboard history) All Types
 == Oct 15, 2025
   image: Image
 preview: text "https://example.org/a"
-info: Source — · Type Link · Size 21 B · Copied Today at 10:00
+info: Source org.mozilla.firefox · Type Link · Size 21 B · Copied Today at 10:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press down down down
 clipboard (Search clipboard history) All Types
@@ -1881,7 +1881,7 @@ clipboard (Search clipboard history) Links Only
 == Pinned
 > link: https://example.org/a
 preview: text "https://example.org/a"
-info: Source — · Type Link · Size 21 B · Copied Today at 10:00
+info: Source org.mozilla.firefox · Type Link · Size 21 B · Copied Today at 10:00
 footer: Copy (enter) · Actions (ctrl-k)
 $ press ctrl-t
 clipboard (Search clipboard history) Emails Only
@@ -3166,9 +3166,9 @@ $ wait-trace frame1_presented 1
 $ keys ctrl+v Return
 $ wait-summon closed
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"2+3"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"2+3","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ paste text/plain;charset=utf-8 got
 $ cat got; echo
 5

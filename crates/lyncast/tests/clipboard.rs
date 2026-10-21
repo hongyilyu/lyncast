@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::clipboard::{CAPTURE, Helpers, wait_read};
 use common::doc::{self, Block};
-use common::{BUDGET, Daemon, OK, World, poll, run_bounded, session, session_with};
+use common::{BUDGET, Daemon, OK, World, poll, run_bounded, session, session_later};
 
 const TREES: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/clipboard-trees");
 
@@ -80,13 +80,15 @@ fn every_session_block_runs_as_the_doc_says() {
 fn every_clipboard_block_runs_as_the_doc_says() {
     let fixtures = fixtures();
     let trees = fresh("clipboard");
-    let failures: Vec<String> = blocks(&fixtures, "clipboard", 32)
+    // The capture thread asks niri about an offer before or after the seed's line returns.
+    let seeds = |line: &str| line.starts_with("$ seed");
+    let failures: Vec<String> = blocks(&fixtures, "clipboard", 33)
         .into_iter()
         .flat_map(|block| {
             let world = World::compositor(&fixtures, trees.join(block.line.to_string()));
             let mut helpers = Helpers::new(&world);
-            let failures =
-                session_with(&world, block, &mut |line, newest| helpers.run(line, newest));
+            let mut verbs = |line: &str, newest| helpers.run(line, newest);
+            let failures = session_later(&world, block, &mut verbs, &seeds);
             drop(helpers);
             if failures.is_empty() {
                 world.passed();
@@ -180,7 +182,7 @@ fn copies_at_once_record_in_the_order_the_compositor_took_them() {
         assert_eq!(run("$ paste text/plain;charset=utf-8 got"), OK);
         let pasted = fs::read_to_string(world.tree.join("got")).unwrap();
         assert!(
-            first.ends_with(&format!("\"preview\":\"{pasted}\"}}")),
+            first.ends_with(&format!("\"preview\":\"{pasted}\",\"source\":null}}")),
             "round {round}: the clipboard holds {pasted:?}, and the first row is {first}"
         );
     }

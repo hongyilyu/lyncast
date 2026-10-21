@@ -253,7 +253,9 @@ fn open_daemon(_held: &Lock, events: &Events) -> Result<(Daemon, Option<Copier>)
             let seen = move |seen| {
                 events.send_or_drop(Event::Seen(seen));
             };
-            let (capture, copier) = Capture::start(clips.pending(), seen).map_err(not_started)?;
+            let niri = vars.niri_socket.clone();
+            let (capture, copier) =
+                Capture::start(clips.pending(), niri, seen).map_err(not_started)?;
             (Some(capture), Some(copier))
         }
         None => (None, None),

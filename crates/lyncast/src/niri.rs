@@ -17,6 +17,10 @@ use niri_ipc::{Action, Reply, Request, Response};
 /// How long an action may take in all, from the connect to its answer.
 const ACTION_WAIT: Duration = Duration::from_secs(2);
 
+/// How long a question may take in all. niri answers one from state it holds, or after one turn
+/// of its event loop.
+const ASK_WAIT: Duration = Duration::from_millis(200);
+
 /// The most bytes a reply line may hold, with its newline.
 const MAX_REPLY: usize = 1 << 20;
 
@@ -72,6 +76,16 @@ pub fn act(socket: Option<&Path>, action: Action) -> Result<(), String> {
             "not an answer to an action".to_owned(),
         ))),
         Err(failure) => Err(failed(failure)),
+    }
+}
+
+/// The `app_id` of the window that the niri at `socket` says has the focus, or `None` when niri
+/// gives no answer within [`ASK_WAIT`], when no window has the focus, as while a layer surface
+/// such as the palette has it, or when the window has no app ID.
+pub fn focused_app(socket: Option<&Path>) -> Option<String> {
+    match send(socket?, &Request::FocusedWindow, ASK_WAIT).ok()? {
+        Response::FocusedWindow(window) => window?.app_id,
+        _ => None,
     }
 }
 
@@ -262,27 +276,44 @@ mod tests {
         }
     }
 
+    /// Runs `request` on a thread of its own, which sends what it gave and how long it took.
+    fn timed<T: Send + 'static>(
+        request: impl FnOnce() -> T + Send + 'static,
+    ) -> mpsc::Receiver<(T, Duration)> {
+        let (done, result) = mpsc::channel();
+        thread::spawn(move || {
+            let asked = Instant::now();
+            let answer = request();
+            let _ = done.send((answer, asked.elapsed()));
+        });
+        result
+    }
+
     /// docs/design/launching.md: a niri whose event loop is stuck accepts no connection, and no
     /// block can fill a backlog of 4,097, so this niri's backlog is as small as it gets. The
     /// test fills it with connects that give up at once, and then an action fails at its
-    /// deadline, where std's connect would wait for good.
+    /// deadline, where std's connect would wait for good, and a question gives up in under 1 s.
     #[test]
     fn a_niri_that_accepts_nothing_fails_at_the_deadline() {
         let dir = scratch();
         let socket = dir.join("niri.sock");
         let _niri = listener(&socket, 0);
         let _queued = fill(&socket);
-        let (done, failed) = mpsc::channel();
         let action = Action::Spawn {
             command: vec!["firefox".to_owned()],
         };
         let sent = socket.clone();
-        thread::spawn(move || done.send(act(Some(&sent), action)));
-        let failed = failed.recv_timeout(ACTION_WAIT * 2);
+        let failed = timed(move || act(Some(&sent), action)).recv_timeout(ACTION_WAIT * 2);
+        let asked = socket.clone();
+        let window = timed(move || focused_app(Some(&asked))).recv_timeout(ACTION_WAIT * 2);
         fs::remove_dir_all(&dir).unwrap();
+        let (failed, _) = failed.expect("the action returned");
         assert_eq!(
             failed,
-            Ok(Err("not run: niri did not answer within 2 s".to_owned()))
+            Err("not run: niri did not answer within 2 s".to_owned())
         );
+        let (window, took) = window.expect("the question returned");
+        assert_eq!(window, None);
+        assert!(took < Duration::from_secs(1), "FocusedWindow took {took:?}");
     }
 }

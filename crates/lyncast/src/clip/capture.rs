@@ -3,6 +3,7 @@
 
 use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsFd, AsRawFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -15,6 +16,7 @@ use wl_clipboard_rs::watch::{CancelHandle, ClipboardEvent, ClipboardType, Watche
 use super::copy::{Copier, Marks};
 use super::db::Pending;
 use super::{Entry, GNOME_FILES, MAX_BYTES, OFFER_READ_DEADLINE, OWN, URI_LIST};
+use crate::niri;
 
 /// The capture thread's name, by which the `wait-read` fixtures find it.
 const THREAD: &str = "capture";
@@ -37,10 +39,13 @@ pub struct Capture {
 impl Capture {
     /// Connects to the compositor that `WAYLAND_DISPLAY` names and starts the capture thread,
     /// which calls `seen` with each entry once it has its share of `pending`, and the copier,
-    /// which the capture thread tells of each marked offer. Fails when the compositor cannot be
-    /// reached, offers no seat or neither data-control protocol, or a thread cannot start.
+    /// which the capture thread tells of each marked offer. The thread asks the niri at `niri`
+    /// for each entry's source, except for the selection it finds at start. Fails when the
+    /// compositor cannot be reached, offers no seat or neither data-control protocol, or a thread
+    /// cannot start.
     pub fn start(
         pending: Option<Pending>,
+        niri: Option<PathBuf>,
         mut seen: impl FnMut(Seen) + Send + 'static,
     ) -> Result<(Capture, Copier), String> {
         let mut watcher = Watcher::new(ClipboardType::Regular, Seat::Unspecified)
@@ -53,7 +58,14 @@ impl Capture {
         thread::Builder::new()
             .name(THREAD.to_owned())
             .spawn(move || {
-                let ending = watch(&mut watcher, &stop, &marks, pending.as_ref(), &mut seen);
+                let ending = watch(
+                    &mut watcher,
+                    &stop,
+                    &marks,
+                    pending.as_ref(),
+                    niri.as_deref(),
+                    &mut seen,
+                );
                 seen(ending);
             })
             .map_err(|error| error.to_string())?;
@@ -72,10 +84,17 @@ fn watch(
     cancelled: &AtomicBool,
     marks: &Marks,
     pending: Option<&Pending>,
+    niri: Option<&Path>,
     seen: &mut impl FnMut(Seen),
 ) -> Seen {
+    // The first event is the selection as the watcher starts (wl-clipboard-rs 0.9.4
+    // `src/watch.rs:211-212`), which may have been copied while no daemon ran, so the window
+    // focused then says nothing of it.
+    let mut at_start = true;
     loop {
         let event = watcher.next_event();
+        let ask = if at_start { None } else { niri };
+        at_start = false;
         if cancelled.load(Ordering::Acquire) {
             return Seen::Ended;
         }
@@ -93,8 +112,12 @@ fn watch(
                 if mime_types.iter().any(skipped) {
                     continue;
                 }
-                if let Some(entry) = entry(&mime_types, |mime| offer.receive(mime).ok())
-                    && let Some(entry) = entry.admitted(pending)
+                // The question comes inside the offer's deadline, so a niri that does not answer
+                // holds the thread no longer than a source that does not answer does.
+                let deadline = Instant::now() + OFFER_READ_DEADLINE;
+                let source = niri::focused_app(ask);
+                if let Some(entry) = entry(&mime_types, deadline, |mime| offer.receive(mime).ok())
+                    && let Some(entry) = entry.with_source(source).admitted(pending)
                 {
                     seen(Seen::Entry(entry));
                 }
@@ -108,9 +131,9 @@ fn watch(
 
 fn entry<P: Read + AsFd>(
     types: &[String],
+    deadline: Instant,
     mut receive: impl FnMut(&str) -> Option<P>,
 ) -> Option<Entry> {
-    let deadline = Instant::now() + OFFER_READ_DEADLINE;
     let mut read = |mime: &str| read_pipe(receive(mime)?, deadline);
     let has = |mime: &str| types.iter().any(|offered| offered == mime);
     if let Some(list_type) = [URI_LIST, GNOME_FILES].into_iter().find(|&mime| has(mime))
@@ -226,7 +249,7 @@ mod tests {
         let types: Vec<String> = pipes.iter().map(|(mime, _)| mime.to_string()).collect();
         let mut read = Vec::new();
         let started = Instant::now();
-        let entry = entry(&types, |mime| {
+        let entry = entry(&types, started + OFFER_READ_DEADLINE, |mime| {
             read.push(mime.to_owned());
             let at = pipes.iter().position(|(offered, _)| *offered == mime)?;
             Some(pipes.remove(at).1)

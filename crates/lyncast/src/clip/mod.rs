@@ -121,6 +121,7 @@ struct Meta {
     bytes: u64,
     preview: Option<String>,
     hash: Hash,
+    source: Option<String>,
 }
 
 pub struct Entry {
@@ -138,6 +139,7 @@ impl Entry {
                 bytes: text.len() as u64,
                 preview: Some(clip::preview(text).to_owned()),
                 hash: Hash::of(text.as_bytes()),
+                source: None,
             },
             body: Body::Text(text.into()),
             share: None,
@@ -163,6 +165,7 @@ impl Entry {
                 bytes: body.len() as u64,
                 preview: Some(clip::preview(&paths).to_owned()),
                 hash: Hash::of(body.as_bytes()),
+                source: None,
             },
             body: Body::Text(body.into()),
             share: None,
@@ -177,10 +180,17 @@ impl Entry {
                 bytes: bytes.len() as u64,
                 preview: None,
                 hash: Hash::of(&bytes),
+                source: None,
             },
             body: Body::Image(bytes.into()),
             share: None,
         }
+    }
+
+    /// The entry with the app that had the focus as it was captured.
+    pub(crate) fn with_source(mut self, source: Option<String>) -> Entry {
+        self.meta.source = source;
+        self
     }
 
     /// The entry with its share of what waits for the writer, or `None`, with a warning, when
@@ -218,6 +228,8 @@ pub struct Row {
     /// The first 1,024 bytes of the text or of the paths, cut at a character boundary. An image
     /// has none.
     pub preview: Option<String>,
+    /// The app ID of the window that had the focus when the row was captured.
+    pub source: Option<String>,
     hash: Hash,
     used: Timestamp,
     pub pinned: bool,
@@ -232,6 +244,7 @@ impl Row {
             mime: meta.mime,
             bytes: meta.bytes,
             preview: meta.preview,
+            source: meta.source,
             hash: meta.hash,
             used,
             pinned,
@@ -437,8 +450,8 @@ impl Clips {
     }
 
     /// Records what the clipboard offered at `now`. A row of the same kind with the same bytes
-    /// moves to the front, unless it is pinned, and keeps its id. Anything else is a new row
-    /// with the next id, and the rows that have expired go.
+    /// moves to the front, unless it is pinned, and keeps its id and its source. Anything else is
+    /// a new row with the next id, and the rows that have expired go.
     pub fn record(&mut self, entry: Entry, now: Timestamp) {
         let same = |row: &&Row| row.content == entry.meta.content && row.hash == entry.meta.hash;
         if let Some(id) = self.rows.iter().find(same).map(|row| row.id) {
@@ -450,7 +463,7 @@ impl Clips {
     }
 
     /// Records a write that a copy has seen the compositor take. A row of the history moves to the
-    /// front unless it is pinned, and text is recorded as a capture of it would be.
+    /// front unless it is pinned, and text is recorded as a capture of it would be, with no source.
     pub fn wrote(&mut self, delivery: &Delivery, now: Timestamp) {
         match delivery.handed() {
             Handed::Clip(id) => {

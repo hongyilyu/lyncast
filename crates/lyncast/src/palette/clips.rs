@@ -154,6 +154,7 @@ pub struct ClipLine {
     /// A file list's first path.
     pub path: Option<String>,
     pub bytes: u64,
+    pub source: Option<String>,
 }
 
 impl ClipLine {
@@ -186,7 +187,8 @@ impl ClipLine {
             Content::Files => "Files",
         };
         let (day, time) = self.used;
-        let mut info = vec![("Source", "—".to_owned()), ("Type", kind.to_owned())];
+        let source = self.source.clone().unwrap_or_else(|| "—".to_owned());
+        let mut info = vec![("Source", source), ("Type", kind.to_owned())];
         info.extend(self.path.clone().map(|path| ("Path", path)));
         info.push(("Size", size(self.bytes)));
         let copied = format!("{} at {:02}:{:02}", day.label(), time.hour, time.minute);
@@ -235,6 +237,7 @@ pub fn clip_lines(
                     .and_then(|preview| preview.lines().next())
                     .map(str::to_owned),
                 bytes: row.bytes,
+                source: row.source.clone(),
             }
         })
         .collect()
