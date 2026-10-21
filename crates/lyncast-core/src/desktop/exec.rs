@@ -1,5 +1,5 @@
 //! The Exec tokenizer. It reads an `Exec` value after key-file unescaping and gives the argv
-//! that step 8 runs.
+//! that the binary launches.
 
 use std::mem;
 

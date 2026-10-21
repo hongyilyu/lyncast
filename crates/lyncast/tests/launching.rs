@@ -24,8 +24,8 @@ fn every_session_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         sessions.len(),
-        6,
-        "launching.md holds 6 session blocks, so a lost block fails"
+        9,
+        "launching.md holds 9 session blocks, so a lost block fails"
     );
     match fs::remove_dir_all(TREES) {
         Err(error) if error.kind() != ErrorKind::NotFound => panic!("{TREES}: {error}"),

@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as Process, Stdio};
 use std::rc::Rc;
@@ -524,9 +525,10 @@ fn run(fixtures: &[Block], block: &Block) -> Vec<String> {
             );
         }
         let recorded = palette.recorded();
+        let record = String::from_utf8_lossy(recorded.get(before..).unwrap_or_default());
         let got = Printed {
             stdout: dump,
-            record: String::from_utf8_lossy(recorded.get(before..).unwrap_or_default()).into(),
+            record: record.replace(&*palette.tree.to_string_lossy(), "$TREE"),
             ..Printed::default()
         };
         if got != want {
@@ -600,6 +602,12 @@ impl Palette {
         let tree = tree(&format!("{}-{name}-", process::id()));
         let _ = fs::remove_dir_all(&tree);
         fs::create_dir_all(&tree).expect("the block's tree");
+        for program in doc::PALETTE.blocks("executable") {
+            let path = tree.join(&program.args[0]);
+            fs::create_dir_all(path.parent().expect("a program in a directory")).unwrap();
+            fs::write(&path, program.lines.join("\n")).expect("the program");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+        }
         fs::write(tree.join("photo.png"), icons::tests::png(3, 2)).expect("photo.png");
         mkfifo(&tree.join("fifo.png")).expect("fifo.png");
         let big = File::create(tree.join("big.png")).expect("big.png");
@@ -611,14 +619,11 @@ impl Palette {
             seed(&mut history, &line).unwrap_or_else(|error| panic!("clips line {line}: {error}"));
         }
         let index = Index::new(apps);
-        let daemon = Daemon::new(
-            Vars::default(),
-            index,
-            Visits::default(),
-            None,
-            history,
-            None,
-        );
+        let vars = Vars {
+            path: Some(tree.join("bin").into_os_string()),
+            ..Vars::default()
+        };
+        let daemon = Daemon::new(vars, None, index, Visits::default(), None, history, None);
         let (bell, rung) = Bell::new();
         let (owner, events) = daemon::detached(daemon, &record, bell, || NOW);
         let exit = Exit::default();

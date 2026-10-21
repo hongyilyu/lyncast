@@ -26,6 +26,7 @@ use niri_ipc::Action;
 
 use crate::clip::{self, Capture, Clips, Entry, Payload};
 use crate::config;
+use crate::launch::{Launch, Lookup};
 use crate::vars::Vars;
 use crate::view::Spelled;
 use crate::wire::{Request, Via};
@@ -46,6 +47,8 @@ pub const QUIT_WAIT: Duration = Duration::from_secs(5);
 pub struct Daemon {
     /// The environment read at start. Reload Apps scans with it again on a worker thread.
     vars: Arc<Vars>,
+    /// Where a launch finds its programs, which a worker reads.
+    lookup: Arc<Lookup>,
     index: Index,
     /// The number of the newest scan handed out, and of the scan `index` came from. The scan at
     /// start is 0.
@@ -133,8 +136,10 @@ pub enum Work {
 
 /// Work that blocks, for a worker thread.
 pub enum Task {
-    /// Sends the action to niri through the runner: a program's Spawn, or Log Out's Quit.
+    /// Sends the action to niri through the runner: a command's Spawn, or Log Out's Quit.
     Act(Action),
+    /// Builds the command of an app's item and sends its Spawn through the runner.
+    Launch(Launch, Arc<Lookup>),
     /// Creates the config file if it is missing, then opens it.
     OpenConfig(PathBuf),
     /// Scans the apps again and indexes them.
@@ -171,14 +176,20 @@ enum Record {
 impl Daemon {
     pub fn new(
         vars: Vars,
+        terminal: Option<Vec<String>>,
         index: Index,
         visits: Visits,
         store: Option<Store>,
         clips: Clips,
         capture: Option<Capture>,
     ) -> Daemon {
+        let lookup = Lookup {
+            path: vars.path.clone(),
+            terminal,
+        };
         Daemon {
             vars: Arc::new(vars),
+            lookup: Arc::new(lookup),
             index,
             scans: 0,
             indexed: 0,
@@ -371,16 +382,19 @@ impl Daemon {
             },
             message,
         };
-        let launch = |id, message: String| {
-            let argv = self
-                .index
-                .app(id)
-                .and_then(|app| app.argv_for(item))
+        let launch = |id: &AppId, message: String| {
+            let app = self.index.app(id).expect("an app's row is in the index");
+            let argv = app
+                .argv_for(item)
                 .expect("an app's row offers only its own Open and Desktop Actions");
+            let launch = Launch {
+                app: id.clone(),
+                argv: argv.to_vec(),
+                terminal: app.terminal(),
+                work_dir: app.work_dir().map(str::to_owned),
+            };
             Handled::Job(Job {
-                work: Work::Task(Task::Act(Action::Spawn {
-                    command: argv.to_vec(),
-                })),
+                work: Work::Task(Task::Launch(launch, Arc::clone(&self.lookup))),
                 success: success(message),
             })
         };
@@ -601,6 +615,7 @@ mod tests {
         let name = app.name().to_owned();
         let mut daemon = Daemon::new(
             Vars::default(),
+            None,
             Index::new(Vec::new()),
             Visits::default(),
             None,

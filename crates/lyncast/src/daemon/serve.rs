@@ -258,7 +258,7 @@ fn open_daemon(_held: &Lock, events: &Events) -> Result<(Daemon, Option<Copier>)
         }
         None => (None, None),
     };
-    let daemon = Daemon::new(vars, index, visits, store, clips, capture);
+    let daemon = Daemon::new(vars, config.terminal, index, visits, store, clips, capture);
     Ok((daemon, copier))
 }
 

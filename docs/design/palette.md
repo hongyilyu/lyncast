@@ -264,7 +264,7 @@ Each line's time is read as its event happens, and one thread writes the lines, 
 
 ## The fixtures
 
-These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `clips`, and `palette` blocks. There too, `the_preview_holds_one_image` reads a `clips` block, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_size_reads_as_the_doc_says` in `crates/lyncast/src/palette/clips.rs` reads the `sizes` block, and `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
+These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `executable`, `clips`, and `palette` blocks. There too, `the_preview_holds_one_image` reads a `clips` block, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_size_reads_as_the_doc_says` in `crates/lyncast/src/palette/clips.rs` reads the `sizes` block, and `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
 
 ```env
 HOME=$TREE/home
@@ -309,7 +309,7 @@ Exec=8x8
 
 ### The palette blocks run on GPUI's test platform
 
-`every_palette_block_runs_as_the_doc_says` in `crates/lyncast/src/palette/tests.rs` runs each `palette` block against a daemon and a palette host of its own, in a GPUI `TestAppContext` app. The daemon has the apps of the `desktop` blocks above, no visits, no data home, and no compositor, so a copy fails with `not copied: no Wayland compositor`. Its runner records each program to a scratch file. Its clock reads 2026-10-17 at 12:00 on a wall two hours east of UTC, for the daemon and the palette alike. Its history keeps every row, so no row expires, and `palette clips=<name>` starts it with the lines of the `clips <name>` block. A block is a list of steps. Each step is a `$ ` line, and the lines after it say what the palette shows once the step has run:
+`every_palette_block_runs_as_the_doc_says` in `crates/lyncast/src/palette/tests.rs` runs each `palette` block against a daemon and a palette host of its own, in a GPUI `TestAppContext` app. The daemon has the apps of the `desktop` blocks above, no visits, no data home, and no compositor, so a copy fails with `not copied: no Wayland compositor`. Each block has a tree of its own, `$TREE`, which holds the `executable` blocks above, and the daemon's `PATH` is its `bin`, so a launch finds Firefox there. The runner records each program to a scratch file. Its clock reads 2026-10-17 at 12:00 on a wall two hours east of UTC, for the daemon and the palette alike. Its history keeps every row, so no row expires, and `palette clips=<name>` starts it with the lines of the `clips <name>` block. A block is a list of steps. Each step is a `$ ` line, and the lines after it say what the palette shows once the step has run:
 
 | Step | Does |
 |---|---|
@@ -688,7 +688,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ press enter
 root "fire"
 == Results
@@ -756,7 +756,7 @@ root "fire"
 footer: pending
 $ resume-runner
 closed
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 ```
 
 ### Escape closes the window while an activation is out
@@ -799,7 +799,7 @@ $ press escape
 closed
 $ resume-runner
 closed
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 ```
 
 ### A failure stays in the footer, and a repeat activates nothing
@@ -965,7 +965,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ release enter
 root "fire"
 == Results
@@ -1004,7 +1004,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ mods none
 root "fire"
 == Results
@@ -1353,7 +1353,7 @@ root "fire fox"
 == Results
 > Firefox  (Application)
 footer: closing
-record: {"Action":{"Spawn":{"command":["firefox","--new-window"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox","--new-window"]}}}
 $ release enter
 closed
 ```
@@ -3002,7 +3002,7 @@ open
 $ wait-trace frame1_presented 1
 $ lyncast activate app:firefox.desktop
 launched app:firefox.desktop
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ lyncast status
 closed
 $ wait-trace window_closed 1
@@ -3120,7 +3120,7 @@ open
 $ wait-trace frame1_presented 1
 $ keys f i r e Return
 $ wait-summon closed
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ wait-trace window_closed 1
 $ lyncast activate cmd:quit
 ran cmd:quit

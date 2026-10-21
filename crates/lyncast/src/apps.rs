@@ -39,7 +39,8 @@ pub fn scan(vars: &Vars) -> Vec<App> {
             let Ok(Verdict::Shown(app)) = verdict else {
                 continue;
             };
-            let installed = |program: &str| on_path(program, vars.path.as_deref(), app.work_dir());
+            let installed =
+                |program: &str| find(program, vars.path.as_deref(), app.work_dir()).is_some();
             if app.try_exec().is_none_or(installed) && installed(&app.argv()[0]) {
                 apps.push(*app);
             }
@@ -109,22 +110,30 @@ fn walk(dir: &str, prefix: &str, ancestors: &mut Vec<PathBuf>, found: &mut Vec<F
     ancestors.pop();
 }
 
-/// `TryExec` or the Exec program: an absolute path must be an executable file, and a bare name
+/// Where `TryExec` or a program is: an absolute path must be an executable file, and a bare name
 /// must be one in the entry's `Path` directory, when that is absolute, or in a `PATH` directory.
 /// An unset `PATH` searches `/bin:/usr/bin:.`, and a relative entry, such as `.` or an empty one,
 /// names a directory under `Path`, or under the working directory without one, as GLib does. A
-/// relative path with a `/` is never found.
-fn on_path(program: &str, path: Option<&OsStr>, work_dir: Option<&str>) -> bool {
+/// relative path with a `/` is never found. An absolute path comes back as it is, and one found
+/// under a relative directory is made absolute against the working directory.
+pub fn find(program: &str, path: Option<&OsStr>, work_dir: Option<&str>) -> Option<PathBuf> {
     if program.starts_with('/') {
-        return is_executable_file(Path::new(program));
+        return is_executable_file(Path::new(program)).then(|| PathBuf::from(program));
     }
     if program.contains('/') {
-        return false;
+        return None;
     }
     let base = Path::new(work_dir.unwrap_or(""));
-    work_dir.is_some_and(|dir| dir.starts_with('/') && is_executable_file(&base.join(program)))
-        || env::split_paths(path.unwrap_or(OsStr::new("/bin:/usr/bin:.")))
-            .any(|dir| is_executable_file(&base.join(dir).join(program)))
+    let in_work_dir = work_dir
+        .filter(|dir| dir.starts_with('/'))
+        .map(|dir| Path::new(dir).join(program));
+    let on_path = env::split_paths(path.unwrap_or(OsStr::new("/bin:/usr/bin:.")))
+        .map(|dir| base.join(dir).join(program));
+    let found = in_work_dir
+        .into_iter()
+        .chain(on_path)
+        .find(|candidate| is_executable_file(candidate))?;
+    std::path::absolute(found).ok()
 }
 
 /// A regular file, after symlinks, that this user may execute. GLib asks `access(X_OK)`, so a

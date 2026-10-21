@@ -386,8 +386,9 @@ fn launches_at_once_record_whole_lines() {
                 "[Desktop Entry]\nType=Application\nName={letter}\nExec=firefox {argument}\n"
             );
             fs::write(world.tree.join("share/applications").join(&id), entry).unwrap();
+            let firefox = world.tree.join("bin/firefox");
             let request = format!(
-                "{{\"Action\":{{\"Spawn\":{{\"command\":[\"firefox\",\"{argument}\"]}}}}}}"
+                "{{\"Action\":{{\"Spawn\":{{\"command\":[{firefox:?},\"{argument}\"]}}}}}}"
             );
             (id, request)
         })

@@ -8,12 +8,22 @@ use crate::warning::warn;
 
 pub struct Config {
     pub retention: Retention,
+    /// The terminal that runs `Terminal=true` apps, its program first.
+    pub terminal: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
 struct File {
     #[serde(default)]
     clipboard: Clipboard,
+    #[serde(default)]
+    launch: Launch,
+}
+
+#[derive(Default, Deserialize)]
+struct Launch {
+    #[serde(default)]
+    terminal: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -49,6 +59,7 @@ pub fn read(config_home: Option<&Path>) -> Config {
             .clipboard
             .retention_days
             .map_or(Retention::DEFAULT, Retention::days),
+        terminal: file.launch.terminal,
     }
 }
 

@@ -62,7 +62,7 @@ An `activate` request carries a key, the chord or verb, the confirmation, and th
 1. It rebuilds the row's `Subject` from current state. An app comes from the index, a command from its key, a clip from the clipboard history, and a calculator row from the key's text. If the state has no such row, the request fails, for example with `no app nope.desktop` or `no clip 9`.
 2. It takes the item from the subject's `Actions`: `on(chord)` for a chord, or `pick(verb)` for a verb. If `pick` finds nothing, the request fails with `<key> has no action <verb>`.
 3. If the item runs a command that confirms, and the request is not confirmed, the daemon replies with a confirmation request and runs nothing. Log Out, Reboot, and Power Off confirm. The CLI prints `lyncast: Reboot? Run again with --yes to confirm.` and exits 1.
-4. It runs the item. Copy Answer evaluates the key's text again, once, and a text with no answer fails with `calc:10/0 has no answer`. Copy items need the compositor, so without `WAYLAND_DISPLAY` they fail with `not copied: no Wayland compositor`, and with it they go to the copier ([clipboard and paste](clipboard-and-paste.md#a-copy-waits-for-the-compositor-to-take-it)). Items that start a program go to the runner.
+4. It runs the item. Copy Answer evaluates the key's text again, once, and a text with no answer fails with `calc:10/0 has no answer`. Copy items need the compositor, so without `WAYLAND_DISPLAY` they fail with `not copied: no Wayland compositor`, and with it they go to the copier ([clipboard and paste](clipboard-and-paste.md#a-copy-waits-for-the-compositor-to-take-it)). Items that start a program go to the runner, and an app's on the way builds its command from the program, the terminal, and the directory that it finds ([launching](launching.md#the-daemon-builds-an-apps-command-on-a-worker)).
 5. On success it records a visit for `Launch`, `LaunchAction`, and every `Run` but Quit's, and replies with the line below. A success closes the summon, except Clipboard History's, which opens it. On failure nothing is recorded and the summon stays as it was.
 
 | Item | Success line |
@@ -375,10 +375,10 @@ Enter launches the app's Exec, and a verb picks a Desktop Action. A verb the row
 $ lyncast daemon --headless
 $ lyncast activate app:firefox.desktop
 launched app:firefox.desktop
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ lyncast activate app:firefox.desktop --verb launch-action:new-window
 launched app:firefox.desktop new-window
-record: {"Action":{"Spawn":{"command":["firefox","--new-window"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox","--new-window"]}}}
 $ lyncast activate app:firefox.desktop --verb pin
 stderr: lyncast: app:firefox.desktop has no action pin
 exit: 1
@@ -502,7 +502,7 @@ An activation records a visit, so Firefox leads Suggestions. Quit removes the so
 $ lyncast daemon --headless
 $ lyncast activate app:firefox.desktop --query Fir
 launched app:firefox.desktop
-record: {"Action":{"Spawn":{"command":["firefox"]}}}
+record: {"Action":{"Spawn":{"command":["$TREE/bin/firefox"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ lyncast status
