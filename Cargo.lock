@@ -3062,6 +3062,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "libc",
+ "log",
  "lyncast-core",
  "niri-ipc",
  "resvg",
