@@ -5,7 +5,8 @@
 //! asks. [`daemon`] starts daemons in the background and says how the next one starts,
 //! [`frozen`] holds one of a daemon's threads still, and [`session`] runs a block's lines and
 //! compares what each printed. [`clipboard`] holds the clipboard verbs, which run the test binary
-//! again as a helper.
+//! again as a helper. This file also holds [`cli`], which runs a block's steps as the commands
+//! that a test makes of them.
 
 #![allow(dead_code)]
 
@@ -43,6 +44,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use self::steps::{Printed, steps};
 
 /// The binary under test.
 pub const LYNCAST: &str = env!("CARGO_BIN_EXE_lyncast");
@@ -96,6 +99,38 @@ pub fn run_bounded(mut command: Command, dir: &Path) -> Option<Ran> {
         fs::read(stderr).unwrap(),
         status.code(),
     ))
+}
+
+/// Runs each step of `block` as the command that `command` makes of its line after the `$ `, as
+/// [`run_bounded`] runs it with its output under `dir`, and gives what failed, a line for each
+/// step that printed other than the lines after it say.
+pub fn cli(
+    block: &doc::Block,
+    dir: &Path,
+    mut command: impl FnMut(&str) -> Command,
+) -> Vec<String> {
+    steps(block)
+        .into_iter()
+        .filter_map(|step| {
+            let line = step.command.strip_prefix("$ ").unwrap_or_else(|| {
+                panic!("line {}: {:?} is not a command", step.line, step.command)
+            });
+            let (stdout, stderr, code) = run_bounded(command(line), dir).expect("the command ends");
+            let got = Printed {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                exit: code.unwrap_or(-1),
+                ..Printed::default()
+            };
+            let want = Printed::expected(step.after);
+            (got != want).then(|| {
+                format!(
+                    "line {}: {}\n  want {want:?}\n  got  {got:?}",
+                    step.line, step.command
+                )
+            })
+        })
+        .collect()
 }
 
 fn umask(command: &mut Command) {
