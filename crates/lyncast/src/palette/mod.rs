@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, Entity, QuitMode, WeakEntity, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, WindowingModes, point, px, size,
+    App, AppContext, AsyncApp, Bounds, Entity, QuitMode, WeakEntity, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, WindowingModes, point, px, size,
 };
 
 use crate::daemon::{self, Bell, Owner, Rung, Screen, Wake};
@@ -205,6 +205,7 @@ fn options(cx: &App, height: Option<u32>) -> WindowOptions {
             ..Default::default()
         }),
         app_id: Some("lyncast".to_owned()),
+        window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     }
 }

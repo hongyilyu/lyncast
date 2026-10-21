@@ -17,7 +17,8 @@ use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
 use gpui::{
     App, Bounds, Context, Entity, EntityInputHandler, IntoElement, KeyDownEvent, KeyUpEvent,
     Keystroke, Modifiers, Pixels, Render, RenderImage, TestAppContext, TestDispatcher,
-    VisualTestContext, Window, WindowBounds, WindowHandle, WindowKind, div, prelude::*, px, size,
+    VisualTestContext, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, prelude::*, px, size,
 };
 use lyncast_core::clip::Retention;
 use lyncast_core::desktop::{self, App as Entry, Session, Verdict};
@@ -90,6 +91,10 @@ fn the_window_is_placed_as_the_geometry_block_says(cx: &mut TestAppContext) {
     };
     let pixels = |text: &str| px(text.parse::<f32>().expect("pixels"));
     assert_eq!(bounds.size, size(pixels(width), pixels(height)));
+    assert_eq!(
+        options.window_background,
+        WindowBackgroundAppearance::Transparent
+    );
     let WindowKind::LayerShell(shell) = options.kind else {
         panic!("the window is a layer-shell surface");
     };

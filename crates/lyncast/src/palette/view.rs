@@ -15,7 +15,7 @@ use gpui::{
     AnyElement, App, AppContext, Bounds, Context, ElementInputHandler, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
     ModifiersChangedEvent, ParentElement, Render, Styled, Subscription, Task, TextAlign,
-    WeakEntity, Window, canvas, div, fill, point, px, rgb, size,
+    WeakEntity, Window, canvas, div, fill, point, px, rgb, rgba, size,
 };
 use lyncast_core::ClipId;
 use lyncast_core::clip::Delivery;
@@ -370,7 +370,7 @@ impl PaletteView {
                     .rounded(px(6.0))
                     .child(item.label().to_owned())
                     .children(chord.map(|chord| key_cap(Cap::of(chord).label())));
-                line.when(menu.is_selected(at), |line| line.bg(rgb(theme::SELECTED)))
+                line.when(menu.is_selected(at), |line| line.bg(rgba(theme::SELECTED)))
                     .into_any_element()
             })
             .collect();
@@ -466,7 +466,8 @@ impl Render for PaletteView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(theme::BACKGROUND))
+            .bg(rgba(theme::BACKGROUND))
+            .rounded(px(theme::RADIUS))
             .border_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, IntoElement, ParentElement, Pixels, RenderImage, ShapedLine, SharedString, Styled,
-    TextRun, UnderlineStyle, Window, div, font, img, px, rgb,
+    TextRun, UnderlineStyle, Window, div, font, img, px, rgb, rgba,
 };
 use lyncast_core::Row;
 use lyncast_core::calc;
@@ -105,7 +105,7 @@ pub(super) fn row_line(row: &Row, icon: Option<Arc<RenderImage>>, selected: bool
                 .child(row.title.clone()),
         )
         .children(kind.map(|kind| div().text_sm().text_color(rgb(theme::MUTED)).child(kind)));
-    line.when(selected, |line| line.bg(rgb(theme::SELECTED)))
+    line.when(selected, |line| line.bg(rgba(theme::SELECTED)))
         .into_any_element()
 }
 
@@ -127,7 +127,7 @@ pub(super) fn clip_line(clip: &ClipLine, selected: bool) -> AnyElement {
                 .truncate()
                 .child(clip.title.clone()),
         );
-    line.when(selected, |line| line.bg(rgb(theme::SELECTED)))
+    line.when(selected, |line| line.bg(rgba(theme::SELECTED)))
         .into_any_element()
 }
 
