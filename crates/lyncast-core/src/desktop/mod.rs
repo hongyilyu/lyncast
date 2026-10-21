@@ -1,5 +1,5 @@
 //! Desktop entries. [`parse`] turns one `.desktop` file's text into the verdict for its ID: an
-//! [`App`] that the index ranks and step 8 launches, or the reason the ID shows nothing. The
+//! [`App`] that the index ranks and the binary launches, or the reason the ID shows nothing. The
 //! binary walks the directories, reads the files, keeps the first file per ID, and
 //! looks up `TryExec` and the Exec program. The rules and their fixtures are in
 //! docs/design/ranking.md.
@@ -142,7 +142,8 @@ impl App {
         &self.argv
     }
 
-    /// `Terminal=true`. Such apps show, and step 8 decides which terminal runs them.
+    /// `Terminal=true`. Such apps show, and the binary runs them in a terminal, as
+    /// docs/design/launching.md says.
     pub fn terminal(&self) -> bool {
         self.terminal
     }

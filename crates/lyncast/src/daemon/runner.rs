@@ -64,6 +64,10 @@ impl Task {
     pub fn run(self, runner: &Runner) -> Result<Done, String> {
         match self {
             Task::Act(action) => runner.send(action).map(|()| Done::Ran),
+            Task::Launch(launch, lookup) => {
+                let command = lookup.command(&launch)?;
+                runner.send(Action::Spawn { command }).map(|()| Done::Ran)
+            }
             Task::OpenConfig(path) => {
                 create(&path)?;
                 let command = vec!["xdg-open".to_owned(), path.display().to_string()];

@@ -792,7 +792,7 @@ A program is found when an absolute path is a file this user may execute, or a b
 - lyncast looks up the first argument after the field codes expand, and GLib before, so `Exec=%U app` shows in lyncast and not in GLib.
 - GLib lists an entry with no `Name` as `Unnamed`, and an entry with no `Exec`, where items 5 and 6 hide them.
 
-`Terminal=true` apps show like any other (user decision, 2026-10-15). The entry records the flag, and step 8 decides which terminal runs them.
+`Terminal=true` apps show like any other (user decision, 2026-10-15). The entry records the flag, and [launching](launching.md#the-daemon-builds-an-apps-command-on-a-worker) says which terminal runs them.
 
 The binary reads a list of locale names. A `LANGUAGE` that is not empty gives the list, split on `:`, even when `LC_ALL` or `LANG` is `C`. Otherwise the list is the first non-empty value of `LC_ALL`, `LC_MESSAGES`, and `LANG`, as POSIX orders them. That locale is not added after a `LANGUAGE` list. GLib 2.82.2's `g_get_language_names` does the same. `LANGUAGE=de:fr` with `LANG=en_US.UTF-8` gave `de fr C`, `LANGUAGE=de` gave `de C` beside `LC_ALL=C`, `LC_ALL=fr_FR.UTF-8`, `LC_MESSAGES=fr_FR.UTF-8`, or `LANG=C`, and an empty `LANGUAGE` counted as unset (measured on the dev box, 2026-10-16).
 
@@ -1303,7 +1303,7 @@ hidden: BadExec(UnterminatedQuote)
 
 ## The Exec tokenizer quotes the way GLib does
 
-The Exec tokenizer turns an `Exec` value into the argv that step 8 runs. It reads the value after key-file unescaping, so a file's `\\` reaches it as `\`.
+The Exec tokenizer turns an `Exec` value into the argv that a launch runs ([launching](launching.md)). It reads the value after key-file unescaping, so a file's `\\` reaches it as `\`.
 
 The spec allows only double quotes. GLib expands the field codes and then splits the command line with `g_shell_parse_argv`, as a shell would, so real files also use single quotes and backslashes outside quotes. Wine writes `Start\ Menu` for a path with a space. lyncast splits as `g_shell_parse_argv` does:
 

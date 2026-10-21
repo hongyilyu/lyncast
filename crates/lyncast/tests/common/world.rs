@@ -115,7 +115,9 @@ impl World {
         World::within(fixtures, tree, runtime, &wayland)
     }
 
-    /// A fresh tree at `tree` with `runtime`, and `more` variables beside the `env` block's.
+    /// A fresh tree at `tree` with `runtime`, and `more` variables beside the `env` block's. The
+    /// tree's path is canonical, as the working directory of a command in it reads, so a path that
+    /// the daemon makes absolute against its working directory reads as `$TREE`.
     fn within(
         fixtures: &[doc::Block],
         tree: PathBuf,
@@ -123,6 +125,7 @@ impl World {
         more: &[(String, String)],
     ) -> World {
         materialize(fixtures, &tree);
+        let tree = fs::canonicalize(&tree).unwrap();
         let mut env = environment(fixtures, &[("$TREE", &tree), ("$RUNTIME", runtime.path())]);
         env.extend_from_slice(more);
         let out = tree.with_extension("out");
