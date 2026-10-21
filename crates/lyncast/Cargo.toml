@@ -17,6 +17,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 sha2 = "0.11"
 wl-clipboard-rs = "=0.9.4"
+# Exactly this version: the crate follows niri's, and its README says its types change in patch
+# releases.
+niri-ipc = { version = "=26.4.0", default-features = false }
 # Only for their `log` features. Without them, wl-clipboard-rs's Wayland crates print a closed
 # connection on stderr themselves, and the daemon reports it in its own words.
 wayland-backend = { version = "0.3", features = ["log"] }

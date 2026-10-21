@@ -191,8 +191,8 @@ pub fn run(host: impl FnOnce() -> Result<(), String>) -> ExitCode {
 /// gives, and gives the owner a host runs it with. The lock comes first: [`open_daemon`], which
 /// reads the user's files, borrows it, and [`Lock::bind`] takes it, so a second daemon fails
 /// before it scans or reads `ranking.json`, and only the lock holder removes a stale socket and
-/// binds. `record` swaps the runner for a recorder that writes to that file. Each event rings
-/// `bell`, if the host has one.
+/// binds. The runner sends each program to niri, or `record` swaps it for a recorder that writes
+/// to that file. Each event rings `bell`, if the host has one.
 pub(crate) fn start(record: Option<PathBuf>, bell: Option<Bell>) -> Result<Owner, String> {
     let runtime = wire::runtime_dir()?;
     let lock = lock(&runtime.join(LOCK))?;
@@ -209,7 +209,8 @@ pub(crate) fn start(record: Option<PathBuf>, bell: Option<Bell>) -> Result<Owner
         .spawn(move || accept(&listener, &accepted))
         .map_err(not_started)?;
     daemon.started(now());
-    let runner = record.map_or(Runner::Real, Runner::recorder);
+    let niri = daemon.vars().niri_socket.clone();
+    let runner = record.map_or(Runner::Niri(niri), Runner::recorder);
     Ok(Owner::new(
         daemon, inbox, claim, events, runner, copier, now,
     ))

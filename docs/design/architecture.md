@@ -26,7 +26,7 @@ Inside the daemon, a separate capture thread owns the `wl-clipboard-rs` `Watcher
 
 `lyncast-core` holds ranking, the calculator, and delivery policy. Its crate doc says it does no IO, has no UI or Wayland dependencies, and takes the clock and every external input as arguments. This follows TinyCast's PURE layer, which TinyCast checks mechanically ([notes/06](../research/notes/06-tinycast-behaviour-spec.md)). As a result, every ranking and calculator rule runs in a plain unit test.
 
-The `lyncast` binary holds the daemon, the GPUI palette, the CLI, and all platform code. The `clip` module owns `wl-clipboard-rs`, `rusqlite`, and the blob files. niri IPC goes through the `niri-ipc` crate.
+The `lyncast` binary holds the daemon, the GPUI palette, the CLI, and all platform code. The `clip` module owns `wl-clipboard-rs`, `rusqlite`, and the blob files. niri IPC goes through lyncast's own client, `niri.rs`, in the `niri-ipc` crate's types ([launching](launching.md)).
 
 `Clips` is the only owner of clip rows, and the core ranks a borrowed slice. In the [notes/07](../research/notes/07-paste-seam-workflow.md) review, a second copy of the rows in the core went out of sync after every Enter.
 

@@ -186,4 +186,9 @@ impl World {
     pub fn recorded(&self) -> Vec<u8> {
         fs::read(self.runtime.runs()).unwrap_or_default()
     }
+
+    /// The request lines that the fake niri has read so far.
+    pub fn niri_read(&self) -> Vec<u8> {
+        fs::read(self.runtime.niri_log()).unwrap_or_default()
+    }
 }

@@ -7,14 +7,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lyncast_core::rank::Index;
+use niri_ipc::Action;
 
 use super::{Done, Task};
-use crate::apps;
+use crate::{apps, niri};
 
 #[derive(Clone)]
 pub enum Runner {
-    /// Starts programs through niri IPC, which plan step 8 builds.
-    Real,
+    /// Sends each argv to the niri at this socket, as `Action::Spawn`, which niri starts.
+    Niri(Option<PathBuf>),
     /// Appends each argv to the file as one compact JSON array per line, and starts nothing.
     /// `lyncast daemon --record <file>` picks it, so a Tier 1 test never runs `systemctl reboot`.
     Recorder(Arc<Recorder>),
@@ -38,7 +39,12 @@ impl Runner {
 
     pub fn spawn(&self, argv: &[String]) -> Result<(), String> {
         match self {
-            Runner::Real => Err("not run: launching through niri is not built yet".to_owned()),
+            Runner::Niri(socket) => niri::act(
+                socket.as_deref(),
+                Action::Spawn {
+                    command: argv.to_vec(),
+                },
+            ),
             Runner::Recorder(recorder) => {
                 let mut line = serde_json::to_vec(argv).expect("an argv serializes");
                 line.push(b'\n');

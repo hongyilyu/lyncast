@@ -13,7 +13,7 @@ MIME types are the exception. Their order differed between two probe runs, so te
 | Tier | Runs under | Proves | Cannot prove |
 |---|---|---|---|
 | 1 | No display, `WAYLAND_DISPLAY` cleared | Logic that needs no compositor, such as promote rules and the no-compositor error | The clipboard or the window |
-| 2 | Xvfb plus smithay `anvil` | The marker MIME, serving, promotion, daemon ownership of the selection, and, with GPUI, summon, close, and the palette's pixels | ext-data-control, niri IPC, niri focus, real GPU timing |
+| 2 | Xvfb plus smithay `anvil` | The marker MIME, serving, promotion, daemon ownership of the selection, and, with GPUI, summon, close, and the palette's pixels | ext-data-control, niri IPC beyond the bytes a fake niri reads, niri focus, real GPU timing |
 | 3 | GPUI `TestAppContext` | Actions, keymaps, focus, simulated keystrokes, seeded async work (`SEED`), layout | Layer shell, compositor focus, IME, the clipboard between processes, pixels, real presentation |
 
 Tier 1 clears `WAYLAND_DISPLAY` because wayland-client connects whenever it is set ([notes/07](../research/notes/07-paste-seam-workflow.md), read in source). A run inside niri would otherwise copy into the real clipboard. The notes/07 review also unsets `WAYLAND_SOCKET` and uses a temp `XDG_RUNTIME_DIR`. The Tier 3 lists come from [notes/02](../research/notes/02-gpui-on-linux.md), where GPUI's own headless tests passed with no display (measured).
@@ -108,7 +108,9 @@ Two cases need the GPUI daemon under anvil, and [palette.md's](palette.md#the-fi
 
 ## A fake niri socket stands in for niri IPC
 
-Paste comes after the MVP, with the niri virtual keyboard as its first backend ([decision log](../decisions.md#clipboard-and-paste)). niri IPC takes one JSON request per line on `$NIRI_SOCKET` (notes/03). The fake in notes/07 answers `FocusedWindow` with window 7 (foot), serves `Workspaces` and `Windows`, streams `WindowFocusChanged { id: Some(7) }`, and logs each request.
+From plan step 8, `crates/lyncast/tests/common/niri.rs` is the fake: a listener at `$RUNTIME/niri.sock` that reads each request line as niri does, logs it, and answers as a block's `$ fake-niri` line says ([launching](launching.md#the-fixtures)). Tier 1 blocks use it for launches. A daemon line points `NIRI_SOCKET` at it explicitly, and the harness accepts no other value but an empty one.
+
+The paragraphs below are the paste spec from notes/07, which no test runs yet. Paste comes after the MVP, with the niri virtual keyboard as its first backend ([decision log](../decisions.md#clipboard-and-paste)). niri IPC takes one JSON request per line on `$NIRI_SOCKET` (notes/03). The fake in notes/07 answers `FocusedWindow` with window 7 (foot), serves `Workspaces` and `Windows`, streams `WindowFocusChanged { id: Some(7) }`, and logs each request.
 
 In the unrun spec, `lyncast activate clip:1 --action paste` prints `pasted clip 1 into window 7 with ctrl+shift+v`, and a sink client on anvil prints `ctrl+shift+v alpha`. If the stream sends `Some(9)`, the CLI prints `copied clip 1; not pasted: focus went to window 9`.
 

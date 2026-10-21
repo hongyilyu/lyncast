@@ -43,6 +43,12 @@ pub const DAEMON: Doc = Doc {
     prose: &["", "json"],
 };
 
+pub const LAUNCHING: Doc = Doc {
+    file: "launching.md",
+    kinds: &["env", "desktop", "executable", "session"],
+    prose: &[""],
+};
+
 pub const CLIPBOARD: Doc = Doc {
     file: "clipboard-and-paste.md",
     kinds: &[

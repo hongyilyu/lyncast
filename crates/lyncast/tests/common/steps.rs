@@ -30,13 +30,15 @@ pub fn steps(block: &Block) -> Vec<Step<'_>> {
     steps
 }
 
-/// What a command printed, each line with its newline, and the lines it added to the recorder.
+/// What a command printed, each line with its newline, the lines it added to the recorder, and
+/// the request lines that the fake niri read while it ran.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Printed {
     pub stdout: String,
     pub stderr: String,
     pub exit: i32,
     pub record: String,
+    pub niri: String,
 }
 
 impl Printed {
@@ -50,6 +52,8 @@ impl Printed {
                 printed.exit = code.parse().expect("exit: <n>");
             } else if let Some(argv) = line.strip_prefix("record: ") {
                 printed.record += &format!("{argv}\n");
+            } else if let Some(request) = line.strip_prefix("niri: ") {
+                printed.niri += &format!("{request}\n");
             } else {
                 printed.stdout += &format!("{line}\n");
             }
