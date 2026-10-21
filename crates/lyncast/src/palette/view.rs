@@ -12,7 +12,7 @@ mod panes;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, ElementInputHandler, Entity, FocusHandle,
+    AnyElement, App, AppContext, Bounds, Context, ElementInputHandler, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
     ModifiersChangedEvent, ParentElement, Render, Styled, Subscription, Task, TextAlign,
     WeakEntity, Window, canvas, div, fill, point, px, rgb, size,
@@ -22,10 +22,9 @@ use lyncast_core::clip::Delivery;
 
 use super::clips::{self, ClipLine};
 use super::field::Field;
-use super::host::Host;
-use super::icons::Icons;
+use super::host::{Host, Shared};
 use super::model::{self, Cap, Effect, Footer, Input, Landed, Landing, Menu, Model};
-use super::preview::{self, Preview};
+use super::preview;
 use super::trace::Trace;
 use super::{keys, theme};
 use crate::clip::Content;
@@ -45,7 +44,7 @@ enum Asked {
 pub struct PaletteView {
     model: Model,
     host: WeakEntity<Host>,
-    icons: Entity<Icons>,
+    shared: Shared,
     focus: FocusHandle,
     list: ListState,
     answer: Option<Task<()>>,
@@ -66,7 +65,7 @@ impl PaletteView {
         window: &mut Window,
         cx: &mut Context<PaletteView>,
         host: &WeakEntity<Host>,
-        icons: Entity<Icons>,
+        shared: Shared,
         screen: Screen,
         trace: Trace,
         seq: u32,
@@ -95,7 +94,7 @@ impl PaletteView {
         let mut view = PaletteView {
             model,
             host: host.clone(),
-            icons,
+            shared,
             focus,
             list: ListState::new(0, ListAlignment::Top, px(theme::OVERDRAW)),
             answer: None,
@@ -228,15 +227,9 @@ impl PaletteView {
         }
     }
 
-    fn preview(&self, cx: &App) -> Option<Entity<Preview>> {
-        Some(self.host.upgrade()?.read(cx).preview())
-    }
-
     fn sync_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.model.selected_clip().map(|clip| clip.id);
-        let Some(preview) = self.preview(cx) else {
-            return;
-        };
+        let preview = self.shared.preview.clone();
         if preview.read(cx).of() == selected {
             return;
         }

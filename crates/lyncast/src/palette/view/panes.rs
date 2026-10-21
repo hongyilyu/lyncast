@@ -21,11 +21,7 @@ impl PaletteView {
                 .into_any_element()
         };
         let text = || self.clip_preview(clip.id, cx).unwrap_or_default();
-        let preview = self.preview(cx);
-        let shown = preview
-            .as_ref()
-            .and_then(|preview| preview.read(cx).shown());
-        match shown {
+        match self.shared.preview.read(cx).shown() {
             Some(Shown::Text) => div().text_sm().child(text()).into_any_element(),
             Some(Shown::Files) => div()
                 .flex()

@@ -17,7 +17,7 @@ use crate::daemon::{Answer, Daemon, Face, IsOpen, Owner, Screen, Wait};
 use crate::warning::warn;
 use crate::wire::{Request, Summon};
 
-enum Shown {
+enum WindowState {
     Closed,
     Opening { seq: u32, screen: Screen },
     Open(WindowHandle<PaletteView>),
@@ -37,35 +37,34 @@ pub struct Host {
     owner: Option<Owner>,
     summons: Summons,
     windows: Vec<(WindowId, u32)>,
-    icons: Entity<Icons>,
-    preview: Entity<Preview>,
+    shared: Shared,
     zone: Zone,
 }
 
+/// The entities that the host holds for every window, which each window gets as it opens.
+#[derive(Clone)]
+pub struct Shared {
+    pub icons: Entity<Icons>,
+    pub preview: Entity<Preview>,
+}
+
 struct Summons {
-    shown: Shown,
+    window: WindowState,
     newest: u32,
     trace: Trace,
 }
 
 impl Host {
-    pub fn new(
-        owner: Owner,
-        icons: Entity<Icons>,
-        preview: Entity<Preview>,
-        zone: Zone,
-        trace: Trace,
-    ) -> Host {
+    pub fn new(owner: Owner, shared: Shared, zone: Zone, trace: Trace) -> Host {
         Host {
             owner: Some(owner),
             summons: Summons {
-                shown: Shown::Closed,
+                window: WindowState::Closed,
                 newest: 0,
                 trace,
             },
             windows: Vec::new(),
-            icons,
-            preview,
+            shared,
             zone,
         }
     }
@@ -88,12 +87,8 @@ impl Host {
         Some((self.zone, self.owner.as_ref()?.now()))
     }
 
-    pub fn icons(&self) -> Entity<Icons> {
-        self.icons.clone()
-    }
-
-    pub fn preview(&self) -> Entity<Preview> {
-        self.preview.clone()
+    pub fn shared(&self) -> Shared {
+        self.shared.clone()
     }
 
     /// How the palette sends the daemon a request, which may change it. The answer is in the
@@ -155,17 +150,17 @@ impl Host {
             let (_, seq) = self.windows.remove(at);
             self.summons.trace.event(seq, "window_closed");
         }
-        if matches!(&self.summons.shown, Shown::Open(handle) if handle.window_id() == id) {
-            self.summons.shown = Shown::Closed;
+        if matches!(&self.summons.window, WindowState::Open(handle) if handle.window_id() == id) {
+            self.summons.window = WindowState::Closed;
         }
     }
 
     /// The open summon's window, once its deferred open has run.
     #[cfg(test)]
     pub fn window(&self) -> Option<WindowHandle<PaletteView>> {
-        match self.summons.shown {
-            Shown::Open(handle) => Some(handle),
-            Shown::Closed | Shown::Opening { .. } => None,
+        match self.summons.window {
+            WindowState::Open(handle) => Some(handle),
+            WindowState::Closed | WindowState::Opening { .. } => None,
         }
     }
 
@@ -188,9 +183,9 @@ struct WindowFace<'a, 'c> {
 
 impl Face for WindowFace<'_, '_> {
     fn summon(&self) -> Summon {
-        match self.summons.shown {
-            Shown::Closed => Summon::Closed,
-            Shown::Opening { .. } | Shown::Open(_) => Summon::Open,
+        match self.summons.window {
+            WindowState::Closed => Summon::Closed,
+            WindowState::Opening { .. } | WindowState::Open(_) => Summon::Open,
         }
     }
 
@@ -202,12 +197,14 @@ impl Face for WindowFace<'_, '_> {
             self.cx.weak_entity(),
         );
         trace.event(seq, "toggle_handled_open");
-        self.summons.shown = Shown::Opening { seq, screen };
+        self.summons.window = WindowState::Opening { seq, screen };
         self.cx.defer(move |cx| open_summon(cx, &host, trace, seq));
     }
 
     fn close(&mut self, _: IsOpen) {
-        if let Shown::Open(handle) = mem::replace(&mut self.summons.shown, Shown::Closed) {
+        if let WindowState::Open(handle) =
+            mem::replace(&mut self.summons.window, WindowState::Closed)
+        {
             self.cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             });
@@ -215,22 +212,22 @@ impl Face for WindowFace<'_, '_> {
     }
 
     fn show_clipboard(&mut self) {
-        match &mut self.summons.shown {
-            Shown::Opening { screen, .. } => *screen = Screen::Clipboard,
-            Shown::Open(handle) => {
+        match &mut self.summons.window {
+            WindowState::Opening { screen, .. } => *screen = Screen::Clipboard,
+            WindowState::Open(handle) => {
                 let handle = *handle;
                 self.cx.defer(move |cx| {
                     let _ = handle.update(cx, |view, window, cx| view.show_clipboard(window, cx));
                 });
             }
-            Shown::Closed => {}
+            WindowState::Closed => {}
         }
     }
 }
 
 fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32) {
-    let opening = host.read_with(cx, |host, _| match host.summons.shown {
-        Shown::Opening {
+    let opening = host.read_with(cx, |host, _| match host.summons.window {
+        WindowState::Opening {
             seq: opening,
             screen,
         } if opening == seq => Some(screen),
@@ -243,13 +240,13 @@ fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32) {
         Ok(handle) => {
             trace.event(seq, "window_opened");
             let _ = host.update(cx, |host, _| {
-                host.summons.shown = Shown::Open(handle);
+                host.summons.window = WindowState::Open(handle);
                 host.windows.push((handle.window_id(), seq));
             });
         }
         Err(error) => {
             warn(format_args!("the palette did not open: {error}"));
-            let _ = host.update(cx, |host, _| host.summons.shown = Shown::Closed);
+            let _ = host.update(cx, |host, _| host.summons.window = WindowState::Closed);
         }
     }
 }

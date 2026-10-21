@@ -3056,6 +3056,7 @@ name = "lyncast"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "crc32fast",
  "futures",
  "gpui-pre",
  "gpui-pre-platform",

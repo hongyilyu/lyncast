@@ -26,7 +26,7 @@ use gpui::{
 };
 
 use crate::daemon::{self, Bell, Owner, Rung, Screen, Wake};
-use host::{Host, Next};
+use host::{Host, Next, Shared};
 use icons::{IconRoots, Icons};
 use preview::Preview;
 use trace::Trace;
@@ -115,9 +115,11 @@ fn mount(cx: &mut App, mounted: Mount) -> Entity<Host> {
         trace,
         exit,
     } = mounted;
-    let icons = cx.new(|_| Icons::new(roots));
-    let preview = cx.new(|_| Preview::default());
-    let host = cx.new(|_| Host::new(owner, icons, preview, zone, trace));
+    let shared = Shared {
+        icons: cx.new(|_| Icons::new(roots)),
+        preview: cx.new(|_| Preview::default()),
+    };
+    let host = cx.new(|_| Host::new(owner, shared, zone, trace));
     let weak = host.downgrade();
     let closed = weak.clone();
     cx.on_window_closed(move |cx, id| {
@@ -169,9 +171,9 @@ fn open_window(
     trace: Trace,
     seq: u32,
 ) -> gpui::Result<WindowHandle<PaletteView>> {
-    let icons = host.read_with(cx, |host, _| host.icons())?;
+    let shared = host.read_with(cx, |host, _| host.shared())?;
     cx.open_window(options(cx), |window, cx| {
-        cx.new(|cx| PaletteView::new(window, cx, host, icons, screen, trace, seq))
+        cx.new(|cx| PaletteView::new(window, cx, host, shared, screen, trace, seq))
     })
 }
 

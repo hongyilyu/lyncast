@@ -1,6 +1,4 @@
 use std::borrow::Cow;
-#[cfg(test)]
-use std::fmt::Write;
 use std::mem;
 use std::ops::Range;
 
@@ -10,6 +8,9 @@ use super::clips::{ClipLine, Day, Kinds};
 use super::field::Field;
 use crate::daemon::{After, Answer, Screen};
 use crate::wire::{Request, Via};
+
+#[cfg(test)]
+mod dump;
 
 /// What the empty field shows on the root list.
 const PLACEHOLDER: &str = "Search for apps and commands";
@@ -124,17 +125,6 @@ impl Cap {
             Cap::Escape => "esc",
             Cap::CtrlK => "Ctrl K",
             Cap::CtrlEnter => "Ctrl ↵",
-        }
-    }
-
-    /// How a `palette` block spells the key.
-    #[cfg(test)]
-    pub fn spelling(self) -> &'static str {
-        match self {
-            Cap::Enter => "enter",
-            Cap::Escape => "escape",
-            Cap::CtrlK => "ctrl-k",
-            Cap::CtrlEnter => "ctrl-enter",
         }
     }
 }
@@ -508,94 +498,6 @@ impl Model {
         })
     }
 
-    /// The text of palette.md's `palette` blocks: the field, the lines with the selected row
-    /// marked, the clipboard screen's `preview`, which the view gives, and its information, the
-    /// overlay, and the footer.
-    #[cfg(test)]
-    pub fn dump(&self, preview: Option<&str>) -> String {
-        let mut out = String::new();
-        let field = if self.field.shows_placeholder() {
-            format!("({})", self.placeholder())
-        } else {
-            format!("{:?}", self.field.text())
-        };
-        let _ = match self.kinds() {
-            None => writeln!(out, "root {field}"),
-            Some(kinds) => writeln!(out, "clipboard {field} {}", kinds.label()),
-        };
-        for line in &self.lines {
-            let _ = match *line {
-                Line::Header(heading) => writeln!(out, "== {}", heading.label()),
-                Line::Row(index) => {
-                    let mark = if self.is_selected(index) { ">" } else { " " };
-                    match self.item(index) {
-                        Item::Row(row) => writeln!(out, "{mark} {}", row_text(row)),
-                        Item::Clip(clip) => {
-                            writeln!(out, "{mark} {}: {}", clip.content.spelling(), clip.title)
-                        }
-                    }
-                }
-            };
-        }
-        if self.lines.is_empty() {
-            let _ = writeln!(out, "{}", self.empty_text());
-        }
-        if let Some(preview) = preview {
-            let _ = writeln!(out, "preview: {preview}");
-        }
-        if let Some(clip) = self.selected_clip() {
-            let info: Vec<String> = clip
-                .info()
-                .into_iter()
-                .map(|(label, value)| format!("{label} {value}"))
-                .collect();
-            let _ = writeln!(out, "info: {}", info.join(" · "));
-        }
-        match &self.overlay {
-            Some(Overlay::Confirm { title, .. }) => {
-                let _ = writeln!(out, "confirm {}", question(title));
-            }
-            Some(Overlay::Menu(menu)) => {
-                if menu.field.shows_placeholder() {
-                    let _ = writeln!(out, "menu ({MENU_PLACEHOLDER})");
-                } else {
-                    let _ = writeln!(out, "menu {:?}", menu.field.text());
-                }
-                for (at, (chord, item)) in menu.shown().enumerate() {
-                    let mark = if at == menu.selected_shown { ">" } else { " " };
-                    let _ = match chord {
-                        Some(chord) => {
-                            writeln!(
-                                out,
-                                "{mark} {}  ({})",
-                                item.label(),
-                                Cap::of(*chord).spelling()
-                            )
-                        }
-                        None => writeln!(out, "{mark} {}", item.label()),
-                    };
-                }
-                if menu.shown().next().is_none() {
-                    let _ = writeln!(out, "{NO_ACTIONS}");
-                }
-            }
-            None => {}
-        }
-        let _ = match self.footer() {
-            Some(Footer::Pending) => writeln!(out, "footer: pending"),
-            Some(Footer::Closing) => writeln!(out, "footer: closing"),
-            Some(Footer::Failed(reason)) => writeln!(out, "footer: failed: {reason}"),
-            Some(footer) => {
-                let hints: Vec<String> = (footer.hints().iter())
-                    .map(|(label, cap)| format!("{label} ({})", cap.spelling()))
-                    .collect();
-                writeln!(out, "footer: {}", hints.join(" · "))
-            }
-            None => Ok(()),
-        };
-        out
-    }
-
     fn subject(&self) -> Option<Subject> {
         match &self.scope {
             Scope::Root(rows) => rows.get(self.selected_row).map(|row| row.subject.clone()),
@@ -879,43 +781,32 @@ pub fn kind_label(kind: Kind) -> Option<&'static str> {
 }
 
 fn lines(rows: &[Row]) -> Vec<Line> {
-    let mut lines = Vec::with_capacity(rows.len() + 3);
-    let mut section = None;
-    for (index, row) in rows.iter().enumerate() {
-        if section != Some(row.section) {
-            section = Some(row.section);
-            lines.extend(header(row.section).map(|name| Line::Header(Heading::Section(name))));
-        }
-        lines.push(Line::Row(index));
-    }
-    lines
+    grouped(
+        rows,
+        |row| row.section,
+        |section| header(section).map(Heading::Section),
+    )
 }
 
 fn day_lines(clips: &[ClipLine]) -> Vec<Line> {
-    let mut lines = Vec::with_capacity(clips.len() + 4);
-    let mut day = None;
-    for (index, clip) in clips.iter().enumerate() {
-        if day != Some(clip.day) {
-            day = Some(clip.day);
-            lines.push(Line::Header(Heading::Day(clip.day)));
+    grouped(clips, |clip| clip.day, |day| Some(Heading::Day(day)))
+}
+
+/// A line for each item, and before each run of items with one `key`, its header if it has one.
+fn grouped<T, K: PartialEq + Copy>(
+    items: &[T],
+    key: impl Fn(&T) -> K,
+    header: impl Fn(K) -> Option<Heading>,
+) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(items.len() + 4);
+    let mut group = None;
+    for (index, item) in items.iter().enumerate() {
+        let key = key(item);
+        if group != Some(key) {
+            group = Some(key);
+            lines.extend(header(key).map(Line::Header));
         }
         lines.push(Line::Row(index));
     }
     lines
-}
-
-#[cfg(test)]
-fn row_text(row: &Row) -> String {
-    if let Some(card) = &row.card {
-        let [(expression, source), (display, target)] = card_halves(card);
-        let badges: Vec<&str> = [Some(expression), source, target]
-            .into_iter()
-            .flatten()
-            .collect();
-        return format!("= {display}  ({})", badges.join(" · "));
-    }
-    match kind_label(row.subject.key().kind()) {
-        Some(kind) => format!("{}  ({kind})", row.title),
-        None => row.title.clone(),
-    }
 }

@@ -146,6 +146,8 @@ impl PaletteView {
             return None;
         };
         let key = icons::key(self.daemon(cx)?.icon(id)?);
-        self.icons.update(cx, |icons, cx| icons.get(&key, cx))
+        self.shared
+            .icons
+            .update(cx, |icons, cx| icons.get(&key, cx))
     }
 }

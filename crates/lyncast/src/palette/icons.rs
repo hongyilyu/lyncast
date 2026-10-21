@@ -249,10 +249,9 @@ fn fit(width: f32, height: f32) -> (u32, u32) {
 #[cfg(test)]
 pub(super) mod tests {
     use std::env;
-    use std::ffi::{CString, OsString};
+    use std::ffi::OsString;
     use std::fs::{self, File};
     use std::io::{Cursor, Write};
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
     use std::process;
@@ -264,6 +263,7 @@ pub(super) mod tests {
 
     use super::{IconRoots, find, key};
     use crate::doc::{self, Block};
+    use crate::palette::tests::mkfifo;
     use crate::vars::Vars;
 
     #[test]
@@ -344,9 +344,7 @@ pub(super) mod tests {
         };
         let bytes = match words.as_slice() {
             ["fifo"] => {
-                let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
-                // SAFETY: `c_path` is a NUL-terminated string that lives through the call.
-                assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "mkfifo");
+                mkfifo(&path).expect("the icon FIFO");
                 return Some(path);
             }
             ["png", size, padded @ ..] => {
