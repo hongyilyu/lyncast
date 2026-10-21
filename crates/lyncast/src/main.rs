@@ -117,6 +117,11 @@ enum ClipCmd {
 /// Exits 0 on success, 1 when the request fails or stdout cannot be written, and 2 on a usage
 /// error.
 fn main() -> ExitCode {
+    // glibc raises its mmap threshold to the size of each mapped block it frees, up to 32 MiB, so
+    // once a copy has freed a 24 MiB image, the next buffers that size come from heaps that keep
+    // them. A fixed threshold maps every block of 128 KiB or more on its own (mallopt(3)).
+    // SAFETY: mallopt sets one of glibc's allocator parameters and touches no Rust memory.
+    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => return clap_exit(&error),

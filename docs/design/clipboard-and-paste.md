@@ -124,6 +124,8 @@ pub enum Delivery { Clip(ClipId), Answer(CalcAnswer), Text(String) }
 
 A served source answers each paste on its thread until another selection replaces it. wl-clipboard-rs writes a paste in one blocking copy and sees the replacement only between pastes (`src/copy.rs:311-361`, read in source), so a paste whose reader holds its pipe without reading holds that thread and its payload until the reader reads or closes the pipe. While 4 copies still serve, the one that holds the selection among them, a new copy fails at once with `not copied: 4 earlier copies still serve their pastes`, so such readers hold 4 payloads at most.
 
+Once a copy's thread ends, its payload goes back to the system. glibc raises its mmap threshold to the size of each mapped block it frees, up to 32 MiB (`mallopt(3)`), so once a 24 MiB image had been read and freed, the next buffers of that size came from heaps that kept them. `main` therefore fixes the threshold at 128 KiB before anything else, and a block of that size or more gets a mapping of its own. A headless daemon that had captured a 24 MiB image and copied it twice held 170.5 MiB of `Pss_Anon` after another client's copy replaced it, and 2.5 MiB with the fixed threshold (measured on 2026-10-21). [The block below](#a-copied-image-gives-its-memory-back) shows it.
+
 The wait is measured. Across processes under load, a read right after `copy_multi` returned the previous selection 173 times in 3,000, and 0 times in 6,000 after the wait. The wait took 0.3 ms at the median and 237 ms at most, and the first marked offer after a write was that write in 6,000 of 6,000 tries.
 
 A text row offers `text/plain;charset=utf-8`, which wl-clipboard-rs also offers as its other text types. An image offers its stored type. A file entry offers its paths as `text/plain;charset=utf-8`, and its list as `text/uri-list` and as `x-special/gnome-copied-files`. wl-clipboard-rs offers the types in no set order, so a reader that takes the first type may get any of them. It fills its other text types from the first text source it is given (`src/copy.rs:861-897`, read in source). The paths come first, so those types hold the paths, the marker holds them too, and a paste into a text field gets them.
@@ -308,6 +310,7 @@ A `clipboard` block runs inside its own `scripts/test-env.sh start` environment.
 - `$ stop-seed` stops the newest seeder with SIGSTOP and returns once every thread of it has stopped, so it answers no read from then on.
 - `$ cont-seed-at-quit` returns at once, and once Quit has removed the daemon's socket, it continues the newest seeder with SIGCONT.
 - `$ wait-read` waits until the newest daemon's capture thread waits in `poll` or `ppoll` on one descriptor, which it does only while it reads an offer. The thread is named `capture`, as the `THREAD` constant in `crates/lyncast/src/clip/capture.rs` spells it, and the wait looks at no other thread, since a thread that serves a copy waits in `ppoll` on one descriptor too, as `wait_read_waits_past_a_served_copy` in `crates/lyncast/tests/clipboard.rs` shows.
+- `$ wait-anon-below <MiB>` waits until the newest daemon holds less than that many MiB of `Pss_Anon`, as `/proc/<pid>/smaps_rollup` counts it, and prints `Pss_Anon <n> kB` if it never does.
 - `$ freeze-compositor` and `$ thaw-compositor` stop and continue the block's anvil with SIGSTOP and SIGCONT.
 - `$ wait-stderr <line>` waits until `$RUNTIME/daemon.stderr` holds the line, for an entry that adds no row.
 - `$ stop-compositor` stops the block's compositor, and `$RUNTIME` goes with it.
@@ -1395,6 +1398,22 @@ stderr: lyncast: clip 1: blob missing
 exit: 1
 $ offers
 text/plain;charset=utf-8
+```
+
+### A copied image gives its memory back
+
+Once another selection replaces a copy of a 24 MiB image, the copy's thread ends and the daemon holds less than 16 MiB of private memory again, as [the copy](#a-copy-waits-for-the-compositor-to-take-it) says.
+
+```clipboard
+$ { printf '\211PNG\015\012\032\012'; head -c 25165816 /dev/zero; } > big.png
+$ lyncast daemon --headless
+$ seed-file image/png big.png
+$ wait-clips 1
+$ lyncast activate clip:1
+copied clip 1
+$ seed text/plain;charset=utf-8 other
+$ wait-clips 2
+$ wait-anon-below 16
 ```
 
 ### A stored text over 25 MiB does not copy

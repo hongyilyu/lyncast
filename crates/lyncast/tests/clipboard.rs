@@ -82,7 +82,7 @@ fn every_clipboard_block_runs_as_the_doc_says() {
     let trees = fresh("clipboard");
     // The capture thread asks niri about an offer before or after the seed's line returns.
     let seeds = |line: &str| line.starts_with("$ seed");
-    let failures: Vec<String> = blocks(&fixtures, "clipboard", 33)
+    let failures: Vec<String> = blocks(&fixtures, "clipboard", 34)
         .into_iter()
         .flat_map(|block| {
             let world = World::compositor(&fixtures, trees.join(block.line.to_string()));
