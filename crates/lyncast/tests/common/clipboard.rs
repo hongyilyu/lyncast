@@ -165,6 +165,10 @@ impl<'w> Helpers<'w> {
                 Some(pid) => wait_read(pid),
                 None => failed("no daemon to wait for"),
             },
+            ["wait-anon-below", mib] => match newest {
+                Some(pid) => wait_anon_below(pid, mib.parse().expect("wait-anon-below <MiB>")),
+                None => failed("no daemon to wait for"),
+            },
             ["wait-stderr", ..] => {
                 let line = self.world.substitute(&line["$ wait-stderr ".len()..]);
                 self.wait_stderr(&line)
@@ -355,6 +359,27 @@ pub fn wait_read(pid: u32) -> Ran {
         None => failed(format!(
             "the capture thread of process {pid} reads no offer"
         )),
+    }
+}
+
+/// Waits, as [`poll`] does, until process `pid` holds less than `mib` MiB of `Pss_Anon`, and
+/// prints what it holds when it never does.
+fn wait_anon_below(pid: u32, mib: u64) -> Ran {
+    let rollup = format!("/proc/{pid}/smaps_rollup");
+    let anon = || {
+        let held = fs::read_to_string(&rollup).ok()?;
+        held.lines().find_map(|line| {
+            let kb = line.strip_prefix("Pss_Anon:")?.trim().strip_suffix(" kB")?;
+            kb.parse::<u64>().ok()
+        })
+    };
+    match poll(|| anon().filter(|&kb| kb < mib * 1024)) {
+        Some(_) => OK,
+        None => {
+            let held = anon().map_or("no rollup".to_owned(), |kb| format!("{kb} kB"));
+            let said = format!("Pss_Anon {held}\n");
+            (said.into_bytes(), Vec::new(), Some(1))
+        }
     }
 }
 
