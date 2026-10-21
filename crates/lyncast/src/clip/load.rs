@@ -21,9 +21,9 @@ pub struct Loaded {
     pub next_seq: Seq,
 }
 
-/// A Wayland message gives its size in 16 bits, so no type that a capture reads is longer, and a
-/// longer one is in a file the daemon did not write.
-const MAX_TYPE: usize = 65_535;
+/// A Wayland message gives its size in 16 bits, so no type that a capture reads is longer, and no
+/// app ID that niri reads for a source, and a longer one is in a file the daemon did not write.
+const MAX_WAYLAND_TEXT: usize = 65_535;
 
 const HASH_BYTES: usize = 64;
 
@@ -81,7 +81,9 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
     check(foreign_count(&connection))?;
     check(foreign_row(&connection))?;
     let rows = connection
-        .prepare("SELECT id, kind, mime, bytes, hash, preview, used, pinned, seq FROM clips")
+        .prepare(
+            "SELECT id, kind, mime, bytes, hash, preview, used, pinned, seq, source FROM clips",
+        )
         .and_then(|mut select| {
             select
                 .query_map([], |row| {
@@ -91,6 +93,7 @@ pub fn load(path: &Path) -> Result<(Connection, Loaded), String> {
                         bytes: unsigned(row, 3)?,
                         hash: row.get(4)?,
                         preview: row.get(5)?,
+                        source: row.get(9)?,
                     };
                     let used = Timestamp(row.get(6)?);
                     Ok(Row::new(
@@ -297,12 +300,14 @@ fn foreign_row(connection: &Connection) -> rusqlite::Result<Option<String>> {
                     WHEN pinned NOT IN (0, 1) THEN 'a pin that is not 0 or 1'
                     WHEN typeof(seq) <> 'integer' THEN 'a sequence number that is not an integer'
                     WHEN seq < 0 THEN 'a negative sequence number'
+                    WHEN typeof(source) NOT IN ('text', 'null') THEN 'a source that is not text'
+                    WHEN octet_length(source) > ?2 THEN 'a source over ' || ?2 || ' bytes'
                 END AS why
             FROM clips) WHERE why IS NOT NULL LIMIT 1"
             ),
             params![
                 kind_bytes as i64,
-                MAX_TYPE as i64,
+                MAX_WAYLAND_TEXT as i64,
                 HASH_BYTES as i64,
                 PREVIEW_BYTES as i64
             ],

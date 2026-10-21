@@ -10,7 +10,7 @@ In `wl-clipboard-rs` 0.9.4, `Watcher::next_event` blocks in `poll` with no timeo
 
 ## History keeps text, images, and files
 
-The thread captures text, images, and files. Files arrive as `text/uri-list` or `x-special/gnome-copied-files` and point at the original paths. lyncast derives links and emails from text on read, as TinyCast does. Unpinned entries expire after 3 months by default, and pinned entries never expire. Source is the app that niri IPC reports as focused when the selection changed. It is a best guess, because data-control names no source client.
+The thread captures text, images, and files. Files arrive as `text/uri-list` or `x-special/gnome-copied-files` and point at the original paths. lyncast derives links and emails from text on read, as TinyCast does. Unpinned entries expire after 3 months by default, and pinned entries never expire. Source is the app that niri IPC reports as focused when the selection changed ([Source](#source-is-the-focused-windows-app-id)). It is a best guess, because data-control names no source client.
 
 ## Three filters keep own writes, passwords, and large entries out
 
@@ -49,7 +49,7 @@ The thread reads, and it never writes or syncs, so an offer holds it up for its 
 
 ## Clips keeps the rows in memory and in sqlite
 
-`Clips` is the only owner of clip rows, and core ranks a borrowed slice, because a second copy went out of sync in review. It holds every row in memory and loads them at start from `$XDG_DATA_HOME/lyncast/clips.sqlite3`. A row in memory keeps its id, kind, type, size, last use, pin, sequence number, the SHA-256 of what it holds, and a preview: the first 1,024 bytes of its text or of its paths, cut at a character boundary. The file keeps when each row was captured too. Whether a text is a link or an email comes from its whole text when it arrives. The database keeps the kind, the hash, and the preview beside the bytes, so a load reads no text and derives nothing again. Before it reads a row, it checks that each column it reads holds the type of value that the daemon writes there, an integer or text, and measures each row's kind, type, hash, and preview, so it holds no more of a row in memory than its integers, a kind of 5 bytes, a type of 65,535, a hash of 64, and a preview of 1,024. It checks too that an image holds no text and no preview, and that a row of every other kind holds both. The full text lives only in the database, and an image's bytes live in `$XDG_DATA_HOME/lyncast/blobs/<sha256 hex>`, one file per distinct image.
+`Clips` is the only owner of clip rows, and core ranks a borrowed slice, because a second copy went out of sync in review. It holds every row in memory and loads them at start from `$XDG_DATA_HOME/lyncast/clips.sqlite3`. A row in memory keeps its id, kind, type, size, last use, pin, sequence number, Source, the SHA-256 of what it holds, and a preview: the first 1,024 bytes of its text or of its paths, cut at a character boundary. The file keeps when each row was captured too. Whether a text is a link or an email comes from its whole text when it arrives. The database keeps the kind, the hash, and the preview beside the bytes, so a load reads no text and derives nothing again. Before it reads a row, it checks that each column it reads holds the type of value that the daemon writes there, an integer or text, and measures each row's kind, type, hash, and preview, so it holds no more of a row in memory than its integers, a kind of 5 bytes, a type of 65,535, a hash of 64, a preview of 1,024, and a Source of 65,535. It checks too that an image holds no text and no preview, and that a row of every other kind holds both. The full text lives only in the database, and an image's bytes live in `$XDG_DATA_HOME/lyncast/blobs/<sha256 hex>`, one file per distinct image.
 
 The daemon never waits on the disk, as with `ranking.json`. One writer thread owns `clips.sqlite3` and `blobs/`, and each change to a row goes to it in order. A change that fails prints `lyncast: <path>: not saved: <error>`. A pin, an unpin, or a promotion that fails leaves the row as it is in memory, and a delete that fails leaves the row in the file for the next daemon, unless a capture or a recorded write of the same kind and bytes comes first. The writer then removes the old row in the transaction that saves the new one, so the next daemon does not list those bytes twice, and an image's blob stays, named by the new row. A new row that fails, its blob or its row, goes from the history too, and its warning ends with `; the clip was not recorded`, so the history never lists a row whose bytes are nowhere. An image whose row fails after its blob was written takes the blob with it, unless a saved row names it, so the disk keeps no image that the history cannot list or delete. A capture of the same bytes after the failure records it again, and one that comes while the row still waits for the writer only promotes the row and goes with it. A new row brings its bytes. For an image, the writer writes the blob through a temporary file named with the process ID, and then the row, and a blob that fails to write keeps its row out of the database. A delete removes the row first and then the blob, once no saved row names it, so a crash between the two leaves a blob that no row names, never a row whose blob is gone. A copy reads a row's text or blob through the writer, so a row that the writer has not written yet reads too. The data directory and `blobs/` are created with mode 0700, and `clips.sqlite3` and each blob with mode 0600, because the history holds whatever the user copied, secrets among them. Without an absolute data home, the rows and what they hold live in memory only.
 
@@ -73,7 +73,7 @@ Each of these leaves the rows in memory only, and nothing changes but a missing 
 - A file whose text encoding is not UTF-8, the one that the daemon writes: `a text encoding of UTF-16le, which the daemon does not write`, with SQLite's name of the encoding in its place.
 - A file whose application id, the number in its header that names the program that made it, is not lyncast's: `an application id of 0, which the daemon does not write`, with the file's id in its place. SQLite leaves it 0 unless a program sets it.
 - A file that holds a table, an index, a view, or a trigger besides those that `schema.sql` makes, the `clips` table and SQLite's count of used ids in `sqlite_sequence`: `a table that the daemon does not make`, or `an index`, and so on, in its place.
-- A `clips` table whose SQL is not that of `schema.sql`, as when it lacks `STRICT`, `AUTOINCREMENT`, or a column, or a column compares text without regard to case: `a clips table that the daemon does not make`.
+- A `clips` table whose SQL is not that of `schema.sql`, as when it lacks `STRICT`, `AUTOINCREMENT`, or a column, such as the `source` that a daemon before plan step 8 did not make, or a column compares text without regard to case: `a clips table that the daemon does not make`. No release came before that column, so the daemon has no step that adds it to such a file.
 - A table of `schema.sql` at another root page, the page where SQLite begins the table, as when an edit of `sqlite_master` moves `sqlite_sequence` to the page of `clips`, so that both tables would keep their rows in one place: `a sqlite_sequence table that the daemon does not make`, with the table's name in its place.
 - A file without a table that `schema.sql` makes: `no clips table`, with the table's name in its place.
 - A `sqlite_sequence` with more than one row: `sqlite_sequence: more than one row`. The load would read the count of used ids from one of them, and another could hold a larger one.
@@ -92,12 +92,14 @@ Each of these leaves the rows in memory only, and nothing changes but a missing 
 - An image that holds a preview, or a row of another kind that holds none, which the table's checks refuse too: `clip <id>: an image with a preview`, or `clip <id>: no preview`.
 - A row whose sequence number is below 0: `clip <id>: a negative sequence number`.
 - A row whose pin is neither 0 nor 1, the two that the daemon writes: `clip <id>: a pin that is not 0 or 1`.
-- A row whose type or preview is text that is not UTF-8: rusqlite's error, such as `invalid utf-8 sequence of 1 bytes from index 0 at index 2`.
+- A row whose Source is neither text nor null: `clip <id>: a source that is not text`.
+- A row whose Source holds more than 65,535 bytes: `clip <id>: a source over 65535 bytes`.
+- A row whose type, preview, or Source is text that is not UTF-8: rusqlite's error, which names the column's index, such as `invalid utf-8 sequence of 1 bytes from index 0 at index 2` for the type.
 - A file whose ids have run out: `no clip id is left after <id>`.
 - A file whose sequence numbers have run out: `no sequence number is left after <n>`.
 - A load that has not ended in 5 s: `not loaded within 5 s`.
 
-Before it reads any row, the load compares the file with one that the writer makes, in this order: its text encoding is UTF-8, its application id is lyncast's, 1819897443, which spells `lync` in ASCII, `sqlite_master` holds the objects that `schema.sql` makes, each with the same table, root page, and SQL, and nothing else, and `sqlite_sequence` holds at most one row, named `clips`, whose count of used ids is an integer. The first check that fails gives the warning. The load compares nothing else in the file's header, such as the page size, the bytes reserved at the end of each page, or the user version, which change neither the rows that the load reads nor the tables that the writer writes to. So whatever another program writes, the checks of the rows meet only the table of `schema.sql`, whose `id` is SQLite's row id, an integer that no other row holds. The load then checks every row column by column, in the order of `schema.sql`. For each column that it reads, it checks the type of value with `typeof`, then the length of a text with SQLite's `octet_length`, and then the value where the daemon limits it. The daemon writes an id of at least 1, one of the five kinds, a size not below 0, a hash whose bytes are all lowercase hex digits, a pin of 0 or 1, and a sequence number not below 0. It writes a text and a preview in a row of every kind but an image, and neither in an image, as the table's two checks say, so the load checks with `typeof` that the text, which it does not read, and the preview are there or not as the row's kind says. `typeof` and `octet_length` read only a value's header, so the load reads no value whole before it has bounded it, and a long value costs no memory. In a row, the first check that fails gives the warning. Once every check passes, it reads every row without an error, unless the row's type or preview is text that is not UTF-8. SQLite checks the type of a value as it writes the value into a `STRICT` table, and the table's checks unless they are turned off, but not as it reads the value, so a file whose schema was edited around a row, or whose bytes changed, can hold a value that the daemon does not write. A Wayland message gives its size in 16 bits, so no type that a capture reads holds 65,535 bytes, and a row that the daemon wrote always loads. SQLite opens the file, and the journal beside it, by path after the daemon's check, and an open of a FIFO waits for good, so the start waits 5 s at most. A load that the start has stopped waiting for writes no more than one that it waits for, because its thread gets no change.
+Before it reads any row, the load compares the file with one that the writer makes, in this order: its text encoding is UTF-8, its application id is lyncast's, 1819897443, which spells `lync` in ASCII, `sqlite_master` holds the objects that `schema.sql` makes, each with the same table, root page, and SQL, and nothing else, and `sqlite_sequence` holds at most one row, named `clips`, whose count of used ids is an integer. The first check that fails gives the warning. The load compares nothing else in the file's header, such as the page size, the bytes reserved at the end of each page, or the user version, which change neither the rows that the load reads nor the tables that the writer writes to. So whatever another program writes, the checks of the rows meet only the table of `schema.sql`, whose `id` is SQLite's row id, an integer that no other row holds. The load then checks every row column by column, in the order of `schema.sql`. For each column that it reads, it checks the type of value with `typeof`, then the length of a text with SQLite's `octet_length`, and then the value where the daemon limits it. The daemon writes an id of at least 1, one of the five kinds, a size not below 0, a hash whose bytes are all lowercase hex digits, a pin of 0 or 1, a sequence number not below 0, and a Source of text or null. It writes a text and a preview in a row of every kind but an image, and neither in an image, as the table's two checks say, so the load checks with `typeof` that the text, which it does not read, and the preview are there or not as the row's kind says. `typeof` and `octet_length` read only a value's header, so the load reads no value whole before it has bounded it, and a long value costs no memory. In a row, the first check that fails gives the warning. Once every check passes, it reads every row without an error, unless the row's type, preview, or Source is text that is not UTF-8. SQLite checks the type of a value as it writes the value into a `STRICT` table, and the table's checks unless they are turned off, but not as it reads the value, so a file whose schema was edited around a row, or whose bytes changed, can hold a value that the daemon does not write. A Wayland message gives its size in 16 bits, so no type that a capture reads holds 65,535 bytes, and a row that the daemon wrote always loads. SQLite opens the file, and the journal beside it, by path after the daemon's check, and an open of a FIFO waits for good, so the start waits 5 s at most. A load that the start has stopped waiting for writes no more than one that it waits for, because its thread gets no change.
 
 The daemon gives each new row the next id itself, one above every id the database has used, so a reply can name the row before the database has it, and the id of a deleted row never comes back. Neither does the id of a new row that the file did not save: the writer raises the file's count of used ids to that id at once, and when that fails too, once more before it ends. So an id comes back only when the file can take it neither time, as on a full disk, or when the daemon exits before the writer has finished with the row, as when Quit stops waiting for the writer after its 5 s. A database whose ids leave no next one is one the daemon cannot use, and once the ids run out in memory, a new row is not recorded and the daemon prints `lyncast: no clip id is left; the clip was not recorded`. A capture or a recorded write whose kind and bytes match a row promotes that row: it moves to the front and keeps its id. A pinned row stays where it is. The `Watcher`'s first event is the current selection, so without this every daemon start would add the clipboard again (measured, 23 of 23).
 
@@ -144,10 +146,23 @@ If the write fails, the palette stays open, shows the reason, and keeps the row.
 | `mime` | the stored type |
 | `bytes` | the stored size |
 | `preview` | the row's preview, or `null` for an image |
+| `source` | the row's [Source](#source-is-the-focused-windows-app-id), or `null` |
 
 `link` and `email` are text whose whole trimmed content is one `http://` or `https://` URL with no whitespace, or one address of the form `local@domain.tld`. They are derived from the whole text when the row arrives, and the database keeps the kind. `lyncast clip list` sends the `clips` request, and the daemon answers with `{"reply":"clips","clips":[...]}`, each clip as the table spells it. `lyncast activate clip:<id>` copies the row, and `--verb pin`, `--verb unpin`, and `--verb delete` change it. They print `copied clip <id>`, `pinned clip <id>`, `unpinned clip <id>`, and `deleted clip <id>`.
 
-Source is filled from plan step 8, which brings the niri IPC client. Until then it is empty.
+## Source is the focused window's app ID
+
+For each offer that passes the first two filters, not lyncast's own write and no password hint, the capture thread asks niri for `FocusedWindow` before it reads the offer, and the row's Source is that window's `app_id`, unless the offer is the selection that the daemon finds as it starts. The third filter, the 25 MiB cap, comes with the read, so an offer that the read then drops, as one over 25 MiB or text that is not UTF-8, has asked too. The question is one request on `$NIRI_SOCKET` ([launching](launching.md#the-client-sends-one-request-per-connection)), and it stops after 200 ms, inside the 2 s that the offer's reads have in all. So a niri that stalls holds no offer longer, and a copy's wait for its own mark keeps its margin. niri answers `FocusedWindow` from the state it holds (niri v26.04 `src/ipc/server.rs:337-342`, read in source).
+
+lyncast's own writes are skipped before the question, so a copy asks nothing. Source is none when:
+
+- the offer is the selection that the daemon finds as it starts, which asks nothing;
+- the daemon has no `NIRI_SOCKET`;
+- niri does not answer within 200 ms;
+- no window has the focus, as while a layer surface such as the palette has it (niri-ipc 26.4.0 `src/lib.rs:1317-1320`, read in source);
+- the window has no `app_id`.
+
+data-control names no source client, so Source is a best guess: the window that had the focus when the capture thread took the offer, a few milliseconds after the selection changed (inferred). The selection that the daemon finds as it starts follows no change. wl-clipboard-rs's watcher reports it before any change (`src/watch.rs:211-212`, read in source), so each daemon start captures the clipboard again, as [the store](#clips-keeps-the-rows-in-memory-and-in-sqlite) says. That selection may have been copied while no daemon ran, and the window that has the focus as the daemon starts need not be the one that copied it. So that capture asks nothing, and a row it adds has no Source. A row keeps the Source of the capture that added it, so a capture or a copy that promotes the row changes none. A copied answer or path that adds a row gives it none. An app ID reaches niri in a Wayland message, whose size is 16 bits, so a Source holds less than 64 KiB, as a type does.
 
 ## The daemon owns the selection and must stay alive
 
@@ -247,7 +262,7 @@ Four had no fix in the log or the spec. Plan step 6 settled three on 2026-10-17 
 
 ## The fixtures
 
-The tests in `crates/lyncast/tests/clipboard.rs` read the `env`, `session`, and `clipboard` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, with the `file` blocks of this doc written in `$TREE`, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, shell lines through `/bin/sh`, and the `stall-stderr`, `drain-stderr`, `wait-exit`, `freeze-thread`, and `thaw-thread` lines. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks, and the unit tests in `crates/lyncast/src/clip/mod.rs` read the `store` blocks.
+The tests in `crates/lyncast/tests/clipboard.rs` read the `env`, `session`, and `clipboard` blocks below, with the harness of [daemon.md](daemon.md#the-fixtures): a fresh `$TREE` and `$RUNTIME` for each block, with the `file` blocks of this doc written in `$TREE`, the `env` block below, `session` lines, `stderr:`, `exit:`, and `record:` lines, shell lines through `/bin/sh`, the `stall-stderr`, `drain-stderr`, `wait-exit`, `freeze-thread`, and `thaw-thread` lines, and [launching.md's](launching.md#the-fixtures) `$ fake-niri` and `niri:` lines. The capture thread asks niri about an offer when it takes the offer, before or after the seed's line returns, so a line that seeds holds no `niri:` lines, and the questions of its offer count on the next line's. `crates/lyncast-core/tests/clip.rs` reads the `retention`, `kind`, and `uris` blocks, and the unit tests in `crates/lyncast/src/clip/mod.rs` read the `store` blocks.
 
 ```env
 HOME=$TREE/home
@@ -276,6 +291,7 @@ CREATE TABLE IF NOT EXISTS clips (
     used INTEGER NOT NULL,
     pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
     seq INTEGER NOT NULL CHECK (seq >= 0),
+    source TEXT,
     CHECK ((kind = 'image') = (body IS NULL)),
     CHECK ((kind = 'image') = (preview IS NULL))
 ) STRICT;
@@ -317,18 +333,18 @@ $ stat -c %a data/lyncast data/lyncast/clips.sqlite3
 $ stat -c %s data/lyncast/clips.sqlite3
 0
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'link', 'text/plain;charset=utf-8', 23, ' https://example.org/a ', '90eec24f494163b854df68f6fcb8feab4755335c0c73119a27c7ee52974cea47', ' https://example.org/a ', 0, unixepoch() * 1000, 0, 2)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'email', 'text/plain;charset=utf-8', 14, 'me@example.org', '855c94f3498940b241d6b5e78bb6f9293b941953b2799f8b925bd25180571d77', 'me@example.org', 0, unixepoch() * 1000, 0, 3)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (4, 'files', 'text/uri-list', 38, 'file:///etc/hostname' || char(10) || 'file:///tmp/a%20b', '34584a5c97220e11a055a677ac6f7554c88cc378dd609350fa15c13d8b19f772', '/etc/hostname' || char(10) || '/tmp/a b', 0, unixepoch() * 1000, 0, 4)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (5, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 5)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'link', 'text/plain;charset=utf-8', 23, ' https://example.org/a ', '90eec24f494163b854df68f6fcb8feab4755335c0c73119a27c7ee52974cea47', ' https://example.org/a ', 0, unixepoch() * 1000, 0, 2, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'email', 'text/plain;charset=utf-8', 14, 'me@example.org', '855c94f3498940b241d6b5e78bb6f9293b941953b2799f8b925bd25180571d77', 'me@example.org', 0, unixepoch() * 1000, 0, 3, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (4, 'files', 'text/uri-list', 38, 'file:///etc/hostname' || char(10) || 'file:///tmp/a%20b', '34584a5c97220e11a055a677ac6f7554c88cc378dd609350fa15c13d8b19f772', '/etc/hostname' || char(10) || '/tmp/a b', 0, unixepoch() * 1000, 0, 4, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (5, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 5, null)"
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
-{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
-{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b","source":null}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a ","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast toggle
 open
 $ lyncast activate clip:3 --verb pin
@@ -338,11 +354,11 @@ closed
 $ lyncast activate clip:1 --verb pin
 pinned clip 1
 $ lyncast clip list --json
-{"id":3,"kind":"email","pinned":true,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
-{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
-{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+{"id":3,"kind":"email","pinned":true,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b","source":null}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a ","source":null}
 $ lyncast toggle
 open
 $ lyncast activate clip:3 --verb unpin
@@ -368,10 +384,10 @@ $ lyncast activate calc:2+3
 stderr: lyncast: not copied: no Wayland compositor
 exit: 1
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
-{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b","source":null}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a ","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ ls data/lyncast
@@ -383,10 +399,10 @@ $ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, seq from clips"
 4|0|4
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
-{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a "}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":3,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b","source":null}
+{"id":2,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":23,"preview":" https://example.org/a ","source":null}
 ```
 
 ### Old rows expire at start
@@ -398,15 +414,15 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, (unixepoch() - 91 * 86400) * 1000, 0, 1)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 6, 'recent', '034a7e52c5c9534b709dc1dba403868399b0949f7c1933a67325c22077ffc221', 'recent', 0, (unixepoch() - 89 * 86400) * 1000, 0, 2)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'text', 'text/plain;charset=utf-8', 6, 'pinned', '3fab5c181bd28a09b64397df76ae2bfaf1eac182979b5fdb7a342858004f36af', 'pinned', 0, 0, 1, 3)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, (unixepoch() - 91 * 86400) * 1000, 0, 1, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 6, 'recent', '034a7e52c5c9534b709dc1dba403868399b0949f7c1933a67325c22077ffc221', 'recent', 0, (unixepoch() - 89 * 86400) * 1000, 0, 2, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (3, 'text', 'text/plain;charset=utf-8', 6, 'pinned', '3fab5c181bd28a09b64397df76ae2bfaf1eac182979b5fdb7a342858004f36af', 'pinned', 0, 0, 1, 3, null)"
 $ mkdir -p config/lyncast && printf '[clipboard]\nretention-days = 0\n' > config/lyncast/config.toml
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ printf '[clipboard]\nretention-days = "ninety"\n' > config/lyncast/config.toml
@@ -414,8 +430,8 @@ $ lyncast daemon --headless
 $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/config/lyncast/config.toml: invalid type: string "ninety", expected u32 at line 2 column 18; using the defaults
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent"}
+{"id":3,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"recent","source":null}
 $ lyncast activate clip:3 --verb unpin
 unpinned clip 3
 $ lyncast activate cmd:quit
@@ -431,7 +447,7 @@ ran cmd:quit
 $ printf 'theme = "dark"\n\n[clipboard]\nretention-days = 1\n' > config/lyncast/config.toml
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":6,"preview":"pinned","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 "select id from clips"
@@ -471,9 +487,9 @@ The writer removes the rows that a prune takes in one transaction, and after it 
 
 ```session
 $ mkdir -p data/lyncast/blobs && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "with recursive n (i) as (select 1 union all select i + 1 from n where i < 5000) insert into clips select i, 'image', 'image/png', 3, null, printf('%064x', i), null, 0, 0, 0, i from n"
+$ sqlite3 data/lyncast/clips.sqlite3 "with recursive n (i) as (select 1 union all select i + 1 from n where i < 5000) insert into clips select i, 'image', 'image/png', 3, null, printf('%064x', i), null, 0, 0, 0, i, null from n"
 $ sqlite3 data/lyncast/clips.sqlite3 "select writefile('data/lyncast/blobs/' || hash, 'old') from clips" > /dev/null
-$ sqlite3 data/lyncast/clips.sqlite3 "with recursive n (i) as (select 5001 union all select i + 1 from n where i < 25000) insert into clips select i, 'text', 'text/plain;charset=utf-8', 3, 'new', '11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437', 'new', 0, unixepoch() * 1000, 0, i from n"
+$ sqlite3 data/lyncast/clips.sqlite3 "with recursive n (i) as (select 5001 union all select i + 1 from n where i < 25000) insert into clips select i, 'text', 'text/plain;charset=utf-8', 3, 'new', '11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437', 'new', 0, unixepoch() * 1000, 0, i, null from n"
 $ ls data/lyncast/blobs | wc -l
 5000
 $ lyncast daemon --headless
@@ -488,7 +504,7 @@ The daemon prunes only once its start has succeeded, so a start that fails chang
 
 ```session
 $ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, 0, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, 0, 0, 1, null)"
 $ cp data/lyncast/clips.sqlite3 before.sqlite3 && mkdir $RUNTIME/lyncast.sock
 $ lyncast daemon --headless
 stderr: lyncast: $RUNTIME/lyncast.sock: Is a directory (os error 21)
@@ -605,7 +621,7 @@ The load takes a file that holds anything only when it matches one that `schema.
 - A file from `schema.sql` with an index beside `clips`, then with another table in the index's place, and then with neither that table nor `clips`, which leaves `sqlite_sequence`.
 - A file from `schema.sql` whose `sqlite_sequence` an edit of `sqlite_master` moves to the root page of `clips`.
 - A file from `schema.sql` with a second row in `sqlite_sequence` for `clips`, whose count is the largest id, and one whose only row is another table's.
-- A `clips` table without `STRICT` and with a column named `Used`, a name that SQLite matches without regard to case, one whose `kind` compares without regard to case and holds `Text`, and one without `AUTOINCREMENT`, which makes no `sqlite_sequence`. Each holds lyncast's application id and a row.
+- A `clips` table without `STRICT` and with a column named `Used`, a name that SQLite matches without regard to case, one whose `kind` compares without regard to case and holds `Text`, one without `AUTOINCREMENT`, which makes no `sqlite_sequence`, and one without `source`, as a daemon before plan step 8 made it. Each holds lyncast's application id and a row.
 
 A file from `schema.sql` with a page size of 65,536 bytes, 64 bytes reserved at the end of each page, and a user version of 7 loads, since the load compares nothing else in the header, and the next daemon finds the pin that the first one saved.
 
@@ -656,7 +672,7 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ cmp before.sqlite3 data/lyncast/clips.sqlite3
 $ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1); insert into sqlite_sequence values ('clips', 9223372036854775807)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null); insert into sqlite_sequence values ('clips', 9223372036854775807)" && cp data/lyncast/clips.sqlite3 before.sqlite3
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
@@ -671,27 +687,34 @@ $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cmp before.sqlite3 data/lyncast/clips.sqlite3
-$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma application_id = 1819897443; create table clips (id integer primary key autoincrement, kind text, mime text, bytes integer, body text, hash text, preview text, created integer, Used integer, pinned integer, seq integer); insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma application_id = 1819897443; create table clips (id integer primary key autoincrement, kind text, mime text, bytes integer, body text, hash text, preview text, created integer, Used integer, pinned integer, seq integer, source text); insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)" && cp data/lyncast/clips.sqlite3 before.sqlite3
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cmp before.sqlite3 data/lyncast/clips.sqlite3
 $ rm data/lyncast/clips.sqlite3 && sed 's/kind TEXT NOT NULL/kind TEXT NOT NULL COLLATE NOCASE/' schema.sql | sqlite3 data/lyncast/clips.sqlite3
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'Text', 'text/plain', 3, 'abc', 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'abc', 0, 0, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'Text', 'text/plain', 3, 'abc', 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'abc', 0, 0, 0, 1, null)" && cp data/lyncast/clips.sqlite3 before.sqlite3
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cmp before.sqlite3 data/lyncast/clips.sqlite3
 $ rm data/lyncast/clips.sqlite3 && sed 's/ AUTOINCREMENT//' schema.sql | sqlite3 data/lyncast/clips.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ cmp before.sqlite3 data/lyncast/clips.sqlite3
+$ rm data/lyncast/clips.sqlite3 && sed '/^    source TEXT,$/d' schema.sql | sqlite3 data/lyncast/clips.sqlite3
 $ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cmp before.sqlite3 data/lyncast/clips.sqlite3
-$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma page_size = 65536" ".filectrl reserve_bytes 64" ".read schema.sql" "pragma user_version = 7" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+$ rm data/lyncast/clips.sqlite3 && sqlite3 data/lyncast/clips.sqlite3 "pragma page_size = 65536" ".filectrl reserve_bytes 64" ".read schema.sql" "pragma user_version = 7" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)"
 64
 $ lyncast daemon --headless
 $ lyncast activate clip:1 --verb pin
@@ -700,7 +723,7 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":1,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -713,6 +736,7 @@ lyncast: $TREE/data/lyncast/clips.sqlite3: no clips table; the clips stay in mem
 lyncast: $TREE/data/lyncast/clips.sqlite3: a sqlite_sequence table that the daemon does not make; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: more than one row; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: a row not named clips; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: a clips table that the daemon does not make; the clips stay in memory
@@ -782,11 +806,11 @@ $ cmp before.sqlite3 data/lyncast/clips.sqlite3
 $ ls data/lyncast
 clips.sqlite3
 $ rm data/lyncast/clips.sqlite3
-$ sqlite3 data/lyncast/clips.sqlite3 "pragma journal_mode = wal" ".read schema.sql" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma journal_mode = wal" ".read schema.sql" "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)" && cp data/lyncast/clips.sqlite3 before.sqlite3
 wal
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ ls data/lyncast
 clips.sqlite3
 clips.sqlite3-wal
@@ -824,7 +848,7 @@ $ stat -c %s data/lyncast/clips.sqlite3
 $ ls data/lyncast
 clips.sqlite3
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)" && mkfifo data/lyncast/clips.sqlite3-journal
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)" && mkfifo data/lyncast/clips.sqlite3-journal
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
@@ -858,7 +882,8 @@ The load checks each value that it reads before it reads any row. Each of these 
 - A count of used ids that is text, which `sqlite_sequence` takes, since its columns take any type.
 - With the table's checks turned off, a kind of `texts`, which names no kind, a size or a sequence number below 0, and a pin of 2. The file stays byte for byte as it was after the pin.
 - With the table's checks turned off, a text row without its text, then without its preview, a link without its text, an email without its preview, and then the row as an image with a text, and as one with a preview, which the table's two checks refuse. The file stays byte for byte as it was after each.
-- A type that is text that is not UTF-8.
+- A Source that is a blob, and one of 65,536 bytes, where one of 65,535 loads.
+- A type, and then a Source, that is text that is not UTF-8.
 
 ```file loose.sql
 PRAGMA ignore_check_constraints = ON;
@@ -874,12 +899,12 @@ UPDATE sqlite_master SET sql = sql || ' STRICT' WHERE name = 'clips';
 
 ```session
 $ mkdir -p data/lyncast && sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775807, 'text', 'text/plain;charset=utf-8', 3, 'max', '9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6', 'max', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775807, 'text', 'text/plain;charset=utf-8', 3, 'max', '9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6', 'max', 0, unixepoch() * 1000, 0, 1, null)"
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
-$ sqlite3 data/lyncast/clips.sqlite3 "delete from clips; delete from sqlite_sequence; insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "delete from clips; delete from sqlite_sequence; insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 1, null)"
 $ lyncast daemon --headless
 $ lyncast activate clip:1 --verb pin
 pinned clip 1
@@ -1010,7 +1035,25 @@ $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
 ran cmd:quit
-$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set seq = 1, pinned = 2" && cp data/lyncast/clips.sqlite3 before.sqlite3
+$ sqlite3 data/lyncast/clips.sqlite3 ".read loose.sql" "update clips set seq = 1, source = cast('foot' as blob)" ".read strict.sql"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set source = replace(hex(zeroblob(32767)), '0', 'a') || 'a'"
+$ lyncast daemon --headless
+$ lyncast activate clip:1 --verb unpin
+unpinned clip 1
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set source = source || 'a'"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, pinned, length(source) from clips"
+1|0|65536
+$ sqlite3 data/lyncast/clips.sqlite3 "pragma ignore_check_constraints = 1; update clips set source = null, seq = 1, pinned = 2" && cp data/lyncast/clips.sqlite3 before.sqlite3
 $ lyncast daemon --headless
 $ lyncast clip list --json
 $ lyncast activate cmd:quit
@@ -1059,6 +1102,13 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 "select id, kind, bytes, seq, hex(mime), (select seq from sqlite_sequence) from clips"
 1|text|5|1|FF|1
+$ sqlite3 data/lyncast/clips.sqlite3 "update clips set mime = 'text/plain;charset=utf-8', source = cast(x'ff' as text)"
+$ lyncast daemon --headless
+$ lyncast clip list --json
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ sqlite3 data/lyncast/clips.sqlite3 "select id, hex(source) from clips"
+1|FF
 $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/clips.sqlite3: no clip id is left after 9223372036854775807; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a preview over 1024 bytes; the clips stay in memory
@@ -1081,6 +1131,8 @@ lyncast: $TREE/data/lyncast/clips.sqlite3: sqlite_sequence: a count of used ids 
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an unknown kind; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a negative size; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a negative sequence number; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a source that is not text; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a source over 65535 bytes; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: a pin that is not 0 or 1; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no text; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no preview; the clips stay in memory
@@ -1089,6 +1141,7 @@ lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: no preview; the clips stay in
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an image with a text; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: clip 1: an image with a preview; the clips stay in memory
 lyncast: $TREE/data/lyncast/clips.sqlite3: invalid utf-8 sequence of 1 bytes from index 0 at index 2; the clips stay in memory
+lyncast: $TREE/data/lyncast/clips.sqlite3: invalid utf-8 sequence of 1 bytes from index 0 at index 9; the clips stay in memory
 ```
 
 A load that the start has stopped waiting for changes no more than a load that the start waits for, which is at most what SQLite rolls back or removes for it. Here a FIFO at the journal's path holds the load's open of a database that holds no table past the 5 s. Once the daemon has started with its rows in memory, the test holds the load's thread still, removes the FIFO, and lets the thread go on, so its open starts again and finds no journal, and the load ends. The test waits until the daemon holds no descriptor of the file, looking 1,000 times at most, and `ls` may find a descriptor gone that it listed, so the wait drops its errors. Once the load has closed the file, the file is as it was. So it goes for a file in WAL mode that gets a `-wal` with frames while the thread is held, before the load holds the lock. The test copies that `-wal` from a connection to a copy of the file. The load looks at the `-wal` only once it holds the lock, so the `-wal` keeps its frames, and the file its bytes.
@@ -1169,10 +1222,10 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 5, 'alpha', '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8', 'alpha', 0, unixepoch() * 1000, 0, 1, null)"
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ sqlite3 data/lyncast/clips.sqlite3 "select count(*) from clips"
 stderr: Error: in prepare, database is locked (5)
 exit: 5
@@ -1198,8 +1251,8 @@ $ wait-clips 1
 $ seed text/plain;charset=utf-8 beta
 $ wait-clips 2
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast toggle
 open
 $ lyncast activate clip:1
@@ -1217,22 +1270,22 @@ application/x-lyncast-own;copy=$DAEMON.1.<token>
 text/plain
 text/plain;charset=utf-8
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
 $ lyncast activate calc:2+3*4
 copied 14
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
 $ lyncast activate clip:2
 copied clip 2
 $ lyncast activate calc:20-6
 copied 14
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate clip:3
 copied clip 3
 $ paste any got
@@ -1245,6 +1298,75 @@ $ paste text/plain;charset=utf-8 got
 empty
 ```
 
+### Source is the window that niri says has the focus
+
+The daemon here asks the fake niri. Each seed's offer asks which window has the focus before its read, and the row keeps the window's app ID, so `alpha` and `14` come from Firefox. A focused output with no window, a window with no app ID, and a niri that stalls past 200 ms give no Source, and the row still comes. A copy is lyncast's own write and asks nothing, so the copy of clip 1 has no `niri:` line. An offer that the read drops has asked all the same, so the text that is not UTF-8, offered while foot has the focus, adds a question and no row. A row keeps the Source of the capture that added it: the copy of clip 1, a copied answer that promotes the row of `14`, and a capture of `alpha` while foot has the focus change none, and a copied answer that adds a row gives it none. `omega`, copied while no daemon runs and foot has the focus, comes in with the next daemon's capture of the clipboard as it starts, which asks niri nothing, so its row has no Source. That daemon finds every other Source in the file.
+
+```clipboard
+$ fake-niri {"Ok":{"FocusedWindow":{"id":12,"title":"Mozilla Firefox","app_id":"firefox","pid":4242,"workspace_id":1,"is_focused":true,"is_floating":false,"is_urgent":false,"layout":{"pos_in_scrolling_layout":[1,1],"tile_size":[1280.0,800.0],"window_size":[1276,796],"tile_pos_in_workspace_view":[0.0,0.0],"window_offset_in_tile":[2.0,2.0]},"focus_timestamp":{"secs":5,"nanos":0}}}}
+$ NIRI_SOCKET=$RUNTIME/niri.sock lyncast daemon --headless
+$ seed text/plain;charset=utf-8 alpha
+$ wait-clips 1
+niri: "FocusedWindow"
+$ seed text/plain;charset=utf-8 14
+$ wait-clips 2
+niri: "FocusedWindow"
+$ fake-niri {"Ok":{"FocusedWindow":null}}
+$ seed text/plain;charset=utf-8 beta
+$ wait-clips 3
+niri: "FocusedWindow"
+$ fake-niri {"Ok":{"FocusedWindow":{"id":13,"title":"untitled","app_id":null,"pid":4243,"workspace_id":1,"is_focused":true,"is_floating":false,"is_urgent":false,"layout":{"pos_in_scrolling_layout":[1,1],"tile_size":[1280.0,800.0],"window_size":[1276,796],"tile_pos_in_workspace_view":[0.0,0.0],"window_offset_in_tile":[2.0,2.0]},"focus_timestamp":{"secs":5,"nanos":0}}}}
+$ seed text/plain;charset=utf-8 gamma
+$ wait-clips 4
+niri: "FocusedWindow"
+$ fake-niri stall
+$ seed text/plain;charset=utf-8 delta
+$ wait-clips 5
+niri: "FocusedWindow"
+$ lyncast activate clip:1
+copied clip 1
+$ lyncast activate calc:2+3*4
+copied 14
+$ lyncast activate calc:2+3
+copied 5
+$ lyncast clip list --json
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14","source":"firefox"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":"firefox"}
+{"id":5,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"delta","source":null}
+{"id":4,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma","source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+$ fake-niri {"Ok":{"FocusedWindow":{"id":14,"title":"~","app_id":"foot","pid":4244,"workspace_id":1,"is_focused":true,"is_floating":false,"is_urgent":false,"layout":{"pos_in_scrolling_layout":[1,1],"tile_size":[1280.0,800.0],"window_size":[1276,796],"tile_pos_in_workspace_view":[0.0,0.0],"window_offset_in_tile":[2.0,2.0]},"focus_timestamp":{"secs":5,"nanos":0}}}}
+$ printf '\377' > bad.txt
+$ seed-read text/plain;charset=utf-8 bad.txt
+$ seed text/plain;charset=utf-8 alpha
+$ wait-first 1
+niri: "FocusedWindow"
+niri: "FocusedWindow"
+$ lyncast clip list --json
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":"firefox"}
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14","source":"firefox"}
+{"id":5,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"delta","source":null}
+{"id":4,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma","source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ seed text/plain;charset=utf-8 omega
+$ NIRI_SOCKET=$RUNTIME/niri.sock lyncast daemon --headless
+$ wait-clips 7
+$ lyncast clip list --json
+{"id":7,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"omega","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":"firefox"}
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":2,"preview":"14","source":"firefox"}
+{"id":5,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"delta","source":null}
+{"id":4,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma","source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+```
+
+The reply lines are niri-ipc 26.4.0's own serialization of a `Window`.
+
 ### An image comes back as the same PNG
 
 A reader that takes any type gets the PNG too, because the marker holds the same bytes. A blob that is gone fails the copy before anything is offered, so the seed's offer stays.
@@ -1255,7 +1377,7 @@ $ lyncast daemon --headless
 $ seed-file image/png one.png
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
 $ lyncast activate clip:1
 copied clip 1
 $ paste any got.png
@@ -1284,8 +1406,8 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 26214400, replace(hex(zeroblob(13107200)), '0', 'a'), 'e24e1deb1466614496ddfc6af6316e5c0432849cce7205d46e2d18230e2a83f3', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 1)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 26214401, replace(hex(zeroblob(13107200)), '0', 'a') || 'a', '333c085aa86d99197c17caa2a911eff4d8abe8632034389be18974a0a8436038', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 26214400, replace(hex(zeroblob(13107200)), '0', 'a'), 'e24e1deb1466614496ddfc6af6316e5c0432849cce7205d46e2d18230e2a83f3', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 1, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'text', 'text/plain;charset=utf-8', 26214401, replace(hex(zeroblob(13107200)), '0', 'a') || 'a', '333c085aa86d99197c17caa2a911eff4d8abe8632034389be18974a0a8436038', replace(hex(zeroblob(512)), '0', 'a'), 0, unixepoch() * 1000, 0, 2, null)"
 $ lyncast daemon --headless
 $ lyncast activate clip:1
 copied clip 1
@@ -1306,7 +1428,7 @@ $ lyncast daemon --headless
 $ seed text/uri-list file:///etc/hostname
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":1,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname"}
+{"id":1,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname","source":null}
 $ lyncast activate clip:1
 copied clip 1
 $ paste text/plain;charset=utf-8 got
@@ -1394,8 +1516,8 @@ beta
 $ lyncast status
 open
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate clip:1
 copied clip 1
 $ paste text/plain;charset=utf-8 got
@@ -1476,7 +1598,7 @@ $ paste text/plain;charset=utf-8 got
 $ cat got; echo
 alpha
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 ```
 
 ### A mark confirms only the copy that waits for it
@@ -1546,8 +1668,8 @@ $ paste text/plain;charset=utf-8 got
 $ cat got; echo
 alpha
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 ```
 
 ### A stalled disk fails a copy after 5 s
@@ -1569,7 +1691,7 @@ $ mkdir -p data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab217
 $ thaw-thread
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"2"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"2","source":null}
 ```
 
 While the writer is held, each copy that reads through it waits for the reads of the copies ahead of it, with its payload. Here five copies of one text start at once while the test holds the writer, so one of them fails at once, and once the writer goes on, the other four copy. Then a copy works again.
@@ -1622,13 +1744,13 @@ $ head -c 26214400 /dev/zero > big.png
 $ seed-file image/png big.png
 $ wait-clips 7
 $ lyncast clip list --json
-{"id":7,"kind":"image","pinned":false,"mime":"image/png","bytes":26214400,"preview":null}
-{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"six"}
-{"id":5,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"five"}
-{"id":4,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"four"}
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"three"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"two"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"one"}
+{"id":7,"kind":"image","pinned":false,"mime":"image/png","bytes":26214400,"preview":null,"source":null}
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"six","source":null}
+{"id":5,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"five","source":null}
+{"id":4,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"four","source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"three","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"two","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"one","source":null}
 ```
 
 A source that never answers holds a read for 2 s at most. Here the seeder stops before the daemon starts, so the daemon's first event is its offer. The next seed's row comes once that read gives up.
@@ -1640,7 +1762,7 @@ $ lyncast daemon --headless
 $ seed text/plain;charset=utf-8 kept
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"kept"}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"kept","source":null}
 ```
 
 ### An offer gives files, else an image, else text
@@ -1666,13 +1788,13 @@ $ printf 'file:///tmp/caf\351' > latin1.txt && printf hello > hello.txt
 $ seed-each text/uri-list latin1.txt text/plain;charset=utf-8 hello.txt
 $ wait-clips 7
 $ lyncast clip list --json
-{"id":7,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"hello"}
-{"id":6,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b"}
-{"id":5,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":17,"preview":"/etc/hosts"}
-{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname"}
-{"id":3,"kind":"image","pinned":false,"mime":"image/webp","bytes":5,"preview":null}
-{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":4,"preview":null}
-{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":5,"preview":null}
+{"id":7,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"hello","source":null}
+{"id":6,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":38,"preview":"/etc/hostname\n/tmp/a b","source":null}
+{"id":5,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":17,"preview":"/etc/hosts","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname","source":null}
+{"id":3,"kind":"image","pinned":false,"mime":"image/webp","bytes":5,"preview":null,"source":null}
+{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":4,"preview":null,"source":null}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":5,"preview":null,"source":null}
 $ { printf file:///; head -c 1020 /dev/zero | tr '\0' a; printf %%F0%%9F%%98%%80%%F0%%9F%%98%%80; } > long.txt
 $ seed-file text/uri-list long.txt
 $ wait-clips 8
@@ -1704,11 +1826,11 @@ $ wait-clips 4
 $ seed text/plain;charset=utf-8 me@example.org
 $ wait-clips 5
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
-{"id":3,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":21,"preview":"https://example.org/a"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":2,"kind":"text","pinned":true,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname","source":null}
+{"id":3,"kind":"link","pinned":false,"mime":"text/plain;charset=utf-8","bytes":21,"preview":"https://example.org/a","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate clip:2 --verb unpin
 unpinned clip 2
 $ lyncast activate clip:3 --verb delete
@@ -1717,10 +1839,10 @@ $ lyncast activate clip:3
 stderr: lyncast: no clip 3
 exit: 1
 $ lyncast clip list --json
-{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 "pragma encoding" "pragma application_id"
@@ -1741,11 +1863,11 @@ $ seed text/plain;charset=utf-8 gamma
 $ lyncast daemon --headless
 $ wait-clips 5
 $ lyncast clip list --json
-{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma"}
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
-{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org"}
-{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"gamma","source":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
+{"id":5,"kind":"email","pinned":false,"mime":"text/plain;charset=utf-8","bytes":14,"preview":"me@example.org","source":null}
+{"id":4,"kind":"files","pinned":false,"mime":"x-special/gnome-copied-files","bytes":20,"preview":"/etc/hostname","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 ```
 
 A capture of a pinned row's bytes changes nothing, which the first `store` block shows, because whether a seed was read before the next one replaced it does not show here.
@@ -1760,7 +1882,7 @@ $ lyncast daemon --headless
 $ seed-file image/png one.png
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
 $ seed text/plain;charset=utf-8 alpha
 $ wait-clips 2
 $ lyncast activate cmd:quit
@@ -1780,7 +1902,7 @@ $ ls data/lyncast/blobs
 $ lyncast daemon --headless
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 ```
 
 Two rows here name one blob, which stays until the second goes. The delete of a row comes first and its blob's after it, so while the journal's path is a directory and SQLite cannot delete the row, the blob stays too, and the next daemon lists the row and deletes it. A delete whose rows are gone but whose commit fails keeps their blobs as well. No block can make the commit fail once the rows are gone, so `a_blob_stays_until_the_delete_of_its_row_is_saved` in `crates/lyncast/src/clip/db.rs` fails one with a foreign key that SQLite checks only at the commit.
@@ -1791,8 +1913,8 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
 $ mkdir data/lyncast/blobs && printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\001\000\000\000\001\010\002\000\000\000\220wS\336\000\000\000\014IDATx\332c\370\317\300\000\000\003\001\001\000\367\003AC\000\000\000\000IEND\256B`\202' > data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 1)"
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 2)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 1, null)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (2, 'image', 'image/png', 69, null, '2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20', null, 0, unixepoch() * 1000, 0, 2, null)"
 $ lyncast daemon --headless
 $ lyncast activate clip:1 --verb delete
 deleted clip 1
@@ -1811,7 +1933,7 @@ $ ls data/lyncast/blobs
 2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":2,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
 $ lyncast activate clip:2 --verb delete
 deleted clip 2
 $ lyncast activate cmd:quit
@@ -1869,11 +1991,11 @@ $ sqlite3 data/lyncast/clips.sqlite3 "select id, kind, preview from clips"
 $ cmp data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20 one.png
 $ lyncast daemon --headless
 $ lyncast clip list --json
-{"id":8,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5"}
-{"id":7,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
-{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":20,"preview":"file:///etc/hostname"}
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":2,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname"}
+{"id":8,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":1,"preview":"5","source":null}
+{"id":7,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
+{"id":6,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":20,"preview":"file:///etc/hostname","source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":2,"kind":"files","pinned":false,"mime":"text/uri-list","bytes":20,"preview":"/etc/hostname","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -1975,7 +2097,7 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
 $ echo $(( $(date +%s) + 20 )) > expires
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, ($(cat expires) - 86400) * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, ($(cat expires) - 86400) * 1000, 0, 1, null)"
 $ lyncast daemon --headless
 $ freeze-thread clips
 $ seed-file image/png one.png
@@ -1994,15 +2116,15 @@ copied 2
 $ seed text/plain;charset=utf-8 old
 $ until [ $(grep -c '100 changes wait for the disk; the clip was not recorded' $RUNTIME/daemon.stderr) = 3 ]; do sleep 0.1; done
 $ lyncast clip list --json
-{"id":2,"kind":"image","pinned":true,"mime":"image/png","bytes":69,"preview":null}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+{"id":2,"kind":"image","pinned":true,"mime":"image/png","bytes":69,"preview":null,"source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old","source":null}
 $ mkdir -p data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
 $ thaw-thread
 $ wait-clips 1
 $ seed text/plain;charset=utf-8 beta
 $ wait-first 3
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":4,"preview":"beta","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 "select id, preview from clips"
@@ -2037,7 +2159,7 @@ $ sqlite3 data/lyncast/clips.sqlite3 "select seq from sqlite_sequence"
 $ lyncast daemon --headless
 $ wait-clips 1
 $ lyncast clip list --json
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ lyncast activate clip:3
 copied clip 3
 $ mkdir -p data/lyncast/blobs/2e9b06dc65a4dec84a3eb3124553ec93ca27c78221e64ab2177d0f1412cfcb20.$DAEMON.tmp
@@ -2058,8 +2180,8 @@ $ sqlite3 data/lyncast/clips.sqlite3 "select seq from sqlite_sequence"
 $ lyncast daemon --headless
 $ wait-clips 2
 $ lyncast clip list --json
-{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":3,"preview":null}
-{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
+{"id":5,"kind":"image","pinned":false,"mime":"image/png","bytes":3,"preview":null,"source":null}
+{"id":3,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
 $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: unable to open database file; the clip was not recorded
 lyncast: $TREE/data/lyncast/clips.sqlite3: not saved: unable to open database file; the clip was not recorded
@@ -2090,15 +2212,15 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1, null)"
 $ seed text/plain;charset=utf-8 alpha
 $ lyncast daemon --headless
 $ wait-clips 2
 $ seed text/plain;charset=utf-8 beta
 $ wait-stderr lyncast: no clip id is left; the clip was not recorded
 $ lyncast clip list --json
-{"id":9223372036854775807,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":9223372036854775806,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+{"id":9223372036854775807,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":9223372036854775806,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old","source":null}
 ```
 
 ### The sequence runs out
@@ -2110,7 +2232,7 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 9223372036854775806)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (1, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 9223372036854775806, null)"
 $ seed text/plain;charset=utf-8 alpha
 $ lyncast daemon --headless
 $ wait-clips 2
@@ -2121,8 +2243,8 @@ $ until [ $(grep -cx 'lyncast: no sequence number is left; the clip was not reco
 $ lyncast activate clip:1
 copied clip 1
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old"}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":1,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":3,"preview":"old","source":null}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -2143,7 +2265,7 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1, null)"
 $ stall-stderr
 $ lyncast daemon --headless
 $ lyncast activate calc:1+1
@@ -2197,7 +2319,7 @@ $ lyncast daemon --headless
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sqlite3 data/lyncast/clips.sqlite3 < schema.sql
-$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1)"
+$ sqlite3 data/lyncast/clips.sqlite3 "insert into clips values (9223372036854775806, 'text', 'text/plain;charset=utf-8', 3, 'old', 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4', 'old', 0, unixepoch() * 1000, 0, 1, null)"
 $ stall-stderr
 $ lyncast daemon --headless
 $ lyncast activate calc:1+1
@@ -2250,8 +2372,8 @@ $ wait-clips 1
 $ seed text/plain;charset=utf-8 alpha
 $ wait-clips 2
 $ lyncast clip list --json
-{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha"}
-{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null}
+{"id":2,"kind":"text","pinned":false,"mime":"text/plain;charset=utf-8","bytes":5,"preview":"alpha","source":null}
+{"id":1,"kind":"image","pinned":false,"mime":"image/png","bytes":69,"preview":null,"source":null}
 $ lyncast activate clip:1
 copied clip 1
 $ paste image/png got.png

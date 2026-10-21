@@ -23,7 +23,7 @@ Each request takes a connection of its own, in `crates/lyncast/src/niri.rs`:
 3. Read one line back.
 4. Close.
 
-One deadline of 2 s covers the connect, the write, and the read, and the reply line holds at most 1 MiB with its newline. niri reads a request line at a time on its event loop and answers each with one line (`src/ipc/server.rs:187-225`, read in source). Each step can stall:
+One deadline covers the connect, the write, and the read: 2 s for an action, and 200 ms for a question, `FocusedWindow`, which the capture thread asks for a clip's [Source](clipboard-and-paste.md#source-is-the-focused-windows-app-id). The reply line holds at most 1 MiB with its newline. niri reads a request line at a time on its event loop and answers each with one line (`src/ipc/server.rs:187-225`, read in source). Each step can stall:
 
 - **The read.** A reply that comes one byte every 150 ms passes a timeout of 2 s on each read and takes 2.55 s in all, so only one deadline over the whole exchange fails it at 2 s. niri-ipc's own `Socket::send` sets no timeout (niri-ipc `src/socket.rs:51-61`, read in source), and against a niri that never answered it had not returned after 3 s (measured).
 - **The connect.** niri accepts on its event loop (`src/ipc/server.rs:85-99`, read in source), so a niri whose loop is stuck accepts nothing. A listener's backlog held 4,097 connections, and after them a plain `UnixStream::connect` waited for good, while lyncast's connect, which sets the socket's send timeout first, failed at the deadline (measured). Clients that gave up and closed did not free the backlog (measured).
@@ -42,7 +42,7 @@ A failure prints `lyncast: <reason>` and exits 1, records no visit, and leaves t
 | A line that is not a reply, or no newline in the first 1 MiB | `not run: niri sent a bad reply: <error>` |
 | A reply to another request | `not run: niri sent a bad reply: not an answer to an action` |
 
-niri reads a request before it runs it, so a request whose answer did not come in time may still have run.
+niri reads a request before it runs it, so a request whose answer did not come in time may still have run. A question that fails prints nothing, and the clip then has no Source.
 
 ## The daemon builds an app's command on a worker
 
@@ -567,4 +567,4 @@ stderr: lyncast: not run: no program nope
 exit: 1
 ```
 
-A niri whose loop is stuck accepts no connection, and no block can fill a backlog of 4,097. So `a_niri_that_accepts_nothing_fails_at_the_deadline` in `crates/lyncast/src/niri.rs` listens with a backlog of 0, which holds one connection, fills it, and expects the action to fail with `not run: niri did not answer within 2 s`.
+A niri whose loop is stuck accepts no connection, and no block can fill a backlog of 4,097. So `a_niri_that_accepts_nothing_fails_at_the_deadline` in `crates/lyncast/src/niri.rs` listens with a backlog of 0, which holds one connection, fills it, and expects the action to fail with `not run: niri did not answer within 2 s` and the question, whose wait is 200 ms, to give no answer in under 1 s.

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS clips (
     used INTEGER NOT NULL,
     pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
     seq INTEGER NOT NULL CHECK (seq >= 0),
+    source TEXT,
     CHECK ((kind = 'image') = (body IS NULL)),
     CHECK ((kind = 'image') = (preview IS NULL))
 ) STRICT;";

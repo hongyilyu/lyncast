@@ -1,9 +1,10 @@
 //! The session runner. It runs a block's `$ ...` lines in order and compares what each printed
 //! with the lines after it. A `lyncast daemon` line with nothing after it starts a daemon in the
-//! background, which later lines reach, and the block's end kills it. Besides lyncast and
-//! `/bin/sh` lines, a block may hold the runner's own lines: `stall-stdout`, `stall-stderr`, and
-//! `no-threads` shape the next daemon, `drain-stdout`, `drain-stderr`, and `wait-exit` act on the
-//! newest one, `freeze-thread` and `thaw-thread` hold one of its threads, [`Connections`] holds
+//! background, which later lines reach, and the block's end kills it. What that daemon records or
+//! asks niri as it starts counts on the next line's `record:` and `niri:` lines. Besides lyncast
+//! and `/bin/sh` lines, a block may hold the runner's own lines: `stall-stdout`, `stall-stderr`,
+//! and `no-threads` shape the next daemon, `drain-stdout`, `drain-stderr`, and `wait-exit` act on
+//! the newest one, `freeze-thread` and `thaw-thread` hold one of its threads, [`Connections`] holds
 //! connections to it, and `fake-niri` starts a [`FakeNiri`]. A doc's own lines come through
 //! [`Verbs`].
 
@@ -45,7 +46,7 @@ pub fn session_later(
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let mut session = Session::default();
-    let mut before_later = None;
+    let mut carried = None;
     for Step {
         line: number,
         command,
@@ -60,7 +61,7 @@ pub fn session_later(
                 None => world.substitute(line),
             })
             .collect();
-        let before = before_later
+        let before = carried
             .take()
             .unwrap_or_else(|| (world.recorded().len(), world.niri_read().len()));
         let ran = match session.line(world, command, want.is_empty(), verbs) {
@@ -71,7 +72,10 @@ pub fn session_later(
                 ));
                 break;
             }
-            Line::Started => continue,
+            Line::Started => {
+                carried = Some(before);
+                continue;
+            }
             Line::NotStarted(error) => {
                 failures.push(format!("line {number}: {command}\n  {error}"));
                 break;
@@ -89,7 +93,7 @@ pub fn session_later(
         let (stdout, stderr, code) = ran;
         let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
         let (record, niri) = if later(command) {
-            before_later = Some(before);
+            carried = Some(before);
             (String::new(), String::new())
         } else {
             let (recorded, read) = (world.recorded(), world.niri_read());

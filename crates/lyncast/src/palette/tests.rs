@@ -839,6 +839,10 @@ impl Palette {
 }
 
 fn seed(clips: &mut Clips, line: &str) -> Result<(), String> {
+    let (line, source) = match line.rsplit_once(" from=") {
+        Some((line, app)) => (line, Some(app.to_owned())),
+        None => (line, None),
+    };
     let (rest, time) = line.rsplit_once(' ').ok_or("<kind> <value> <time>")?;
     let at = wall_time(time)
         .ok_or_else(|| format!("not a time {time}"))?
@@ -846,7 +850,7 @@ fn seed(clips: &mut Clips, line: &str) -> Result<(), String> {
     match rest.split_once(' ').ok_or("<kind> <value>")? {
         ("pin", id) => clips.pin(ClipId(id.parse().map_err(|_| "pin <id>")?), at),
         (kind, value) => {
-            clips.record(captured(kind, value)?, at);
+            clips.record(captured(kind, value)?.with_source(source), at);
             Ok(())
         }
     }
