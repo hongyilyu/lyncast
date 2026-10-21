@@ -13,7 +13,7 @@ lyncast is built in the steps below. Each step ends in a check that passes befor
 7. **Palette.** The layer-shell window, the input, rows and sections, the calculator card, Suggestions and Commands, the clipboard screen, the Actions menu, close on key release, and cancel on focus loss. **Done when** `TestAppContext` keystroke tests pass, the Tier 2 summon test shows `open` then `closed` around `activate`, and a screenshot under anvil shows the palette.
 8. **Launching.** niri IPC `Action Spawn` for apps, plus the system-action commands. **Done when** a fake niri socket records the exact `Spawn` request for a fixture app.
 9. **Bench gate.** Summon latency, memory states, growth over 100 cycles, and idle CPU on lavapipe, checked against the [budgets](decisions.md#budgets). Then a real run on Hongyi's AMD niri machine. **Done when** the CI gate passes and the real-hardware numbers are in `docs/research/`.
-10. **Install.** A systemd user unit, a niri config snippet (bind and blur `layer-rule`), and install steps in the README. **Done when** a fresh niri session starts the daemon and `Mod+Space` opens the palette.
+10. **Install.** A systemd user unit, a niri config snippet (bind and blur `layer-rule`), and install steps in the README. **Done when** the CI gate passes, and a fresh niri session on Hongyi's machine starts the daemon and `Mod+Space` opens the palette, run as [install](design/install.md#the-check-on-hongyis-niri-machine) says and recorded in `docs/research/`.
 
 ## After the MVP
 

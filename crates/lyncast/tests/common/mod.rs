@@ -32,6 +32,7 @@ pub use self::{
     pipe::fill,
     runtime::Runtime,
     session::{Verbs, session, session_later, session_with},
+    steps::{Printed, steps},
     tree::{environment, materialize, mkfifo, raw_bytes, substitute},
     world::{CommandLine, World, command_line},
 };
@@ -44,8 +45,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-
-use self::steps::{Printed, steps};
 
 /// The binary under test.
 pub const LYNCAST: &str = env!("CARGO_BIN_EXE_lyncast");

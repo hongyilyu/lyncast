@@ -1,0 +1,22 @@
+// lyncast for niri 26.04 or later. Include this file at the end of
+// ~/.config/niri/config.kdl with `include optional=true "lyncast.kdl"`, then
+// run `niri validate`.
+
+binds {
+    Mod+Space repeat=false hotkey-overlay-title="Open lyncast" { spawn "~/.local/bin/lyncast" "toggle"; }
+}
+
+layer-rule {
+    match namespace="^lyncast$"
+
+    // The palette's corner radius in logical pixels, which niri cuts the blur to.
+    geometry-corner-radius 12
+
+    background-effect {
+        blur true
+        // Uncomment to blur the windows under the palette, not only the
+        // wallpaper. niri marks that experimental, since the blur disappears
+        // while the palette opens and closes.
+        // xray false
+    }
+}

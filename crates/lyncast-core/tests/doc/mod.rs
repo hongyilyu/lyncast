@@ -88,6 +88,12 @@ pub const PALETTE: Doc = Doc {
     prose: &["", "text"],
 };
 
+pub const INSTALL: Doc = Doc {
+    file: "install.md",
+    kinds: &["systemd", "kdl", "install", "startup", "cli", "argv"],
+    prose: &["", "sh", "text"],
+};
+
 /// One fixture block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {

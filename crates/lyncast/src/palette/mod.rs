@@ -35,6 +35,9 @@ use zone::Zone;
 
 const TRACE_BEFORE_EXIT: Duration = Duration::from_secs(1);
 
+/// The window's layer-shell namespace, which the layer rule of `dist/niri/lyncast.kdl` matches.
+pub const NAMESPACE: &str = "lyncast";
+
 /// Runs the daemon with the palette until a Quit or until the compositor goes. Without
 /// `WAYLAND_DISPLAY` it fails before it takes the lock, because GPUI's Wayland-only platform
 /// panics without a display server. The socket is bound before GPUI runs, and requests wait in
@@ -197,7 +200,7 @@ fn options(cx: &App, height: Option<u32>) -> WindowOptions {
         focus: true,
         show: true,
         kind: WindowKind::LayerShell(LayerShellOptions {
-            namespace: "lyncast".to_owned(),
+            namespace: NAMESPACE.to_owned(),
             layer: Layer::Overlay,
             anchor: Anchor::TOP,
             margin: Some((px(top), px(0.0), px(0.0), px(0.0))),
