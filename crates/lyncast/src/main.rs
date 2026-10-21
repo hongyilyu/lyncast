@@ -12,6 +12,7 @@ mod daemon;
 #[path = "../../lyncast-core/tests/doc/mod.rs"]
 mod doc;
 mod files;
+mod niri;
 mod palette;
 mod permit;
 #[cfg(test)]

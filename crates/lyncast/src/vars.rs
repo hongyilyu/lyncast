@@ -1,12 +1,14 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 /// The environment the daemon reads at start. The app scan reads all of it but
-/// `XDG_CONFIG_HOME` and `WAYLAND_DISPLAY`. An empty variable counts as unset, except `PATH`. A
-/// value that is not UTF-8 counts as unset, except in `XDG_DATA_DIRS`, `PATH`, and
-/// `WAYLAND_DISPLAY`, and the entries of the first two count one by one. `WAYLAND_SOCKET` counts
-/// as set whenever it is in the environment, even empty or not UTF-8, and has no field, since
-/// [`Vars::read`] then fails. `Vars::default()` is an environment with nothing set.
+/// `XDG_CONFIG_HOME`, `WAYLAND_DISPLAY`, and `NIRI_SOCKET`. An empty variable counts as unset,
+/// except `PATH`. A value that is not UTF-8 counts as unset, except in `XDG_DATA_DIRS`, `PATH`,
+/// `WAYLAND_DISPLAY`, and `NIRI_SOCKET`, and the entries of the first two count one by one.
+/// `WAYLAND_SOCKET` counts as set whenever it is in the environment, even empty or not UTF-8, and
+/// has no field, since [`Vars::read`] then fails. `Vars::default()` is an environment with nothing
+/// set.
 #[derive(Default)]
 pub struct Vars {
     /// The locale names to try, best first. `LANGUAGE` split on `:`, as GLib reads it, or else
@@ -23,6 +25,8 @@ pub struct Vars {
     /// environment, which the daemon never changes, through wayland-client's `connect_to_env`,
     /// which takes the descriptor that `WAYLAND_SOCKET` names first, so [`Vars::read`] refuses it.
     pub wayland_display: Option<OsString>,
+    /// The socket of the niri whose session the daemon runs in, which niri sets for its children.
+    pub niri_socket: Option<PathBuf>,
 }
 
 impl Vars {
@@ -52,6 +56,9 @@ impl Vars {
             home: var("HOME"),
             path: env::var_os("PATH"),
             wayland_display: env::var_os("WAYLAND_DISPLAY").filter(|value| !value.is_empty()),
+            niri_socket: env::var_os("NIRI_SOCKET")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
         })
     }
 

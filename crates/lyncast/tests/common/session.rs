@@ -3,8 +3,9 @@
 //! background, which later lines reach, and the block's end kills it. Besides lyncast and
 //! `/bin/sh` lines, a block may hold the runner's own lines: `stall-stdout`, `stall-stderr`, and
 //! `no-threads` shape the next daemon, `drain-stdout`, `drain-stderr`, and `wait-exit` act on the
-//! newest one, `freeze-thread` and `thaw-thread` hold one of its threads, and [`Connections`]
-//! holds connections to it. A doc's own lines come through [`Verbs`].
+//! newest one, `freeze-thread` and `thaw-thread` hold one of its threads, [`Connections`] holds
+//! connections to it, and `fake-niri` starts a [`FakeNiri`]. A doc's own lines come through
+//! [`Verbs`].
 
 use std::io::{self, Write};
 use std::mem;
@@ -12,6 +13,7 @@ use std::path::Path;
 
 use super::connections::Connections;
 use super::frozen::Holds;
+use super::niri::{Answer, FakeNiri};
 use super::steps::{Printed, Step, steps};
 use super::{
     Daemon, NextDaemon, OK, Output, Ran, Threads, World, doc, failed, limit_exempt, run_bounded,
@@ -32,9 +34,9 @@ pub fn session_with(world: &World, block: &doc::Block, verbs: &mut Verbs<'_>) ->
     session_later(world, block, verbs, &|_| false)
 }
 
-/// [`session_with`] for a block where a line that `later` names starts programs after it
-/// returns, as keys typed into the palette do. Such a line holds no `record:` lines, and the
-/// programs it starts count on the next line's.
+/// [`session_with`] for a block where a line that `later` names may start programs or ask niri
+/// after it returns, as keys typed into the palette do. Such a line holds no `record:` or `niri:`
+/// lines, and what it starts or asks counts on the next line's.
 pub fn session_later(
     world: &World,
     block: &doc::Block,
@@ -43,7 +45,7 @@ pub fn session_later(
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let mut session = Session::default();
-    let mut recorded_before_later = None;
+    let mut before_later = None;
     for Step {
         line: number,
         command,
@@ -58,9 +60,9 @@ pub fn session_later(
                 None => world.substitute(line),
             })
             .collect();
-        let before = recorded_before_later
+        let before = before_later
             .take()
-            .unwrap_or_else(|| world.recorded().len());
+            .unwrap_or_else(|| (world.recorded().len(), world.niri_read().len()));
         let ran = match session.line(world, command, want.is_empty(), verbs) {
             Line::Ran(Some(ran)) => ran,
             Line::Ran(None) => {
@@ -86,17 +88,22 @@ pub fn session_later(
         };
         let (stdout, stderr, code) = ran;
         let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-        let record = if later(command) {
-            recorded_before_later = Some(before);
-            String::new()
+        let (record, niri) = if later(command) {
+            before_later = Some(before);
+            (String::new(), String::new())
         } else {
-            text(world.recorded().get(before..).unwrap_or_default())
+            let (recorded, read) = (world.recorded(), world.niri_read());
+            (
+                text(recorded.get(before.0..).unwrap_or_default()),
+                text(read.get(before.1..).unwrap_or_default()),
+            )
         };
         let got = Printed {
             stdout: text(&stdout),
             stderr: text(&stderr),
             exit: code.unwrap_or(-1),
             record,
+            niri,
         };
         let want = Printed::expected(&want);
         if got != want {
@@ -116,6 +123,8 @@ struct Session {
     next: NextDaemon,
     holds: Holds,
     connections: Connections,
+    /// After the daemons, so it outlives them.
+    fake: Option<FakeNiri>,
 }
 
 /// What one line did.
@@ -140,6 +149,17 @@ impl Session {
         background: bool,
         verbs: &mut Verbs<'_>,
     ) -> Line {
+        if let Some(rest) = command.strip_prefix("$ fake-niri")
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            self.fake = None;
+            let (socket, log) = (world.runtime.niri_socket(), world.runtime.niri_log());
+            match rest.trim_start() {
+                "gone" => FakeNiri::gone(&socket),
+                rest => self.fake = Some(FakeNiri::start(&socket, &log, Answer::read(rest))),
+            }
+            return Line::Ran(Some(OK));
+        }
         let ran = match command {
             "$ stall-stdout" => {
                 self.next.stdout = Output::Stalled;

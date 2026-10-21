@@ -89,8 +89,27 @@ impl Runtime {
             .unwrap()
     }
 
-    /// Adds `--record` and [`Runtime::runs`], so no test daemon starts a real program.
+    /// The fake niri's socket.
+    pub fn niri_socket(&self) -> PathBuf {
+        self.path.join("niri.sock")
+    }
+
+    /// The request lines that the fake niri read.
+    pub fn niri_log(&self) -> PathBuf {
+        self.path.join("niri.log")
+    }
+
+    /// Adds `--record` and [`Runtime::runs`], so no test daemon starts a real program, unless the
+    /// daemon's `NIRI_SOCKET` names the fake niri's socket, or nothing.
     pub fn record(&self, daemon: &mut Command) {
+        let niri = daemon.get_envs().find(|(name, _)| *name == "NIRI_SOCKET");
+        if let Some((_, Some(socket))) = niri {
+            assert!(
+                socket.is_empty() || socket == self.niri_socket(),
+                "a test daemon's NIRI_SOCKET is {socket:?}, not the fake niri's"
+            );
+            return;
+        }
         if !daemon.get_args().any(|arg| arg == "--record") {
             daemon.arg("--record").arg(self.runs());
         }

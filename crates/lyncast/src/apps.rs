@@ -174,6 +174,7 @@ mod tests {
             home: Some(format!("{root}/home/")),
             path: None,
             wayland_display: None,
+            niri_socket: None,
         };
         let paths = |vars: Vars| -> Vec<(String, Vec<String>)> {
             scan(&vars)
@@ -242,6 +243,7 @@ mod tests {
             home: None,
             path: None,
             wayland_display: None,
+            niri_socket: None,
         })
         .iter()
         .map(|app| app.name().to_owned())

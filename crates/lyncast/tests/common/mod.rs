@@ -15,6 +15,7 @@ mod daemon;
 #[path = "../../../lyncast-core/tests/doc/mod.rs"]
 pub mod doc;
 mod frozen;
+mod niri;
 mod pipe;
 mod runtime;
 mod session;

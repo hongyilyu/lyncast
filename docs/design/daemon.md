@@ -96,7 +96,7 @@ Log Out skips niri's own prompt, because lyncast has already asked. `XDG_CONFIG_
 Quit goes in this order:
 
 1. It removes the socket, so no new client connects. A request that still arrives, on a connection opened before, gets `failed` with `the daemon is quitting` at once while steps 2 and 3 wait. One that arrives during step 4 waits until the process exits, up to 2 s, the 1 s for the warnings and the 1 s for the replies, and then gets that reply or finds the connection closed. Either way it runs nothing.
-2. It waits for the work in flight, such as a program the runner is starting, and sends each reply to its client. So a client exits 1 only when its program did not start.
+2. It waits for the work in flight, such as a program the runner is starting, and sends each reply to its client. So a client whose work ends within the 5 s below gets that work's own reply, and exits 1 only when its request failed, as when niri did not answer in time, though such a request may still have run ([launching](launching.md#the-client-sends-one-request-per-connection)).
 3. It cancels the capture thread's `Watcher` and waits for the thread to end after the offer in hand. Then it waits for the last writes of the visits and the clips and gives up the lock. The writer of the clips gives up SQLite's lock when it ends. A client that runs after the reply finds no daemon, and a new daemon can start at once and load every visit and clip.
 4. It waits up to 1 s for its warnings to reach stderr and replies. Then it waits up to 1 s more for its replies, Quit's among them, to be written, and exits 0. The exit closes every connection, so it would cut off a reply that is still being written.
 
@@ -108,10 +108,10 @@ Once Quit has begun, the daemon fails every request, the palette's from plan ste
 
 Every program the daemon starts goes through one `Runner`, as an argv: a command's argv from the table above, or an app's `Exec` argv, or a Desktop Action's. The runner has two forms:
 
-- The real runner starts programs through niri IPC, which plan step 8 builds. Until then it fails with `not run: launching through niri is not built yet`.
-- `lyncast daemon --record <file>` swaps in a recorder. It appends each argv to `<file>` as one compact JSON array per line, and reports success. It writes one whole line at a time, so the lines of two programs started at once never mix. The tests start every daemon that serves with it, so no test starts a real program.
+- The real runner sends each argv to niri over `$NIRI_SOCKET`, as [launching.md](launching.md) describes, and fails as it says when niri does not take it.
+- `lyncast daemon --record <file>` swaps in a recorder. It appends each argv to `<file>` as one compact JSON array per line, and reports success. It writes one whole line at a time, so the lines of two programs started at once never mix. The tests start every daemon that serves with it, except one that a block points at launching.md's fake niri, so no test starts a real program.
 
-A Tier 1 test also runs the daemon with an empty environment plus the doc's variables, so `PATH` holds only the test tree and `NIRI_SOCKET`, `WAYLAND_DISPLAY`, and `WAYLAND_SOCKET` are unset.
+A Tier 1 test also runs the daemon with an empty environment plus the doc's variables, so `PATH` holds only the test tree, and `NIRI_SOCKET`, `WAYLAND_DISPLAY`, and `WAYLAND_SOCKET` are unset unless a line sets them.
 
 ## The summon is open or closed
 
@@ -222,7 +222,7 @@ Exec=8x8
 A `session` block is a terminal transcript against one environment:
 
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`, whose values may hold `$TREE` and `$RUNTIME`, and `\x{HH}` for the byte `HH` as there. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, `RUNTIME`, and `LYNCAST`, the binary under test, in its environment, so a session can write, change, and read files, and run the binary many times. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
-- Every `$ lyncast daemon ...` line that names no `--record` of its own gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
+- Every `$ lyncast daemon ...` line that names no `--record` of its own and sets no `NIRI_SOCKET` gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. A line that sets `NIRI_SOCKET` may set it only to `$RUNTIME/niri.sock` or to nothing, as [launching.md's](launching.md#the-fixtures) blocks do. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
 - Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
@@ -471,7 +471,7 @@ open
 
 ### A program that fails to start leaves the visits and the summon alone
 
-Here `$RUNTIME/runs` is a directory, so the recorder fails, as the real runner fails until plan step 8. The summon stays open, and Log Out gets no visit, so it still follows Lock Screen for `lo`, where a visit would put it first. Open Config creates `config.toml` before the runner opens it, so a failed Open Config still leaves the file.
+Here `$RUNTIME/runs` is a directory, so the recorder fails, as the real runner fails when niri does not take a program ([launching](launching.md#the-client-sends-one-request-per-connection)). The summon stays open, and Log Out gets no visit, so it still follows Lock Screen for `lo`, where a visit would put it first. Open Config creates `config.toml` before the runner opens it, so a failed Open Config still leaves the file.
 
 ```session
 $ mkdir $RUNTIME/runs
