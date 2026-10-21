@@ -1,7 +1,8 @@
 //! `summon-probe <socket>` starts with no window and reads lines on the Unix
 //! socket: `open` opens the window, `close` closes it, `quit` exits. Each step
 //! prints `PROBE seq=<n> ev=<name> mono_ns=<CLOCK_MONOTONIC ns>` on stdout,
-//! which is the protocol bench/summon.py reads.
+//! which is the protocol bench/summon.py reads, beside the log lines of GPUI's
+//! renderer, the `gpui_wgpu` crate, at info and above, which name the adapter.
 use futures::StreamExt;
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, QuitMode, SharedString, Window, WindowBounds,
@@ -133,7 +134,10 @@ fn make_items() -> Rc<Vec<SharedString>> {
 }
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::new()
+        .parse_filters("gpui_wgpu=info")
+        .target(env_logger::Target::Stdout)
+        .init();
     let sock = std::env::args()
         .nth(1)
         .expect("usage: summon-probe <socket>");

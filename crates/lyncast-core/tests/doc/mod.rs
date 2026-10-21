@@ -64,6 +64,12 @@ pub const CLIPBOARD: Doc = Doc {
     prose: &["", "rust"],
 };
 
+pub const TESTING: Doc = Doc {
+    file: "testing.md",
+    kinds: &["run", "judge", "cli"],
+    prose: &["", "sh"],
+};
+
 pub const PALETTE: Doc = Doc {
     file: "palette.md",
     kinds: &[

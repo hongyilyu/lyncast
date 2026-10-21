@@ -24,7 +24,7 @@ lyncast pins Rust 1.98.1 in `rust-toolchain.toml`.
 ```sh
 cargo build
 scripts/check.sh   # fmt, clippy, tests, shellcheck, and a Tier 2 smoke test
-scripts/bench.sh   # the summon bench, about 6 minutes
+scripts/bench.sh   # the summon bench and its budgets, about 7 minutes
 ```
 
 The scripts need Xvfb, Mesa, and Python 3. [Testing](docs/design/testing.md) lists the packages.
