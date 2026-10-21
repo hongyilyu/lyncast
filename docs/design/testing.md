@@ -90,7 +90,7 @@ sudo dnf install mesa-vulkan-drivers vulkan-loader vulkan-tools weston xorg-x11-
 
 `weston` is only needed to host GPUI under Xvfb for the old probe. Tier 2 uses anvil instead.
 
-The clipboard fixtures run `sqlite3`, from the `sqlite` package, which the dev box has as 3.40.0. The scripts in `scripts/` and `bench/` also need Python 3. The dev box has 3.9.25 at `/usr/bin/python3`, and both `scripts/wl-globals.py` and `bench/summon.py` ran on it. `scripts/check.sh` also needs `shellcheck`, which the AL2023 repos do not have. The dev box has a release binary, 0.11.0, in `~/.local/bin`.
+The clipboard fixtures run `sqlite3`, from the `sqlite` package, which the dev box has as 3.40.0. The install fixtures run `systemd-analyze`, which systemd 252 on the dev box ships. The scripts in `scripts/` and `bench/` also need Python 3. The dev box has 3.9.25 at `/usr/bin/python3`, and both `scripts/wl-globals.py` and `bench/summon.py` ran on it. `scripts/check.sh` also needs `shellcheck`, which the AL2023 repos do not have. The dev box has a release binary, 0.11.0, in `~/.local/bin`.
 
 These are missing on the dev box:
 

@@ -10,6 +10,7 @@ Start with the [decision log](decisions.md). It is the source of truth, and ever
 - [Launching](design/launching.md): how the runner sends each program to niri, the IPC client and its deadline, the failures, and the fixtures.
 - [Clipboard and paste](design/clipboard-and-paste.md): capture, storage, delivery, the clipboard screen, and the paste seam.
 - [Palette](design/palette.md): the palette host, a window per summon, the root list, the Actions menu, the clipboard screen, the compositor's end, the trace, the GPUI build, and the fixtures.
+- [Install](design/install.md): the systemd unit, the niri file, the install steps, the check on Hongyi's niri machine, and the fixtures.
 - [Ranking](design/ranking.md): the app index, desktop entries and the Exec tokenizer, the fold, frizbee's weights, the comparator, frecency, the empty list, `lyncast query`, and the fixtures.
 - [Testing](design/testing.md): the three test tiers on a headless box, the test environment, and the bench gate.
 

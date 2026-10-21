@@ -109,6 +109,29 @@ fn the_window_is_placed_as_the_geometry_block_says(cx: &mut TestAppContext) {
 }
 
 #[test]
+fn the_niri_file_matches_the_window() {
+    let blocks = doc::INSTALL.blocks("kdl");
+    let [block] = blocks.as_slice() else {
+        panic!("install.md holds one kdl block, not {}", blocks.len());
+    };
+    let values = |key: &str| -> Vec<&str> {
+        block
+            .lines
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix(key))
+            .collect()
+    };
+    assert_eq!(
+        values("match namespace="),
+        [format!("\"^{}$\"", super::NAMESPACE)]
+    );
+    assert_eq!(
+        values("geometry-corner-radius "),
+        [super::theme::RADIUS.to_string()]
+    );
+}
+
+#[test]
 fn the_model_never_names_gpui() {
     for (file, text) in [
         ("model.rs", include_str!("model.rs")),

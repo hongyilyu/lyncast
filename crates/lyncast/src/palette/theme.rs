@@ -12,7 +12,8 @@ pub fn top_margin(height: f32) -> f32 {
 /// The window's background, as `0xRRGGBBAA`. It lets a tenth of what lies behind the window
 /// through, so the blur that niri's layer rule draws there shows.
 pub const BACKGROUND: u32 = 0x1e1e20e6;
-/// The window's corner radius in logical pixels.
+/// The window's corner radius in logical pixels, which the layer rule of `dist/niri/lyncast.kdl`
+/// repeats, since niri cuts the blur to it.
 pub const RADIUS: f32 = 12.0;
 
 /// The dark theme, as `0xRRGGBB`.
