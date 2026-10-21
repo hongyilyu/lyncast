@@ -688,7 +688,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ press enter
 root "fire"
 == Results
@@ -756,7 +756,7 @@ root "fire"
 footer: pending
 $ resume-runner
 closed
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 ```
 
 ### Escape closes the window while an activation is out
@@ -799,7 +799,7 @@ $ press escape
 closed
 $ resume-runner
 closed
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 ```
 
 ### A failure stays in the footer, and a repeat activates nothing
@@ -965,7 +965,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ release enter
 root "fire"
 == Results
@@ -1004,7 +1004,7 @@ root "fire"
 == Results
 > Firefox  (Application)
 footer: closing
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ mods none
 root "fire"
 == Results
@@ -1097,7 +1097,7 @@ root "reboot"
 == Results
 > Reboot  (Command)
 footer: closing
-record: ["systemctl","reboot"]
+record: {"Action":{"Spawn":{"command":["systemctl","reboot"]}}}
 $ press escape
 closed
 $ open
@@ -1353,7 +1353,7 @@ root "fire fox"
 == Results
 > Firefox  (Application)
 footer: closing
-record: ["firefox","--new-window"]
+record: {"Action":{"Spawn":{"command":["firefox","--new-window"]}}}
 $ release enter
 closed
 ```
@@ -1654,7 +1654,7 @@ root "reboot"
 == Results
 > Reboot  (Command)
 footer: closing
-record: ["systemctl","reboot"]
+record: {"Action":{"Spawn":{"command":["systemctl","reboot"]}}}
 $ release enter
 closed
 ```
@@ -3002,7 +3002,7 @@ open
 $ wait-trace frame1_presented 1
 $ lyncast activate app:firefox.desktop
 launched app:firefox.desktop
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ lyncast status
 closed
 $ wait-trace window_closed 1
@@ -3038,7 +3038,7 @@ $ lyncast daemon --trace
 $ freeze-thread visits
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast toggle
 open
 $ wait-trace frame1_presented 1
@@ -3094,7 +3094,7 @@ $ wait-clips 1
 $ freeze-thread visits
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast toggle
 open
 $ wait-trace frame1_presented 1
@@ -3120,7 +3120,7 @@ open
 $ wait-trace frame1_presented 1
 $ keys f i r e Return
 $ wait-summon closed
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ wait-trace window_closed 1
 $ lyncast activate cmd:quit
 ran cmd:quit

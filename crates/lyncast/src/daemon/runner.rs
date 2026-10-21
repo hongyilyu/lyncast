@@ -1,5 +1,5 @@
 //! The work that blocks, which runs on worker threads. Every program the daemon starts goes
-//! through one [`Runner`], as an argv.
+//! through one [`Runner`], as the action that niri runs.
 
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
@@ -7,17 +7,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lyncast_core::rank::Index;
-use niri_ipc::Action;
+use niri_ipc::{Action, Request};
 
 use super::{Done, Task};
 use crate::{apps, niri};
 
 #[derive(Clone)]
 pub enum Runner {
-    /// Sends each argv to the niri at this socket, as `Action::Spawn`, which niri starts.
+    /// Sends each action to the niri at this socket.
     Niri(Option<PathBuf>),
-    /// Appends each argv to the file as one compact JSON array per line, and starts nothing.
-    /// `lyncast daemon --record <file>` picks it, so a Tier 1 test never runs `systemctl reboot`.
+    /// Appends to the file the line that [`Runner::Niri`] would send for each action, and sends
+    /// nothing. `lyncast daemon --record <file>` picks it, so a Tier 1 test never runs
+    /// `systemctl reboot`.
     Recorder(Arc<Recorder>),
 }
 
@@ -37,20 +38,14 @@ impl Runner {
         }))
     }
 
-    pub fn spawn(&self, argv: &[String]) -> Result<(), String> {
+    pub fn send(&self, action: Action) -> Result<(), String> {
         match self {
-            Runner::Niri(socket) => niri::act(
-                socket.as_deref(),
-                Action::Spawn {
-                    command: argv.to_vec(),
-                },
-            ),
+            Runner::Niri(socket) => niri::act(socket.as_deref(), action),
             Runner::Recorder(recorder) => {
-                let mut line = serde_json::to_vec(argv).expect("an argv serializes");
-                line.push(b'\n');
+                let line = niri::line(&Request::Action(action));
                 let failed =
                     |error: io::Error| format!("not run: {}: {error}", recorder.path.display());
-                // Opened for each argv, so a recorder that cannot be opened fails only that
+                // Opened for each action, so a recorder that cannot be opened fails only that
                 // program, and the tests count the daemon's descriptors on the file to see a
                 // program waiting in the runner.
                 let mut file = File::options()
@@ -68,11 +63,11 @@ impl Runner {
 impl Task {
     pub fn run(self, runner: &Runner) -> Result<Done, String> {
         match self {
-            Task::Spawn(argv) => runner.spawn(&argv).map(|()| Done::Ran),
+            Task::Act(action) => runner.send(action).map(|()| Done::Ran),
             Task::OpenConfig(path) => {
                 create(&path)?;
-                let argv = ["xdg-open".to_owned(), path.display().to_string()];
-                runner.spawn(&argv).map(|()| Done::Ran)
+                let command = vec!["xdg-open".to_owned(), path.display().to_string()];
+                runner.send(Action::Spawn { command }).map(|()| Done::Ran)
             }
             Task::Scan { vars, number } => Ok(Done::Scanned {
                 number,

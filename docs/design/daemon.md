@@ -87,11 +87,11 @@ The commands run like this:
 | Quit lyncast | stops taking requests, waits for the work in flight and the last writes of the visits and the clips, gives up the lock, replies, and exits 0 |
 | Lock Screen | `loginctl lock-session` |
 | Suspend | `systemctl suspend` |
-| Log Out | `niri msg action quit --skip-confirmation` |
+| Log Out | niri's Quit, with `skip_confirmation` |
 | Reboot | `systemctl reboot` |
 | Power Off | `systemctl poweroff` |
 
-Log Out skips niri's own prompt, because lyncast has already asked. `XDG_CONFIG_HOME` defaults to `$HOME/.config`, as the XDG spec says. A relative value counts as unset, as the spec also says. Without an absolute `XDG_CONFIG_HOME` or `HOME`, Open Config fails with `not run: XDG_CONFIG_HOME and HOME are not set` and runs nothing.
+Log Out skips niri's own prompt, because lyncast has already asked. It is the request that `niri msg action quit --skip-confirmation` sends ([launching](launching.md#the-runner-sends-each-program-to-niri)). `XDG_CONFIG_HOME` defaults to `$HOME/.config`, as the XDG spec says. A relative value counts as unset, as the spec also says. Without an absolute `XDG_CONFIG_HOME` or `HOME`, Open Config fails with `not run: XDG_CONFIG_HOME and HOME are not set` and runs nothing.
 
 Quit goes in this order:
 
@@ -106,10 +106,10 @@ Once Quit has begun, the daemon fails every request, the palette's from plan ste
 
 ## The runner starts programs, and tests swap in a recorder
 
-Every program the daemon starts goes through one `Runner`, as an argv: a command's argv from the table above, or an app's `Exec` argv, or a Desktop Action's. The runner has two forms:
+Every program the daemon starts goes through one `Runner`, as niri's Spawn of an argv: a command's argv from the table above, or an app's `Exec` argv, or a Desktop Action's. Log Out goes through it too, as niri's Quit. The runner has two forms:
 
-- The real runner sends each argv to niri over `$NIRI_SOCKET`, as [launching.md](launching.md) describes, and fails as it says when niri does not take it.
-- `lyncast daemon --record <file>` swaps in a recorder. It appends each argv to `<file>` as one compact JSON array per line, and reports success. It writes one whole line at a time, so the lines of two programs started at once never mix. The tests start every daemon that serves with it, except one that a block points at launching.md's fake niri, so no test starts a real program.
+- The real runner sends each one to niri over `$NIRI_SOCKET`, as [launching.md](launching.md) describes, and fails as it says when niri does not take it.
+- `lyncast daemon --record <file>` swaps in a recorder. It appends to `<file>` the line that the real runner would send to niri, and reports success, so a `record:` line and the line niri would read are the same bytes. It writes one whole line at a time, so the lines of two programs started at once never mix. The tests start every daemon that serves with it, except one that a block points at launching.md's fake niri, so no test starts a real program.
 
 A Tier 1 test also runs the daemon with an empty environment plus the doc's variables, so `PATH` holds only the test tree, and `NIRI_SOCKET`, `WAYLAND_DISPLAY`, and `WAYLAND_SOCKET` are unset unless a line sets them.
 
@@ -223,7 +223,7 @@ A `session` block is a terminal transcript against one environment:
 
 - A line that starts with `$ ` is a command. A command that runs `lyncast` splits into words as in [ranking's](ranking.md#lyncast-query-prints-one-json-object-per-row) `cli` blocks, and it may set variables before `lyncast`, whose values may hold `$TREE` and `$RUNTIME`, and `\x{HH}` for the byte `HH` as there. Any other command runs through `/bin/sh -c`, with `$TREE` as its working directory and only `PATH=/usr/bin:/bin`, `TREE`, `RUNTIME`, and `LYNCAST`, the binary under test, in its environment, so a session can write, change, and read files, and run the binary many times. Once the block has started a daemon in the background, `DAEMON` holds the newest one's process ID too.
 - Every `$ lyncast daemon ...` line that names no `--record` of its own and sets no `NIRI_SOCKET` gets `--record $RUNTIME/runs` added, so no daemon a test starts can run a real program, even one that the test expects to fail. A line that sets `NIRI_SOCKET` may set it only to `$RUNTIME/niri.sock` or to nothing, as [launching.md's](launching.md#the-fixtures) blocks do. With no expected lines after it, the line starts the daemon in the background, with its stdout and stderr appended to `$RUNTIME/daemon.stdout` and `$RUNTIME/daemon.stderr`, and the test waits until the socket accepts. A line that sets `XDG_RUNTIME_DIR` waits for the socket there. With expected lines, it runs to the end like any command.
-- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <argv>` is a line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
+- Each line after a command is what that command prints. A plain line is stdout. A line that starts with `stderr: ` is stderr. `exit: <n>` is the exit code, 0 when absent. `record: <line>` is a request line the command added to `$RUNTIME/runs`, and with no `record:` line the command added none. `$TREE` and `$RUNTIME` in an expected line stand for the two paths, and `$DAEMON` for the newest daemon's process ID.
 - `$ stall-stderr` gives the next daemon a stderr that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stderr`. A daemon line with expected lines runs to its end with that stderr, and its `stderr:` lines are what it wrote after what filled the pipe. `$ drain-stderr` reads what fills it, so the newest daemon's writes to stderr go through. `$ wait-exit` waits for the newest daemon to exit, prints what it wrote to stderr since it started, after what filled a stderr that did not drain, and exits as the daemon did.
 - `$ no-threads` gives the next daemon a limit of no processes for its user, an `RLIMIT_NPROC` of 0, which the kernel checks at each thread the daemon starts, so the first thread it starts fails. It also starts the daemon with `SIGALRM` blocked, as a launcher that takes its signals through a signalfd leaves it. A kernel that exempts the user, as it exempts root, leaves the daemon its threads, so the test then skips the rest of the block and says so on its stderr.
 - `$ freeze-thread <name>` holds still, with ptrace, the newest daemon's thread of that name while the rest of the daemon runs, as a disk that stops answering holds the thread that writes to it. A thread takes its name only once it runs, so the line first waits until the daemon has a thread of that name. The thread that writes the visits is named `visits`, and the one that writes the clips `clips`, as the `THREAD` constants in `crates/lyncast/src/daemon/store.rs` and `crates/lyncast/src/clip/db.rs` spell them. `main` names the daemon's main thread, which runs the owner loop, and whose ID is the process ID, because a thread that the daemon starts without a name takes the main thread's name too. `$ thaw-thread` lets the held thread go on, and `$ thaw-thread <n>s` or `$ thaw-thread <n>ms` lets it go on that many seconds or milliseconds later and goes on to the next line at once.
@@ -292,7 +292,7 @@ $ lyncast query 123456789012345+0.5 --json
 
 ### Commands that confirm ask first
 
-Without `--yes`, Reboot, Power Off, and Log Out ask and run nothing. With it, the recorder gets the argv.
+Without `--yes`, Reboot, Power Off, and Log Out ask and run nothing. With it, the recorder gets the request.
 
 ```session
 $ lyncast daemon --headless
@@ -301,7 +301,7 @@ stderr: lyncast: Reboot? Run again with --yes to confirm.
 exit: 1
 $ lyncast activate cmd:reboot --yes
 ran cmd:reboot
-record: ["systemctl","reboot"]
+record: {"Action":{"Spawn":{"command":["systemctl","reboot"]}}}
 $ lyncast activate cmd:power-off
 stderr: lyncast: Power Off? Run again with --yes to confirm.
 exit: 1
@@ -310,7 +310,7 @@ stderr: lyncast: Log Out? Run again with --yes to confirm.
 exit: 1
 $ lyncast activate cmd:log-out --yes
 ran cmd:log-out
-record: ["niri","msg","action","quit","--skip-confirmation"]
+record: {"Action":{"Quit":{"skip_confirmation":true}}}
 ```
 
 Commands that do not confirm run at once, and Ctrl+Enter runs the default too.
@@ -319,10 +319,10 @@ Commands that do not confirm run at once, and Ctrl+Enter runs the default too.
 $ lyncast daemon --headless
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:suspend --chord ctrl-enter
 ran cmd:suspend
-record: ["systemctl","suspend"]
+record: {"Action":{"Spawn":{"command":["systemctl","suspend"]}}}
 ```
 
 ### Open Config creates the file once
@@ -333,13 +333,13 @@ Open Config creates an empty `config.toml` and opens it. A second run keeps what
 $ lyncast daemon --headless
 $ lyncast activate cmd:open-config
 ran cmd:open-config
-record: ["xdg-open","$TREE/config/lyncast/config.toml"]
+record: {"Action":{"Spawn":{"command":["xdg-open","$TREE/config/lyncast/config.toml"]}}}
 $ wc -c config/lyncast/config.toml
 0 config/lyncast/config.toml
 $ echo 'theme = "dark"' > config/lyncast/config.toml
 $ lyncast activate cmd:open-config
 ran cmd:open-config
-record: ["xdg-open","$TREE/config/lyncast/config.toml"]
+record: {"Action":{"Spawn":{"command":["xdg-open","$TREE/config/lyncast/config.toml"]}}}
 $ cat config/lyncast/config.toml
 theme = "dark"
 ```
@@ -369,16 +369,16 @@ $ lyncast query nightly --json
 
 ### Apps launch through the runner
 
-Enter launches the app's Exec, and a verb picks a Desktop Action. A verb the row does not offer fails. A session runs one command at a time, so `launches_at_once_record_whole_lines` in `crates/lyncast/tests/daemon.rs` starts two launches at once itself. Each has an argument of 18,000 bytes, more than a FIFO takes in one write, and the test checks that the recorder holds each argv on a line of its own. `--chord` and `--verb` read only the spellings that `query --json` prints, so `Enter`, `ctrl+enter`, the label `open`, `launch-action` and `launch-action:`, which name no action, and the empty text are usage errors.
+Enter launches the app's Exec, and a verb picks a Desktop Action. A verb the row does not offer fails. A session runs one command at a time, so `launches_at_once_record_whole_lines` in `crates/lyncast/tests/daemon.rs` starts two launches at once itself. Each has an argument of 18,000 bytes, more than a FIFO takes in one write, and the test checks that the recorder holds each request on a line of its own. `--chord` and `--verb` read only the spellings that `query --json` prints, so `Enter`, `ctrl+enter`, the label `open`, `launch-action` and `launch-action:`, which name no action, and the empty text are usage errors.
 
 ```session
 $ lyncast daemon --headless
 $ lyncast activate app:firefox.desktop
 launched app:firefox.desktop
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ lyncast activate app:firefox.desktop --verb launch-action:new-window
 launched app:firefox.desktop new-window
-record: ["firefox","--new-window"]
+record: {"Action":{"Spawn":{"command":["firefox","--new-window"]}}}
 $ lyncast activate app:firefox.desktop --verb pin
 stderr: lyncast: app:firefox.desktop has no action pin
 exit: 1
@@ -460,7 +460,7 @@ $ lyncast status
 open
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast status
 closed
 $ lyncast activate cmd:clipboard-history
@@ -502,7 +502,7 @@ An activation records a visit, so Firefox leads Suggestions. Quit removes the so
 $ lyncast daemon --headless
 $ lyncast activate app:firefox.desktop --query Fir
 launched app:firefox.desktop
-record: ["firefox"]
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ lyncast status
@@ -549,7 +549,7 @@ $ lyncast query lo --json
 {"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -573,7 +573,7 @@ $ echo '{"cmd:reboot":{"anchor":5000000000000,"last_opened":1760000000000,"terms
 $ lyncast daemon --headless
 $ lyncast activate cmd:reboot --yes
 ran cmd:reboot
-record: ["systemctl","reboot"]
+record: {"Action":{"Spawn":{"command":["systemctl","reboot"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ anchor=$(grep -o '"anchor":[0-9]*' data/lyncast/ranking.json | cut -d : -f 2); echo $(( (anchor / 1000 - $(date +%s)) / 86400 / 365 )) years ahead
@@ -598,7 +598,7 @@ $ lyncast query lo --json
 {"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
 $ lyncast activate cmd:lock-screen --query Lock
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ sed -E 's/[0-9]+/N/g' data/lyncast/ranking.json
@@ -685,7 +685,7 @@ $ cat $RUNTIME/daemon.stderr
 lyncast: $TREE/data/lyncast/ranking.json: Too many levels of symbolic links (os error 40); not moved to ranking.json.bad: it already exists; the visits stay in memory
 $ lyncast activate cmd:log-out --yes
 ran cmd:log-out
-record: ["niri","msg","action","quit","--skip-confirmation"]
+record: {"Action":{"Quit":{"skip_confirmation":true}}}
 $ lyncast query lo --json
 {"key":"cmd:log-out","index":0,"kind":"command","section":"results","title":"Log Out","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
 {"key":"cmd:lock-screen","index":1,"kind":"command","section":"results","title":"Lock Screen","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
@@ -714,7 +714,7 @@ $ lyncast query lo --json
 {"key":"cmd:reload-apps","index":2,"kind":"command","section":"results","title":"Reload Apps","actions":[{"verb":"run","label":"Run","chords":["enter","ctrl-enter"]}]}
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -733,7 +733,7 @@ $ lyncast daemon --headless
 $ touch data/lyncast/ranking.json.$DAEMON.tmp && chmod 644 data/lyncast/ranking.json.$DAEMON.tmp
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ stat -c '%F %a' data/lyncast/ranking.json
@@ -745,7 +745,7 @@ $ lyncast daemon --headless
 $ ln -s ../../other data/lyncast/ranking.json.$DAEMON.tmp
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat other
@@ -756,7 +756,7 @@ $ lyncast daemon --headless
 $ mkdir data/lyncast/ranking.json.$DAEMON.tmp
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ cat $RUNTIME/daemon.stderr
@@ -775,7 +775,7 @@ $ lyncast daemon --headless
 $ freeze-thread visits
 $ lyncast activate cmd:lock-screen
 ran cmd:lock-screen
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 $ lyncast status
 closed
 $ test -e data/lyncast/ranking.json || echo missing
@@ -929,7 +929,7 @@ A `wire` block sends each `>` line, with a newline, to a daemon started as a ses
 < {"reply":"confirm","title":"Reboot"}
 > {"request":"activate","key":"cmd:reboot","via":{"verb":"run"},"confirmed":true,"query":"reb"}
 < {"reply":"done","message":"ran cmd:reboot"}
-record: ["systemctl","reboot"]
+record: {"Action":{"Spawn":{"command":["systemctl","reboot"]}}}
 > {"request":"activate","key":"clip:x","via":{"chord":"enter"},"confirmed":false,"query":""}
 < {"reply":"failed","reason":"bad request: bad clip id in clip:x"}
 > {"request":"activate","key":"cmd:reboot","via":{"chord":"Enter"},"confirmed":true,"query":""}
@@ -940,7 +940,7 @@ record: ["systemctl","reboot"]
 < {"reply":"failed","reason":"bad request: expected ident at line 1 column 2"}
 ```
 
-A `wire unterminated` block sends each `>` line twice, each time on a new connection. The first time it has no newline, and the test closes its half of the connection after it. The second time it is padded with spaces to 1 MiB, and `not json` and a newline follow. Both get the `<` reply, and neither records anything. A toggle that ran would have replied with the summon state, and a Reboot that ran would have recorded its argv.
+A `wire unterminated` block sends each `>` line twice, each time on a new connection. The first time it has no newline, and the test closes its half of the connection after it. The second time it is padded with spaces to 1 MiB, and `not json` and a newline follow. Both get the `<` reply, and neither records anything. A toggle that ran would have replied with the summon state, and a Reboot that ran would have recorded its request.
 
 ```wire unterminated
 > {"request":"toggle"}
@@ -1012,7 +1012,7 @@ Lock Screen waits in the runner while Quit removes the socket. A request on a co
 2> {"request":"activate","key":"cmd:quit","via":{"chord":"enter"},"confirmed":false,"query":""}
 3> {"request":"status"}
 3< {"reply":"failed","reason":"the daemon is quitting"}
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 1< {"reply":"done","message":"ran cmd:lock-screen"}
 2< {"reply":"done","message":"ran cmd:quit"}
 ```
@@ -1023,7 +1023,7 @@ A second `wire fifo` block sends Quit after Lock Screen's reply. That Quit finds
 
 ```wire fifo
 1> {"request":"activate","key":"cmd:lock-screen","via":{"chord":"enter"},"confirmed":false,"query":""}
-record: ["loginctl","lock-session"]
+record: {"Action":{"Spawn":{"command":["loginctl","lock-session"]}}}
 1< {"reply":"done","message":"ran cmd:lock-screen"}
 2> {"request":"activate","key":"cmd:quit","via":{"chord":"enter"},"confirmed":false,"query":""}
 2< {"reply":"done","message":"ran cmd:quit"}

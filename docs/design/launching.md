@@ -8,7 +8,9 @@ Every program the daemon starts goes through one runner ([daemon.md](daemon.md#t
 
 niri spawns the argv on a thread of its own. The child's stdin, stdout, and stderr are `/dev/null`, and it gets niri's environment and working directory, and an activation token that niri makes for each Spawn in `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`. When niri runs as a systemd service, it puts the child in a scope named `app-niri-<basename of argv[0]>-<pid>.scope` (niri v26.04 `src/input/mod.rs:696-699`, `src/utils/spawning.rs:64-83, 105-155, 416-439`, read in source). So lyncast passes no token, no scope, no environment, and no working directory, and the program gets niri's environment, not the daemon's. niri-ipc's `Action` has no variant that locks or suspends (`src/lib.rs:194-946`, read in source), so those commands are programs that niri spawns too.
 
-niri answers `{"Ok":"Handled"}` once the action has run on its event loop (`src/ipc/server.rs:381-399`). It answers the same when the exec fails, which it only logs (`src/utils/spawning.rs:192-198`), and while the session is locked it drops a Spawn and still answers (`src/input/mod.rs:650-653`), both read in source. So `launched` and `ran` mean that niri took the request, not that the program started. The failures that lyncast can report are those of the exchange, below.
+Log Out is the one request that starts no program. It sends `{"Action":{"Quit":{"skip_confirmation":true}}}`, which is what `niri msg action quit --skip-confirmation` sends, with no process in between. lyncast has asked already, so it skips niri's own "Press Enter to confirm" dialog (`src/input/mod.rs:660-667`, read in source). niri runs an action in an idle callback of its event loop and answers once the callback is done (`src/ipc/server.rs:381-399`), but Quit's callback stops the loop (`src/input/mod.rs:667`), and calloop runs the idle callbacks last in a turn and checks the stop before the next (calloop 0.14.5 `src/loop_logic.rs:627-635, 657-673`), so niri exits with the answer unwritten. That is read in source, not seen on a niri. So a connection that niri closes after it reads Quit is Log Out's success. A connection closed with the request unread fails the read with `Connection reset by peer` instead, as [the failures below](#each-failure-of-niri-fails-the-launch-and-changes-nothing) show, so the close shows that niri read the Quit.
+
+niri answers every other action with `{"Ok":"Handled"}` once it has run. It answers the same when the exec fails, which it only logs (`src/utils/spawning.rs:192-198`), and while the session is locked it drops a Spawn and still answers (`src/input/mod.rs:650-653`), both read in source. So `launched` and `ran` mean that niri took the request, not that the program started. The failures that lyncast can report are those of the exchange, below.
 
 ## The client sends one request per connection
 
@@ -93,6 +95,20 @@ launched app:firefox.desktop
 niri: {"Action":{"Spawn":{"command":["firefox"]}}}
 ```
 
+### The recorder writes the line niri would read
+
+`lyncast daemon --record <file>`, which the harness adds to a daemon line that sets no `NIRI_SOCKET`, swaps the real runner for a recorder ([daemon.md](daemon.md#the-runner-starts-programs-and-tests-swap-in-a-recorder)). The recorder appends the line that the real runner would write to niri and sends nothing, so a `record:` line and a `niri:` line are the same bytes.
+
+```session
+$ lyncast daemon --headless
+$ lyncast activate app:firefox.desktop
+launched app:firefox.desktop
+record: {"Action":{"Spawn":{"command":["firefox"]}}}
+$ lyncast activate cmd:log-out --yes
+ran cmd:log-out
+record: {"Action":{"Quit":{"skip_confirmation":true}}}
+```
+
 ### A Desktop Action sends its own argv, and a launch records a visit
 
 A verb picks the Desktop Action, and Ctrl+Enter does what Enter does. Each launch records a visit, which is written by the time Quit replies.
@@ -112,9 +128,9 @@ $ sed -E 's/[0-9]+/N/g' data/lyncast/ranking.json
 {"app:firefox.desktop":{"anchor":N,"last_opened":N,"terms":["fir"]}}
 ```
 
-### Commands spawn their programs
+### Commands spawn their programs, and Log Out quits niri
 
-A command that confirms still asks first and sends nothing. Open Config sends `xdg-open` once it has made the file. Reload Apps, Clipboard History, and Quit lyncast send nothing to niri.
+A command that confirms still asks first and sends nothing. Log Out runs when niri answers, or when niri closes the connection after it reads the Quit, but not when it closes the connection with the Quit unread. Open Config sends `xdg-open` once it has made the file. Reload Apps, Clipboard History, and Quit lyncast send nothing to niri.
 
 ```session
 $ fake-niri
@@ -136,7 +152,16 @@ ran cmd:power-off
 niri: {"Action":{"Spawn":{"command":["systemctl","poweroff"]}}}
 $ lyncast activate cmd:log-out --yes
 ran cmd:log-out
-niri: {"Action":{"Spawn":{"command":["niri","msg","action","quit","--skip-confirmation"]}}}
+niri: {"Action":{"Quit":{"skip_confirmation":true}}}
+$ fake-niri hangup
+$ lyncast activate cmd:log-out --yes
+ran cmd:log-out
+niri: {"Action":{"Quit":{"skip_confirmation":true}}}
+$ fake-niri reset
+$ lyncast activate cmd:log-out --yes
+stderr: lyncast: not run: $RUNTIME/niri.sock: Connection reset by peer (os error 104)
+exit: 1
+$ fake-niri
 $ lyncast activate cmd:open-config
 ran cmd:open-config
 niri: {"Action":{"Spawn":{"command":["xdg-open","$TREE/config/lyncast/config.toml"]}}}

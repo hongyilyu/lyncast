@@ -4,7 +4,7 @@ The dev box has no display, so every lyncast test drives the CLI and checks what
 
 ## Tests assert literal output
 
-Each test runs `lyncast` and compares stdout, stderr, and the exit code with literal strings. Every palette action also exists as a CLI command over the same socket protocol, so a CLI test takes the palette's path. `lyncast daemon --headless` runs the core, the clipboard watcher, and the socket without GPUI, and `lyncast daemon --record <file>` makes it record each program it would start instead of starting it ([daemon](daemon.md#the-runner-starts-programs-and-tests-swap-in-a-recorder)).
+Each test runs `lyncast` and compares stdout, stderr, and the exit code with literal strings. Every palette action also exists as a CLI command over the same socket protocol, so a CLI test takes the palette's path. `lyncast daemon --headless` runs the core, the clipboard watcher, and the socket without GPUI, and `lyncast daemon --record <file>` makes it record each request it would send to niri instead of sending it ([daemon](daemon.md#the-runner-starts-programs-and-tests-swap-in-a-recorder)).
 
 MIME types are the exception. Their order differed between two probe runs, so tests check membership ([notes/07](../research/notes/07-paste-seam-workflow.md), measured). A failed action exits 1 with the reason on stderr (notes/07). A usage error exits 2, and a stale rate snapshot will exit 3 ([decision log](../decisions.md#calculator-engine)).
 

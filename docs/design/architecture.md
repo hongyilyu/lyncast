@@ -140,7 +140,7 @@ Before the first keystroke the palette shows two sections, as Raycast does ([dec
 - **Suggestions** holds the top 5 apps and commands by frecency. On a fresh install, with no usage yet, it shows Clipboard History and then the first apps alphabetically.
 - **Commands** lists every built-in command that Suggestions does not hold, alphabetically.
 
-Each row shows its kind, Command or Application, on the right. The commands are Clipboard History, Open Config, Reload Apps, Quit lyncast, Lock Screen (`loginctl lock-session`), Suspend, Log Out (`niri msg action quit --skip-confirmation`), Reboot, and Power Off. Typing searches commands like apps, so `clip` finds Clipboard History.
+Each row shows its kind, Command or Application, on the right. The commands are Clipboard History, Open Config, Reload Apps, Quit lyncast, Lock Screen (`loginctl lock-session`), Suspend, Log Out (niri's Quit, skipping niri's own prompt), Reboot, and Power Off. Typing searches commands like apps, so `clip` finds Clipboard History.
 
 Log Out, Reboot, and Power Off ask for confirmation. The daemon answers the first `Activate` with a confirmation reply, the palette asks, and the second `Activate` carries `confirmed: true`. The CLI spells it `lyncast activate cmd:reboot --yes`.
 
