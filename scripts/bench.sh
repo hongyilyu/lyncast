@@ -2,6 +2,7 @@
 # Builds the release lyncast and bench/probe, and runs bench/summon.py on them.
 #
 #   bench.sh [ARG...]          the full bench in a private anvil on lavapipe, 3 processes of 100 cycles
+#   bench.sh --gate [ARG...]   the bench that check.sh runs, 1 process of 100 cycles
 #   bench.sh --real [ARG...]   in the niri session it runs in, on its GPU, judging nothing
 #
 # Each ARG goes to summon.py, for example `--procs 1 --cycles 30`. Unless VK_DRIVER_FILES says
@@ -13,7 +14,7 @@ unset CDPATH
 cd "$(dirname "$0")/.."
 mode=${1:-}
 case $mode in
---real) shift ;;
+--gate | --real) shift ;;
 esac
 for arg in "$@"; do
 	if [[ $arg == --real ]]; then
@@ -34,6 +35,7 @@ sync "${programs[@]}"
 summon=(python3 -I bench/summon.py "${programs[@]}" --out "$target/bench")
 case $mode in
 --real) exec "${summon[@]}" --real "$@" ;;
+--gate) summon+=(--procs 1) ;;
 esac
 export VK_DRIVER_FILES=${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/lvp_icd.x86_64.json}
 exec scripts/test-env.sh run -- "${summon[@]}" "$@"
