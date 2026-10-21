@@ -170,21 +170,23 @@ fn open_window(
     screen: Screen,
     trace: Trace,
     seq: u32,
+    height: Option<u32>,
 ) -> gpui::Result<WindowHandle<PaletteView>> {
     let shared = host.read_with(cx, |host, _| host.shared())?;
-    cx.open_window(options(cx), |window, cx| {
+    cx.open_window(options(cx, height), |window, cx| {
         cx.new(|cx| PaletteView::new(window, cx, host, shared, screen, trace, seq))
     })
 }
 
 /// A layer-shell surface on the Overlay layer with the keyboard to itself, anchored to the top
-/// edge, so the compositor centers it, and pushed down a third of the space it leaves on the
-/// display GPUI lists first.
-fn options(cx: &App) -> WindowOptions {
-    let height = cx
-        .displays()
-        .first()
-        .map(|display| f32::from(display.bounds().size.height));
+/// edge, so the compositor centers it on the output it picks, and pushed down a third of the
+/// space it leaves on an output `height` tall, or else on the display GPUI lists first.
+fn options(cx: &App, height: Option<u32>) -> WindowOptions {
+    let height = height.map(|height| height as f32).or_else(|| {
+        cx.displays()
+            .first()
+            .map(|display| f32::from(display.bounds().size.height))
+    });
     let top = height.map_or(0.0, theme::top_margin);
     WindowOptions {
         titlebar: None,

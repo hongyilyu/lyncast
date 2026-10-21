@@ -2,6 +2,8 @@
 //! such change to the end of the effect cycle, when no entity is leased.
 
 use std::mem;
+use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 
 use futures::channel::oneshot;
@@ -14,6 +16,7 @@ use super::trace::Trace;
 use super::view::PaletteView;
 use super::zone::Zone;
 use crate::daemon::{Answer, Daemon, Face, IsOpen, Owner, Screen, Wait};
+use crate::niri;
 use crate::warning::warn;
 use crate::wire::{Request, Summon};
 
@@ -52,16 +55,20 @@ struct Summons {
     window: WindowState,
     newest: u32,
     trace: Trace,
+    /// The niri that each summon asks for its output's height.
+    niri: Option<PathBuf>,
 }
 
 impl Host {
     pub fn new(owner: Owner, shared: Shared, zone: Zone, trace: Trace) -> Host {
+        let niri = owner.daemon().vars().niri_socket.clone();
         Host {
             owner: Some(owner),
             summons: Summons {
                 window: WindowState::Closed,
                 newest: 0,
                 trace,
+                niri,
             },
             windows: Vec::new(),
             shared,
@@ -198,7 +205,24 @@ impl Face for WindowFace<'_, '_> {
         );
         trace.event(seq, "toggle_handled_open");
         self.summons.window = WindowState::Opening { seq, screen };
-        self.cx.defer(move |cx| open_summon(cx, &host, trace, seq));
+        let Some(socket) = self.summons.niri.clone() else {
+            self.cx
+                .defer(move |cx| open_summon(cx, &host, trace, seq, None));
+            return;
+        };
+        // niri answers on its event loop, so the question waits on a thread of its own, never on
+        // GPUI's main thread. A thread that does not start drops the sender, and the window opens
+        // with no height.
+        let (answer_to, answer) = oneshot::channel();
+        let _ = thread::Builder::new().spawn(move || {
+            let _ = answer_to.send(niri::focused_height(Some(&socket)));
+        });
+        self.cx
+            .spawn(async move |_, cx| {
+                let height = answer.await.ok().flatten();
+                cx.update(|cx| cx.defer(move |cx| open_summon(cx, &host, trace, seq, height)));
+            })
+            .detach();
     }
 
     fn close(&mut self, _: IsOpen) {
@@ -225,7 +249,9 @@ impl Face for WindowFace<'_, '_> {
     }
 }
 
-fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32) {
+/// Opens summon `seq`'s window, unless another summon or a close has come since, `height` the
+/// logical height of the output that niri says has the focus.
+fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32, height: Option<u32>) {
     let opening = host.read_with(cx, |host, _| match host.summons.window {
         WindowState::Opening {
             seq: opening,
@@ -236,7 +262,7 @@ fn open_summon(cx: &mut App, host: &WeakEntity<Host>, trace: Trace, seq: u32) {
     let Ok(Some(screen)) = opening else {
         return;
     };
-    match super::open_window(cx, host, screen, trace, seq) {
+    match super::open_window(cx, host, screen, trace, seq, height) {
         Ok(handle) => {
             trace.event(seq, "window_opened");
             let _ = host.update(cx, |host, _| {

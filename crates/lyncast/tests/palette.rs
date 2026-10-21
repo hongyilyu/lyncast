@@ -25,8 +25,8 @@ fn every_summon_block_runs_as_the_doc_says() {
         .collect();
     assert_eq!(
         blocks.len(),
-        14,
-        "palette.md holds 14 summon blocks, so a lost block fails"
+        15,
+        "palette.md holds 15 summon blocks, so a lost block fails"
     );
     let trees = Path::new(TREES);
     match fs::remove_dir_all(trees) {
@@ -48,7 +48,8 @@ fn every_summon_block_runs_as_the_doc_says() {
 fn run(fixtures: &[Block], block: &Block, tree: PathBuf) -> Vec<String> {
     let world = World::compositor(fixtures, tree);
     let mut helpers = Helpers::new(&world);
-    let keys = |line: &str| line.starts_with("$ keys ");
+    // A summon asks niri for its output before or after the toggle's reply.
+    let later = |line: &str| line.starts_with("$ keys ") || line == "$ lyncast toggle";
     let failures = session_later(
         &world,
         block,
@@ -58,7 +59,7 @@ fn run(fixtures: &[Block], block: &Block, tree: PathBuf) -> Vec<String> {
                 .or_else(|| shot(&world, line))
                 .or_else(|| helpers.run(line, newest))
         },
-        &keys,
+        &later,
     );
     drop(helpers);
     if failures.is_empty() {

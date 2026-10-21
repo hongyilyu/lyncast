@@ -18,7 +18,7 @@ The host opens and closes windows only from `cx.defer` callbacks, which GPUI run
 
 `on_window_closed` sees every window that closes while GPUI's loop runs, and traces it. When the summon's own window goes without the host closing it, the summon closes too. A compositor closes a window through the same `remove_window` (`src/window.rs:1750-1758`, read in source), but no test here closes one that way yet.
 
-The window is a layer-shell surface of 750 by 480 logical pixels on the Overlay layer, with the keyboard to itself. It is anchored to the top edge, so the compositor centers it, and it never resizes. Its top margin is a third of the space the window leaves on the display GPUI lists first, in whole pixels. GPUI on Wayland has no primary display (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:1256-1258`), and it knows the displays once it has connected, before the first window (`src/linux/wayland/client.rs:1197-1203`), both read in source. The `geometry` block below gives the size and the margins. A test in `crates/lyncast/src/palette/theme.rs` checks the margins the code computes against it, and one in `crates/lyncast/src/palette/tests.rs` checks the window's options for the display of GPUI's test platform.
+The window is a layer-shell surface of 750 by 480 logical pixels on the Overlay layer, with the keyboard to itself. It is anchored to the top edge, so the compositor centers it, and it never resizes. The compositor picks the output: the window names none, since GPUI names an output only for a `display_id` (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:1315-1322`, `src/linux/wayland/window.rs:166-172`), and niri maps a layer surface that names no output on its active output (niri v26.04 `src/handlers/layer_shell.rs:28-32`), the one that `FocusedOutput` reports (`src/ipc/server.rs:421-446`), all read in source. The top margin is a third of the space the window leaves on that output, in whole pixels. Each summon asks niri for `FocusedOutput` with the 200 ms of a question ([launching](launching.md#the-client-sends-one-request-per-connection)), on a thread of its own and not on GPUI's main thread, and the window opens once the answer is in, with the output's logical height. Without `NIRI_SOCKET`, without an answer in time, or with no output or no logical size in the answer, the margin is a third of the space the window leaves on the display GPUI lists first. GPUI on Wayland has no primary display (`src/linux/wayland/client.rs:1256-1258`), and it knows the displays once it has connected, before the first window (`src/linux/wayland/client.rs:1197-1203`), both read in source. The `geometry` block below gives the size and the margins. A test in `crates/lyncast/src/palette/theme.rs` checks the margins the code computes against it, and one in `crates/lyncast/src/palette/tests.rs` checks the window's options for the display of GPUI's test platform.
 
 ## The field searches the root list
 
@@ -2985,6 +2985,7 @@ A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdou
 - `$ keys <key>...` types keys into the compositor with `python3 -I scripts/x11.py <display> focus keys <key>...`, on the X display that `$RUNTIME/display` names. Each key is an X keysym name, such as `f` or `Return`, and `ctrl+v` holds Ctrl while it taps `v`. The script gives the X input focus to anvil's window, sends the keys through XTEST, and returns once the X server has handled them.
 - `$ wait-summon <open|closed>` runs `lyncast status` until it prints that state.
 - `$ stall-stdout` gives the next daemon a stdout that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stdout`. `$ drain-stdout` reads what fills it, and from then on what the daemon writes to stdout goes on to `$RUNTIME/daemon.stdout`.
+- launching.md's `$ fake-niri` and `niri:` lines. A summon starts its question to niri on a thread of its own as the daemon handles the toggle, before the reply is written, so the fake may read it before or after the toggle line returns. A `lyncast toggle` line holds no `niri:` lines, and the question counts on the next line's, which waits for the first frame, as the window opens only once the answer is in.
 - `$ shot <name> [<color>...]` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, in which each `<color>` covers at least 1% of the box, and two reads in a row agree. The colors let a block wait for what the window draws after its first frame, such as an image that loads. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` when every pixel on the box's edge has that color, or `edge mixed`, and `colors` with each color that covers at least 1% of the box, most first. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
 
 anvil reads the keys after `keys` returns, so a `keys` line holds no `record:` lines, and the programs its keys start count on the next line's. That line waits for what the keys do, as `wait-summon closed` waits for the window that a launch closes. Without that focus, anvil gave a GPUI window no key at all, and with it the window turned active at its first key (a GPUI probe under anvil, 2026-10-17). The keys summon block below fails when `x11.py` skips the focus (a deliberate break, 2026-10-17).
@@ -3425,6 +3426,64 @@ $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit
 ```
+
+### The margin comes from niri's focused output
+
+The fake niri says that the focused output is 600 logical pixels tall, so the window sits (600 − 480) / 3 = 40 pixels down, though anvil's display is 800 tall. An answer with no output, one whose output has no logical size, and a niri that stalls past 200 ms leave the margin to GPUI's display, 106 as before, and the window still opens. The window draws the same pixels wherever it sits, so the colors are the screenshot block's above.
+
+```summon
+$ NIRI_SOCKET=$RUNTIME/niri.sock lyncast daemon --trace
+$ fake-niri {"Ok":{"FocusedOutput":{"name":"winit","make":"Smithay","model":"Winit","serial":null,"physical_size":null,"modes":[{"width":1280,"height":800,"refresh_rate":60000,"is_preferred":true}],"current_mode":0,"is_custom_mode":false,"vrr_supported":false,"vrr_enabled":false,"logical":{"x":0,"y":0,"width":1280,"height":600,"scale":1.0,"transform":"Normal"}}}}
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 1
+niri: "FocusedOutput"
+$ shot short-output
+palette at 265,40 750x480
+edge 3a3a3e
+colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast toggle
+closed
+$ wait-trace window_closed 1
+$ fake-niri {"Ok":{"FocusedOutput":null}}
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 2
+niri: "FocusedOutput"
+$ shot no-output
+palette at 265,106 750x480
+edge 3a3a3e
+colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast toggle
+closed
+$ wait-trace window_closed 2
+$ fake-niri {"Ok":{"FocusedOutput":{"name":"winit","make":"Smithay","model":"Winit","serial":null,"physical_size":null,"modes":[],"current_mode":null,"is_custom_mode":false,"vrr_supported":false,"vrr_enabled":false,"logical":null}}}
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 3
+niri: "FocusedOutput"
+$ shot no-logical
+palette at 265,106 750x480
+edge 3a3a3e
+colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast toggle
+closed
+$ wait-trace window_closed 3
+$ fake-niri stall
+$ lyncast toggle
+open
+$ wait-trace frame1_presented 4
+niri: "FocusedOutput"
+$ shot stalled-niri
+palette at 265,106 750x480
+edge 3a3a3e
+colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+```
+
+The reply lines are niri-ipc 26.4.0's own serialization of an `Output`, of which lyncast reads only `logical`'s `height`.
 
 ### A screenshot under anvil shows the clipboard screen
 

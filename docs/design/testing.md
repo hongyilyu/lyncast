@@ -108,7 +108,7 @@ Two cases need the GPUI daemon under anvil, and [palette.md's](palette.md#the-fi
 
 ## A fake niri socket stands in for niri IPC
 
-From plan step 8, `crates/lyncast/tests/common/niri.rs` is the fake: a listener at `$RUNTIME/niri.sock` that reads each request line as niri does, logs it, and answers as a block's `$ fake-niri` line says ([launching](launching.md#the-fixtures)). Tier 1 blocks use it for launches. A daemon line points `NIRI_SOCKET` at it explicitly, and the harness accepts no other value but an empty one.
+From plan step 8, `crates/lyncast/tests/common/niri.rs` is the fake: a listener at `$RUNTIME/niri.sock` that reads each request line as niri does, logs it, and answers as a block's `$ fake-niri` line says ([launching](launching.md#the-fixtures)). Tier 1 blocks use it for launches, and Tier 2 blocks for a clip's Source and the palette's margin. A daemon line points `NIRI_SOCKET` at it explicitly, and the harness accepts no other value but an empty one.
 
 The paragraphs below are the paste spec from notes/07, which no test runs yet. Paste comes after the MVP, with the niri virtual keyboard as its first backend ([decision log](../decisions.md#clipboard-and-paste)). niri IPC takes one JSON request per line on `$NIRI_SOCKET` (notes/03). The fake in notes/07 answers `FocusedWindow` with window 7 (foot), serves `Workspaces` and `Windows`, streams `WindowFocusChanged { id: Some(7) }`, and logs each request.
 

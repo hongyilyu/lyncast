@@ -89,6 +89,16 @@ pub fn focused_app(socket: Option<&Path>) -> Option<String> {
     }
 }
 
+/// The logical height of the output that the niri at `socket` says has the focus, or `None` when
+/// niri gives no answer within [`ASK_WAIT`], when no output has the focus, or when it has no
+/// logical output, as when it is off.
+pub fn focused_height(socket: Option<&Path>) -> Option<u32> {
+    match send(socket?, &Request::FocusedOutput, ASK_WAIT).ok()? {
+        Response::FocusedOutput(output) => Some(output?.logical?.height),
+        _ => None,
+    }
+}
+
 /// Sends one request on a connection of its own and reads its one reply line, all within `wait`.
 fn send(socket: &Path, request: &Request, wait: Duration) -> Result<Response, Failure> {
     let deadline = Instant::now() + wait;
@@ -292,7 +302,8 @@ mod tests {
     /// docs/design/launching.md: a niri whose event loop is stuck accepts no connection, and no
     /// block can fill a backlog of 4,097, so this niri's backlog is as small as it gets. The
     /// test fills it with connects that give up at once, and then an action fails at its
-    /// deadline, where std's connect would wait for good, and a question gives up in under 1 s.
+    /// deadline, where std's connect would wait for good, and each question gives up in under
+    /// 1 s.
     #[test]
     fn a_niri_that_accepts_nothing_fails_at_the_deadline() {
         let dir = scratch();
@@ -306,6 +317,8 @@ mod tests {
         let failed = timed(move || act(Some(&sent), action)).recv_timeout(ACTION_WAIT * 2);
         let asked = socket.clone();
         let window = timed(move || focused_app(Some(&asked))).recv_timeout(ACTION_WAIT * 2);
+        let asked = socket.clone();
+        let output = timed(move || focused_height(Some(&asked))).recv_timeout(ACTION_WAIT * 2);
         fs::remove_dir_all(&dir).unwrap();
         let (failed, _) = failed.expect("the action returned");
         assert_eq!(
@@ -315,5 +328,8 @@ mod tests {
         let (window, took) = window.expect("the question returned");
         assert_eq!(window, None);
         assert!(took < Duration::from_secs(1), "FocusedWindow took {took:?}");
+        let (output, took) = output.expect("the question returned");
+        assert_eq!(output, None);
+        assert!(took < Duration::from_secs(1), "FocusedOutput took {took:?}");
     }
 }

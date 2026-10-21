@@ -58,7 +58,7 @@ fn a_window_opens_and_closes(cx: &mut TestAppContext) {
             .detach();
     });
     let window = cx
-        .update(|cx| cx.open_window(super::options(cx), |_, cx| cx.new(|_| Blank)))
+        .update(|cx| cx.open_window(super::options(cx, None), |_, cx| cx.new(|_| Blank)))
         .expect("the test platform opens a window");
     assert_eq!(cx.windows().len(), 1, "the window is open");
     window
@@ -79,7 +79,7 @@ fn the_window_is_placed_as_the_geometry_block_says(cx: &mut TestAppContext) {
         .expect("window <w>x<h>");
     let (display, options) = cx.update(|cx| {
         let display = cx.displays()[0].bounds().size.height;
-        (display, super::options(cx))
+        (display, super::options(cx, None))
     });
     let top = block.lines[1..]
         .iter()
