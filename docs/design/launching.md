@@ -23,7 +23,7 @@ Each request takes a connection of its own, in `crates/lyncast/src/niri.rs`:
 3. Read one line back.
 4. Close.
 
-One deadline covers the connect, the write, and the read: 2 s for an action, and 200 ms for a question, `FocusedWindow`, which the capture thread asks for a clip's [Source](clipboard-and-paste.md#source-is-the-focused-windows-app-id). The reply line holds at most 1 MiB with its newline. niri reads a request line at a time on its event loop and answers each with one line (`src/ipc/server.rs:187-225`, read in source). Each step can stall:
+One deadline covers the connect, the write, and the read. It is 2 s for an action, and 200 ms for a question, which is `FocusedWindow` for a clip's [Source](clipboard-and-paste.md#source-is-the-focused-windows-app-id) or `FocusedOutput` for the [palette's margin](palette.md#a-summon-opens-one-window). The reply line holds at most 1 MiB with its newline. niri reads a request line at a time on its event loop and answers each with one line (`src/ipc/server.rs:187-225`, read in source). Each step can stall:
 
 - **The read.** A reply that comes one byte every 150 ms passes a timeout of 2 s on each read and takes 2.55 s in all, so only one deadline over the whole exchange fails it at 2 s. niri-ipc's own `Socket::send` sets no timeout (niri-ipc `src/socket.rs:51-61`, read in source), and against a niri that never answered it had not returned after 3 s (measured).
 - **The connect.** niri accepts on its event loop (`src/ipc/server.rs:85-99`, read in source), so a niri whose loop is stuck accepts nothing. A listener's backlog held 4,097 connections, and after them a plain `UnixStream::connect` waited for good, while lyncast's connect, which sets the socket's send timeout first, failed at the deadline (measured). Clients that gave up and closed did not free the backlog (measured).
@@ -42,7 +42,7 @@ A failure prints `lyncast: <reason>` and exits 1, records no visit, and leaves t
 | A line that is not a reply, or no newline in the first 1 MiB | `not run: niri sent a bad reply: <error>` |
 | A reply to another request | `not run: niri sent a bad reply: not an answer to an action` |
 
-niri reads a request before it runs it, so a request whose answer did not come in time may still have run. A question that fails prints nothing, and the clip then has no Source.
+niri reads a request before it runs it, so a request whose answer did not come in time may still have run. A question that fails prints nothing: the clip then has no Source, and the palette takes its margin from GPUI's first display.
 
 ## The daemon builds an app's command on a worker
 
@@ -62,6 +62,7 @@ The dev box has no niri, no seat, and no terminal but `xterm`, so these are unkn
 - **niri's working directory.** niri's children start in niri's, which is `$HOME` when `niri.service` starts it, since the unit sets no `WorkingDirectory` (`resources/niri.service`, read in source), and a user unit without one starts in the user's home (systemd.exec(5) of systemd 252 on the dev box). Whether Hongyi's session starts niri through that unit is for his machine to say. `niri msg action spawn -- sh -c 'pwd > /tmp/cwd1'` should write `$HOME`, and the `Path=` script spawned the same way into `/usr/share` should write `/usr/share`.
 - **Power from a niri scope.** When niri runs as `niri.service`, it puts its children in an `app-niri-*.scope` under `user@.service`, not in the login session, and otherwise they stay in niri's own cgroup (`src/utils/spawning.rs:416-419`, read in source). In a scope, polkit's rule for an active session may not cover `systemctl suspend`, `reboot`, and `poweroff`. `niri msg action spawn -- sh -c 'busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanPowerOff > /tmp/can'` should write `s "yes"`, and the call changes nothing. On the dev box, which has no seat, it gave `challenge` both from a shell and under `systemd-run --user --scope` (measured on 2026-10-21).
 - **Quit's answer.** niri exits with Quit's answer unwritten, as [Log Out](#the-runner-sends-each-program-to-niri) reads in source, so lyncast takes niri's close as Log Out's success. From a terminal of the outer session, `NIRI_SOCKET=<a nested niri's socket> niri msg action quit --skip-confirmation; echo "rc $?"` should close the nested niri and, if niri closes without an answer, print `Error: error communicating with niri` and `rc 1` (inferred from `src/ipc/client.rs:60-111`), where `rc 0` would mean that niri answers. Either way, the close has to come within 2 s, or Log Out fails with `not run: niri did not answer within 2 s`.
+- **The output's question.** A summon waits for niri's `FocusedOutput` before it opens its window. Against the fake niri, `FocusedWindow` took 0.3 ms at the median of 2,000 round trips and one `FocusedOutput` took 0.2 ms (measured on 2026-10-18), and what the question adds to the 50 ms summon on niri is for plan step 9's bench to measure.
 - **Lock Screen.** `loginctl lock-session` only sends logind's `Lock` signal, so nothing locks unless a locker such as `swayidle -w lock swaylock` listens for it. `busctl --system monitor org.freedesktop.login1` in one terminal and `niri msg action spawn -- loginctl lock-session` from another should show the signal, and the locker should show.
 
 ## The fixtures
@@ -567,4 +568,4 @@ stderr: lyncast: not run: no program nope
 exit: 1
 ```
 
-A niri whose loop is stuck accepts no connection, and no block can fill a backlog of 4,097. So `a_niri_that_accepts_nothing_fails_at_the_deadline` in `crates/lyncast/src/niri.rs` listens with a backlog of 0, which holds one connection, fills it, and expects the action to fail with `not run: niri did not answer within 2 s` and the question, whose wait is 200 ms, to give no answer in under 1 s.
+A niri whose loop is stuck accepts no connection, and no block can fill a backlog of 4,097. So `a_niri_that_accepts_nothing_fails_at_the_deadline` in `crates/lyncast/src/niri.rs` listens with a backlog of 0, which holds one connection, fills it, and expects the action to fail with `not run: niri did not answer within 2 s` and each question, `FocusedWindow` and `FocusedOutput`, whose wait is 200 ms, to give no answer in under 1 s.

@@ -2,7 +2,7 @@
 
 lyncast is a small, fast launcher for the [niri](https://github.com/niri-wm/niri) Wayland compositor, written in Rust with GPUI. It is modeled on TinyCast and Raycast.
 
-**Status:** steps 1 to 6 of the [MVP build plan](docs/plan.md), the scaffold, the core shapes, the calculator engine, the app index and ranking, the daemon and the CLI, and the clipboard, are done. `lyncast daemon --headless` runs the daemon, and `lyncast query`, `lyncast toggle`, `lyncast status`, `lyncast clip list`, and `lyncast activate` ask it, so they fail when no daemon is running. `lyncast daemon` without `--headless` opens a palette window on each summon, with the root list, the Actions menu, and the clipboard screen.
+**Status:** steps 1 to 8 of the [MVP build plan](docs/plan.md), the scaffold, the core shapes, the calculator engine, the app index and ranking, the daemon and the CLI, the clipboard, the palette, and launching through niri, are done. `lyncast daemon --headless` runs the daemon, and `lyncast query`, `lyncast toggle`, `lyncast status`, `lyncast clip list`, and `lyncast activate` ask it, so they fail when no daemon is running. `lyncast daemon` without `--headless` opens a palette window on each summon, with the root list, the Actions menu, and the clipboard screen.
 
 ## What the MVP does
 
