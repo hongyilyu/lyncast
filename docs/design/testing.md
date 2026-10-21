@@ -122,7 +122,7 @@ The reviews found three limits, read in source:
 
 ## The bench gate holds the budgets
 
-The limits are in the [Budgets table](../decisions.md#budgets). [notes/05](../research/notes/05-probe-summon-latency.md) measured each one on lavapipe under anvil, as medians:
+The limits are in the [Budgets table](../decisions.md#budgets). `bench/summon.py` measures each one for the lyncast daemon on lavapipe under anvil and judges the run against them. [notes/05](../research/notes/05-probe-summon-latency.md) first measured each one for `bench/probe`, as medians, and the limits came from these:
 
 - **Warm summon.** Time to present, the client's buffer attach and commit, was 44.9 ms, range 44.1 to 48.9, over summons 2 to 20 in 3 processes, run twice.
 - **PSS before the first summon.** 11.9 MiB across 3 processes.
@@ -130,15 +130,223 @@ The limits are in the [Budgets table](../decisions.md#budgets). [notes/05](../re
 - **Growth.** Flat by about cycle 10, then -0.6 to +7 kB per cycle from cycle 21 to 70, across 6 processes. The budget asks for 100 cycles.
 - **Idle CPU.** 0.0% over 10 s while hidden, which is below the 10 ms tick, in 3 runs.
 
-### Run the bench with scripts/bench.sh
+### A run summons the daemon as lyncast toggle does
 
-`scripts/bench.sh` builds `bench/probe`, starts a test environment, selects lavapipe through `VK_DRIVER_FILES`, and runs `bench/summon.py`. Its arguments go to `summon.py`, for example `--procs 1 --cycles 30`. The default is 3 processes of 100 summon cycles, with latency from the first 20 summons, and takes about 6 minutes. `summon.py` prints each budget measurement and writes the raw data to `target/bench/`.
+`summon.py` starts `lyncast daemon --trace` and reads its [PROBE lines](palette.md#--trace-prints-the-benchs-probe-lines). Each open and each close is one connection that carries `{"request":"toggle"}`, the request that `lyncast toggle` sends, and a summon counts from the write of its request. The bench checks each reply, waits for the summon's `window_closed` line after each close, and quits the daemon through `activate cmd:quit`, which must reply `ran cmd:quit` before the daemon exits 0. A wrong reply, a missing PROBE line, or another exit stops the run with exit status 1 before it judges anything. A `lyncast toggle` run for each summon would add the client's own start, about 2.6 ms on an earlier head (step 9's prework, measured), which the budget leaves out.
 
-`bench/probe` is the notes/05 probe without its spawn-per-summon mode. It is its own cargo workspace, with the lockfile that notes/05 ran, so `cargo test` never builds GPUI. Until step 7 it stands in for the palette. Any program that reads the same socket lines and prints the same `PROBE` events can replace it, and the `summon.py` docstring lists both. The bench is not in `scripts/check.sh` yet, because no lyncast commit changes the probe.
+A run measures each process in these steps:
+
+1. 2 s after `app_ready`, it reads the daemon's PSS, and then its CPU over 10 s while it is hidden.
+2. It waits for a quiet box, as [a busy box](#a-busy-box-is-timed-again-then-fails-as-one) says.
+3. It summons and closes the daemon 100 times. Each cycle sends the open, waits for `frame1_done` and 0.4 s more, sends the close, waits for `window_closed` and 0.4 s more, and reads `Pss_Anon` and the number of threads. It also reads the memory while the windows of summons 1 and 20 show.
+4. Each of the first 20 summons is followed by a summon of `bench/probe`, which starts after step 2, runs beside the daemon, and quits after its 20th.
+5. 1 s after cycle 100, it reads the memory again, then the CPU over 10 s.
+
+Before the first process, a run summons each program twice and keeps only the times of those summons. That leaves the Mesa shader cache warm. With it cold, the first summon took 500.6 ms, and `Pss_Anon` was 72.0 MiB after 20 summons, where it was 60.0 MiB once the cache was warm (measured on 2026-10-21, 1 process of 22 cycles each).
+
+### A run's daemons read and write none of the developer's history, ranking, or config
+
+Each daemon gets `PATH` and `HOME` from the caller, with the variables of the GPU driver and its shader cache, `VK_*`, `MESA_*`, `LP_*`, and `XDG_CACHE_HOME`, the compositor's socket as an absolute `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP=niri`, and the [Vulkan directories](#both-programs-draw-with-the-callers-vulkan-drivers) that the caller's loader searches. Nothing else comes from the caller. `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` are directories of its own, which the run removes as it ends. `XDG_DATA_DIRS` holds 300 fixture apps, each with a 48 by 48 PNG icon, which `summon.py` writes the same way on every run. So a run reads and writes none of the developer's history, ranking, or config, and the empty query shows Clipboard History and the first 4 fixture apps with their icons ([ranking](ranking.md#the-empty-query-shows-suggestions-then-commands)). The probe gets the same variables and a runtime directory of its own. The Mesa shader cache stays where the caller keeps it, since a cold one fails both the latency and the memory budget, and an `XDG_CACHE_HOME` set around `scripts/test-env.sh` would also miss the anvil that `scripts/anvil.sh` caches there and build it again.
+
+### Both programs draw with the caller's Vulkan drivers
+
+The Vulkan loader looks for drivers in `vulkan/icd.d` and for implicit layers in `vulkan/implicit_layer.d` under `XDG_CONFIG_HOME`, each entry of `XDG_CONFIG_DIRS`, `/etc`, `XDG_DATA_HOME`, and each entry of `XDG_DATA_DIRS`, in that order, each variable with its default (vulkan-loader 1.3.296 with `VK_LOADER_DEBUG`, measured). The daemon's own directories hide both from that search. With `VK_DRIVER_FILES` unset, the daemon found no driver, so GPUI drew with GL, and with lavapipe's `VK_DRIVER_FILES` it loaded no `VK_LAYER_MESA_device_select`, which the probe loaded (measured on 2026-10-21). So `summon.py` lists those directories as the caller's variables name them and gives both programs the ones that exist: the driver directories as `VK_DRIVER_FILES`, unless the caller set it or `VK_ICD_FILENAMES`, and the layer directories as `VK_IMPLICIT_LAYER_PATH`, unless the caller set it. Each variable replaces the loader's own search.
+
+Both programs print the log lines of GPUI's renderer, which name the adapter it picked, the daemon among its PROBE lines and the probe on its stdout. After the first timed summon of a process, the run reads both adapters and the `libVkLayer_*` libraries that each program maps. It stops with exit status 1 unless both programs drew with one adapter whose line ends in `(Vulkan)` and map the same layers, and it prints them as `== adapter of both programs:` and `== Vulkan layers of both programs:`.
+
+### Each budget compares one statistic
+
+| Budget | What the run compares with the limit |
+|---|---|
+| Warm summon | The median `frame1_presented` of summons 2 to 20, pooled over the processes. Summon 1 opens the first window of its process. |
+| PSS before the first summon | The median over the processes of PSS 2 s after `app_ready`. |
+| `Pss_Anon` after summons | For each process, the larger of `Pss_Anon` while summon 20 shows and after cycle 100, and then the median over the processes. |
+| Growth | The largest least-squares slope of `Pss_Anon` over cycles 21 to 100 of any process, and no process with more threads at cycle 100 than at cycle 21. |
+| Idle CPU | The largest CPU share of any process in its two 10 s windows while hidden, from the nanoseconds of the process's CPU clock, which counts the threads that have ended too. |
+
+Ticks cannot judge idle CPU. One 10 ms tick in 10 s is exactly 0.1%, so a budget of under 0.1% would pass only on 0 ticks (notes/05). The run reads the process's CPU clock instead, the one that `clock_getcpuclockid(3)` gives for its pid, which counts the nanoseconds of every thread that the process has run, those that have ended too. A sum of `/proc/<pid>/task/<tid>/schedstat` over the threads would count only those still there at each read, and the daemon serves each connection and runs each task on a thread of its own that ends. With `cmd:reload-apps` activated every 2 s in each idle window, 4 times a window, the clock read 0.443% and failed the budget, while that sum read 0.021% and passed, and the ticks were 3 to 5 (deliberate breaks, 1 process of 22 cycles each, 2026-10-21). A run prints the ticks beside the clock.
+
+PSS cannot judge the memory after summons. A shared library such as libLLVM counts by how many processes map it, and PSS after 20 summons moved from 92.8 to 106.7 MiB between back-to-back runs of the probe while `Pss_Anon` stayed within 1 MiB (step 9's prework, measured).
+
+`Pss_Anon` climbs for about 60 cycles before it settles, so a slope over 100 cycles measures the settling too. In the head's runs of 2026-10-21, it rose 0.2 to 1.6 MiB from cycle 21 to cycle 100, partly in rises of up to 0.7 MiB within 3 cycles, so the slope over those cycles was 6.2 to 19.5 kB per cycle in 7 processes. An earlier build of the step, with the same daemon and a bench that gave it no Vulkan layer, gave 8.5 to 26.2 kB per cycle in 16 processes, and one process of 400 cycles of it grew 20.3 kB per cycle over cycles 21 to 100, 2.5 over cycles 101 to 400, and 1.3 over cycles 301 to 400, with 176 threads throughout. The limit of 40 kB per cycle sits above that settling, and a leak of 4 MB a summon, as look's was ([gpui-on-linux](../research/gpui-on-linux.md)), would give about 4,000.
+
+### A busy box is timed again, then fails as one
+
+lavapipe draws on every CPU, so other work on the box slows a summon. On the dev box, with 32 CPUs, the daemon took 45.2 to 45.8 ms process by process at load averages of 0.8 or less, and the probe beside it 44.0 to 44.4 ms. The probe alone took 43.3 to 43.5 ms at load averages under 1 and 45.5 to 46.1 ms at 2 to 8, and while a release build ran on every CPU, its median held at 45.7 ms while a tenth of its summons took 85 to 100 ms (each measured on 2026-10-21). With the box busy with other agents' work, at load averages of 23 to 55, the probe alone took 49 to 82 ms (step 9's brief). So before the timed summons, a run waits until fewer than a quarter of the CPUs were busy over a second, for 10 minutes at most, and it times the probe beside the daemon in the same cycles. A process whose summons took more than 50 ms while the probe's took more than 46.9 ms, 2 ms over notes/05's probe, timed a busy box, so the run measures it again, twice at most. A box that is still busy then fails the warm summon as `a busy box`. It never passes on one. With `LP_NUM_THREADS=1`, which slows lavapipe for both programs as a busy box does, the daemon took 98.0 ms and the probe 98.2 ms, the run measured the process three times, and the warm summon failed as `a busy box` (measured on 2026-10-21).
+
+### scripts/bench.sh runs the bench
+
+`scripts/bench.sh` builds the release `lyncast` and `bench/probe`, runs `sync` on both, starts a test environment, selects lavapipe through `VK_DRIVER_FILES` unless that is set, and runs `bench/summon.py` on them. Its arguments go to `summon.py`, for example `--procs 1 --cycles 30`. `summon.py` prints each measurement and each budget's verdict, exits 1 when a budget fails, and writes the raw data and the programs' stderr to `target/bench/`, or to `bench/` in `CARGO_TARGET_DIR`.
+
+```sh
+scripts/bench.sh          # 3 processes of 100 cycles, about 7 minutes
+scripts/bench.sh --real   # in a niri session, on its GPU, judging nothing
+```
+
+`python3 -I bench/summon.py --judge FILE` judges the raw data of a run again. The `judge` blocks below each judge a `run` block, the raw data of a run cut down to what the verdicts read, and `crates/lyncast/tests/bench.rs` checks that they print what the blocks say. A run that passes every budget exits 0:
+
+```run quiet.json
+{"args": {"warm": 3, "cycles": 6}, "runs": [
+ {"summons": [{"frame1_presented": 99.6}, {"frame1_presented": 45.9}, {"frame1_presented": 45.1}],
+  "probe_summons": [{"frame1_presented": 99.9}, {"frame1_presented": 44.4}, {"frame1_presented": 44.0}],
+  "mem": {"hidden_before": {"Pss": 17612}, "shown_3": {"Pss_Anon": 59520}, "hidden_after_6": {"Pss_Anon": 61168}},
+  "drift": [{"cycle": 1, "Pss_Anon": 45288, "threads": 176}, {"cycle": 2, "Pss_Anon": 50944, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 59408, "threads": 176}, {"cycle": 4, "Pss_Anon": 61100, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 61132, "threads": 176}, {"cycle": 6, "Pss_Anon": 61168, "threads": 176}],
+  "idle_before": {"sched_pct": 0.0013}, "idle_after": {"sched_pct": 0.0012}}]}
+```
+
+```judge
+$ summon.py --judge quiet.json
+pass warm summon: 45.5 ms, probe 44.2 ms (50 ms or less)
+pass PSS before the first summon: 17.2 MiB (18 MiB or less)
+pass Pss_Anon after summons: 59.7 MiB (62 MiB or less)
+pass growth over cycles 4 to 6: 34.0 kB per cycle at most, no new threads (40 kB per cycle or less)
+pass idle CPU: 0.001% at most (under 0.1%)
+summon.py: every budget passed
+```
+
+A run in which every budget fails prints each one and exits 1. Its two processes pool their summons for the warm summon and give the medians of the memory budgets, and the first one has the largest slope, a new thread, and the largest idle share:
+
+```run slow.json
+{"args": {"warm": 3, "cycles": 6}, "runs": [
+ {"summons": [{"frame1_presented": 99.0}, {"frame1_presented": 52.0}, {"frame1_presented": 53.0}],
+  "probe_summons": [{"frame1_presented": 98.0}, {"frame1_presented": 44.0}, {"frame1_presented": 44.4}],
+  "mem": {"hidden_before": {"Pss": 19456}, "shown_3": {"Pss_Anon": 64000}, "hidden_after_6": {"Pss_Anon": 65000}},
+  "drift": [{"cycle": 1, "Pss_Anon": 50000, "threads": 176}, {"cycle": 2, "Pss_Anon": 55000, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 58000, "threads": 176}, {"cycle": 4, "Pss_Anon": 60000, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 60050, "threads": 176}, {"cycle": 6, "Pss_Anon": 60100, "threads": 177}],
+  "idle_before": {"sched_pct": 0.0013}, "idle_after": {"sched_pct": 0.12}},
+ {"summons": [{"frame1_presented": 97.0}, {"frame1_presented": 51.0}, {"frame1_presented": 52.6}],
+  "probe_summons": [{"frame1_presented": 96.0}, {"frame1_presented": 44.2}, {"frame1_presented": 44.6}],
+  "mem": {"hidden_before": {"Pss": 19661}, "shown_3": {"Pss_Anon": 64512}, "hidden_after_6": {"Pss_Anon": 64000}},
+  "drift": [{"cycle": 1, "Pss_Anon": 50000, "threads": 176}, {"cycle": 2, "Pss_Anon": 55000, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 58000, "threads": 176}, {"cycle": 4, "Pss_Anon": 60000, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 60030, "threads": 176}, {"cycle": 6, "Pss_Anon": 60060, "threads": 176}],
+  "idle_before": {"sched_pct": 0.002}, "idle_after": {"sched_pct": 0.003}}]}
+```
+
+```judge
+$ summon.py --judge slow.json
+fail warm summon: 52.3 ms, probe 44.3 ms (50 ms or less)
+fail PSS before the first summon: 19.1 MiB (18 MiB or less)
+fail Pss_Anon after summons: 63.2 MiB (62 MiB or less)
+fail growth over cycles 4 to 6: 50.0 kB per cycle at most, threads 176 to 177 (40 kB per cycle or less)
+fail idle CPU: 0.120% at most (under 0.1%)
+summon.py: 5 of 5 budgets failed
+exit: 1
+```
+
+A process that gains a thread fails growth, though its slope passes:
+
+```run thread.json
+{"args": {"warm": 3, "cycles": 6}, "runs": [
+ {"summons": [{"frame1_presented": 99.6}, {"frame1_presented": 45.9}, {"frame1_presented": 45.1}],
+  "probe_summons": [{"frame1_presented": 99.9}, {"frame1_presented": 44.4}, {"frame1_presented": 44.0}],
+  "mem": {"hidden_before": {"Pss": 17612}, "shown_3": {"Pss_Anon": 59520}, "hidden_after_6": {"Pss_Anon": 61168}},
+  "drift": [{"cycle": 1, "Pss_Anon": 45288, "threads": 176}, {"cycle": 2, "Pss_Anon": 50944, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 59408, "threads": 176}, {"cycle": 4, "Pss_Anon": 61100, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 61132, "threads": 176}, {"cycle": 6, "Pss_Anon": 61168, "threads": 177}],
+  "idle_before": {"sched_pct": 0.0013}, "idle_after": {"sched_pct": 0.0012}}]}
+```
+
+```judge
+$ summon.py --judge thread.json
+pass warm summon: 45.5 ms, probe 44.2 ms (50 ms or less)
+pass PSS before the first summon: 17.2 MiB (18 MiB or less)
+pass Pss_Anon after summons: 59.7 MiB (62 MiB or less)
+fail growth over cycles 4 to 6: 34.0 kB per cycle at most, threads 176 to 177 (40 kB per cycle or less)
+pass idle CPU: 0.001% at most (under 0.1%)
+summon.py: 1 of 5 budgets failed
+exit: 1
+```
+
+A process whose CPU share was over 0.1% only in the 10 s before its first summon fails idle CPU:
+
+```run idle.json
+{"args": {"warm": 3, "cycles": 6}, "runs": [
+ {"summons": [{"frame1_presented": 99.6}, {"frame1_presented": 45.9}, {"frame1_presented": 45.1}],
+  "probe_summons": [{"frame1_presented": 99.9}, {"frame1_presented": 44.4}, {"frame1_presented": 44.0}],
+  "mem": {"hidden_before": {"Pss": 17612}, "shown_3": {"Pss_Anon": 59520}, "hidden_after_6": {"Pss_Anon": 61168}},
+  "drift": [{"cycle": 1, "Pss_Anon": 45288, "threads": 176}, {"cycle": 2, "Pss_Anon": 50944, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 59408, "threads": 176}, {"cycle": 4, "Pss_Anon": 61100, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 61132, "threads": 176}, {"cycle": 6, "Pss_Anon": 61168, "threads": 176}],
+  "idle_before": {"sched_pct": 0.12}, "idle_after": {"sched_pct": 0.0012}}]}
+```
+
+```judge
+$ summon.py --judge idle.json
+pass warm summon: 45.5 ms, probe 44.2 ms (50 ms or less)
+pass PSS before the first summon: 17.2 MiB (18 MiB or less)
+pass Pss_Anon after summons: 59.7 MiB (62 MiB or less)
+pass growth over cycles 4 to 6: 34.0 kB per cycle at most, no new threads (40 kB per cycle or less)
+fail idle CPU: 0.120% at most (under 0.1%)
+summon.py: 1 of 5 budgets failed
+exit: 1
+```
+
+A daemon that missed 50 ms while the probe beside it took more than 46.9 ms timed a busy box, which fails the warm summon as one:
+
+```run busy.json
+{"args": {"warm": 3, "cycles": 6}, "runs": [
+ {"summons": [{"frame1_presented": 99.0}, {"frame1_presented": 52.1}, {"frame1_presented": 52.5}],
+  "probe_summons": [{"frame1_presented": 99.0}, {"frame1_presented": 48.0}, {"frame1_presented": 48.2}],
+  "mem": {"hidden_before": {"Pss": 17612}, "shown_3": {"Pss_Anon": 59520}, "hidden_after_6": {"Pss_Anon": 61168}},
+  "drift": [{"cycle": 1, "Pss_Anon": 45288, "threads": 176}, {"cycle": 2, "Pss_Anon": 50944, "threads": 176},
+            {"cycle": 3, "Pss_Anon": 59408, "threads": 176}, {"cycle": 4, "Pss_Anon": 61100, "threads": 176},
+            {"cycle": 5, "Pss_Anon": 61132, "threads": 176}, {"cycle": 6, "Pss_Anon": 61168, "threads": 176}],
+  "idle_before": {"sched_pct": 0.0013}, "idle_after": {"sched_pct": 0.0012}}]}
+```
+
+```judge
+$ summon.py --judge busy.json
+fail warm summon: 52.3 ms, probe 48.1 ms, a busy box (50 ms or less)
+pass PSS before the first summon: 17.2 MiB (18 MiB or less)
+pass Pss_Anon after summons: 59.7 MiB (62 MiB or less)
+pass growth over cycles 4 to 6: 34.0 kB per cycle at most, no new threads (40 kB per cycle or less)
+pass idle CPU: 0.001% at most (under 0.1%)
+summon.py: 1 of 5 budgets failed
+exit: 1
+```
+
+`bench/probe` is the notes/05 probe without its spawn-per-summon mode. It is its own cargo workspace, with the lockfile that notes/05 ran, so `cargo test` never builds GPUI. It draws an 800 by 500 window of 1,000 text rows in GPUI and nothing of lyncast, so it is the floor that GPUI and lavapipe set on the same box at the same time.
+
+### The real run on Hongyi's niri machine
+
+`scripts/bench.sh --real` runs the full bench in the niri session it starts in, on the machine's own GPU, and judges nothing, since real numbers are recorded and not gated. Its daemons also get `NIRI_SOCKET`, so each summon asks niri for its output as an installed daemon does, and `DBUS_SESSION_BUS_ADDRESS`, so GPUI reads the desktop portal. The rest is as under anvil, and the run's history, ranking, and config go in directories that it removes.
+
+`--real` is a mode, so it must be the first argument, and the mode needs `NIRI_SOCKET` and `WAYLAND_DISPLAY`. `summon.py --real` needs `NIRI_SOCKET` too, which [the test environment](#tier-2-runs-anvil-inside-xvfb) unsets, so no run under anvil is recorded as real. Each refusal exits 2, as `crates/lyncast/tests/bench.rs` checks:
+
+```cli
+$ scripts/bench.sh --real 2>&1
+bench.sh: --real runs inside niri, but NIRI_SOCKET or WAYLAND_DISPLAY is not set
+exit: 2
+$ NIRI_SOCKET=/run/niri.sock WAYLAND_DISPLAY=wayland-1 scripts/bench.sh --procs 1 --real 2>&1
+bench.sh: --real must be the first argument
+exit: 2
+$ WAYLAND_DISPLAY=wayland-1 python3 -I bench/summon.py lyncast probe --real 2>&1
+summon.py: --real runs inside niri, but NIRI_SOCKET is not set
+exit: 2
+```
+
+1. Check out the commit to measure on the AMD machine, with Rust from `rustup`, Python 3, Mesa's radv, and the packages that GPUI's build asks for. Log in to niri.
+2. In a terminal inside niri, run `unset VK_DRIVER_FILES VK_ICD_FILENAMES`, so both programs get the drivers that the Vulkan loader finds, radv among them.
+3. Leave the machine idle, and touch neither the keyboard nor the mouse until the run ends. It opens 364 windows that take the keyboard, over about 7 minutes. Copy nothing either: the daemon's capture thread reads the clipboard while it runs.
+4. Run `scripts/bench.sh --real 2>&1 | tee bench-real.log`. The `== adapter of both programs:` line must name the AMD GPU, not llvmpipe, and end in `(Vulkan)`.
+5. Send back `bench-real.log`, the JSON that its `== raw data:` line names, and what this prints, with `vulkaninfo` from the Vulkan tools:
+
+```sh
+uname -r; niri --version; grep -m1 'model name' /proc/cpuinfo; nproc
+vulkaninfo --summary | sed -n '/^Devices:/,$p'; niri msg outputs
+```
+
+A run that stops with an error writes no JSON. Send the newest `target/bench/summon-real-*.stderr.log` in its place.
+
+The log and those lines go verbatim into `docs/research/notes/13-real-hardware-bench.md`. The decision log's Budgets section then gets one line with the warm summon and the two memory budgets of that run, linked to the note.
 
 ### Private memory is Pss_Anon because binary pages can count as dirty
 
-The probe's binary sat on tmpfs in notes/05, so its pages, about 10 MiB, or 17 MiB after a summon, counted as Private_Dirty. A binary on disk does the same until the kernel writes its pages back. On xfs, a fresh copy of the probe showed 9.6 MiB of Private_Dirty right after the write and 0.9 MiB after `sync`, and its PSS stayed 9.6 MiB (measured). `scripts/bench.sh` therefore runs `sync` on the binary before it measures. notes/05 uses `Pss_Anon` as the real cost, and the decision log's 57 MiB is that column. PSS still counts the binary, which is 9.8 of the 11.9 MiB before the first summon.
+The probe's binary sat on tmpfs in notes/05, so its pages, about 10 MiB, or 17 MiB after a summon, counted as Private_Dirty. A binary on disk does the same until the kernel writes its pages back. On xfs, a fresh copy of the probe showed 9.6 MiB of Private_Dirty right after the write and 0.9 MiB after `sync`, and its PSS stayed 9.6 MiB (measured). `scripts/bench.sh` therefore runs `sync` on the binary before it measures. notes/05 uses `Pss_Anon` as the real cost, and its probe's 57.3 MiB, from which the decision log's first limit came, is that column. PSS still counts the binary, which is 9.8 of the 11.9 MiB before the first summon.
 
 ### Lavapipe numbers catch regressions but are not absolute
 
@@ -149,4 +357,4 @@ Runs repeat closely, with a rerun median of 45.3 ms and a memory spread of 0.6 M
 - anvil sent frame-done 2.2 ms after present (measured). niri shows a frame at the next vblank, up to about 16.7 ms at 60 Hz (inferred).
 - The 45 ms needs a warm Mesa shader cache. With the cache off, a warm summon took 424.5 ms (measured).
 
-Structural results, such as no drift per cycle and near-zero idle CPU, should carry over (notes/05). Real numbers come from Hongyi's niri machine.
+notes/05's probe showed no drift per cycle and near-zero idle CPU, and such structural results should carry over (notes/05). The daemon's `Pss_Anon` climbs for about 60 cycles on lavapipe before it settles, as [the growth statistic](#each-budget-compares-one-statistic) says. Real numbers come from Hongyi's niri machine.

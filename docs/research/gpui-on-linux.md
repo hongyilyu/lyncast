@@ -115,7 +115,7 @@ Memory is in MiB, median of 3 processes:
 
 notes/05 takes the Anon column as the real cost, because PSS counts the binary on tmpfs.
 
-look's reported leak of about 4 MB per summon ([notes/01](notes/01-landscape.md)) did not reproduce. Memory plateaus by about cycle 10, and from cycle 21 to 70 the slope was -0.6 to +7 kB per cycle across 6 processes. Threads go from 40 to 172 at the first summon and stay flat. Idle CPU while hidden was under 0.1%. The [Budgets](../decisions.md#budgets) table's dev-box column matches these runs.
+look's reported leak of about 4 MB per summon ([notes/01](notes/01-landscape.md)) did not reproduce. Memory plateaus by about cycle 10, and from cycle 21 to 70 the slope was -0.6 to +7 kB per cycle across 6 processes. Threads go from 40 to 172 at the first summon and stay flat. Idle CPU while hidden was under 0.1%. The [Budgets](../decisions.md#budgets) table's first limits came from these runs.
 
 ## What transfers to a real GPU
 
