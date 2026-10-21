@@ -245,13 +245,36 @@ impl Screen {
         }
         let (width, height) = (right + 1 - left, bottom + 1 - top);
         let inside = || (top..=bottom).flat_map(move |y| (left..=right).map(move |x| (x, y)));
-        let edge: HashSet<u32> = inside()
-            .filter(|&(x, y)| x == left || x == right || y == top || y == bottom)
-            .map(|(x, y)| self.at(x, y))
-            .collect();
-        let edge = match edge.into_iter().collect::<Vec<_>>()[..] {
-            [color] => format!("{color:06x}"),
-            _ => "mixed".to_owned(),
+        let sides: [Vec<u32>; 4] = [
+            (left..=right).map(|x| self.at(x, top)).collect(),
+            (left..=right).map(|x| self.at(x, bottom)).collect(),
+            (top..=bottom).map(|y| self.at(left, y)).collect(),
+            (top..=bottom).map(|y| self.at(right, y)).collect(),
+        ];
+        let (edge, cut) = edge_and_cut(&sides);
+        let corners = match cut {
+            Some(cut) => {
+                let squares = [
+                    (left, top),
+                    (right + 1 - cut, top),
+                    (left, bottom + 1 - cut),
+                    (right + 1 - cut, bottom + 1 - cut),
+                ];
+                let clear: HashSet<usize> = squares
+                    .iter()
+                    .map(|&(x, y)| {
+                        (y..y + cut)
+                            .flat_map(|y| (x..x + cut).map(move |x| (x, y)))
+                            .filter(|&(x, y)| self.at(x, y) == background)
+                            .count()
+                    })
+                    .collect();
+                match clear.into_iter().collect::<Vec<_>>()[..] {
+                    [clear] => format!("{cut} clear {clear}"),
+                    _ => format!("{cut} clear mixed"),
+                }
+            }
+            None => "mixed".to_owned(),
         };
         let mut counts: HashMap<u32, usize> = HashMap::new();
         for (x, y) in inside() {
@@ -267,7 +290,7 @@ impl Screen {
             .map(|(color, _)| format!("{color:06x}"))
             .collect();
         Some(format!(
-            "palette at {left},{top} {width}x{height}\nedge {edge}\ncolors {}\n",
+            "palette at {left},{top} {width}x{height}\nedge {edge}\ncorners {corners}\ncolors {}\n",
             colors.join(" ")
         ))
     }
@@ -285,6 +308,37 @@ impl Screen {
         let height = u32::try_from(self.height).expect("an XWD height is 32 bits");
         RgbImage::from_raw(width, height, bytes).expect("a buffer the screen's size")
     }
+}
+
+/// The edge's color and the corners' cut, from the box's sides, each read from one corner to the
+/// other. The edge's color is the one at the middle of the first side, and a corner's cut is the
+/// count of pixels before that color from the end of a side. The cut is `None` unless it is the
+/// same at all eight ends, and the edge is `mixed` unless every pixel between the cuts has the
+/// color.
+fn edge_and_cut(sides: &[Vec<u32>]) -> (String, Option<usize>) {
+    let color = sides[0][sides[0].len() / 2];
+    let cut = |pixels: &mut dyn Iterator<Item = &u32>| {
+        pixels.take_while(|&&pixel| pixel != color).count()
+    };
+    let cuts: Vec<(usize, usize)> = sides
+        .iter()
+        .map(|side| (cut(&mut side.iter()), cut(&mut side.iter().rev())))
+        .collect();
+    let whole = sides.iter().zip(&cuts).all(|(side, &(start, end))| {
+        side.get(start..side.len() - end)
+            .is_some_and(|between| between.iter().all(|&pixel| pixel == color))
+    });
+    let ends: HashSet<usize> = cuts.iter().flat_map(|&(start, end)| [start, end]).collect();
+    let edge = if whole {
+        format!("{color:06x}")
+    } else {
+        "mixed".to_owned()
+    };
+    let cut = match ends.into_iter().collect::<Vec<_>>()[..] {
+        [cut] => Some(cut),
+        _ => None,
+    };
+    (edge, cut)
 }
 
 #[test]

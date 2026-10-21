@@ -20,6 +20,12 @@ The host opens and closes windows only from `cx.defer` callbacks, which GPUI run
 
 The window is a layer-shell surface of 750 by 480 logical pixels on the Overlay layer, with the keyboard to itself. It is anchored to the top edge, so the compositor centers it, and it never resizes. The compositor picks the output: the window names none, since GPUI names an output only for a `display_id` (`gpui-pre-linux` 0.3.9 `src/linux/wayland/client.rs:1315-1322`, `src/linux/wayland/window.rs:166-172`), and niri maps a layer surface that names no output on its active output (niri v26.04 `src/handlers/layer_shell.rs:28-32`), the one that `FocusedOutput` reports (`src/ipc/server.rs:421-446`), all read in source. The top margin is a third of the space the window leaves on that output, in whole pixels. Each summon asks niri for `FocusedOutput` with the 200 ms of a question ([launching](launching.md#the-client-sends-one-request-per-connection)), on a thread of its own and not on GPUI's main thread, and the window opens once the answer is in, with the output's logical height. Without `NIRI_SOCKET`, without an answer in time, or with no output or no logical size in the answer, the margin is a third of the space the window leaves on the display GPUI lists first. GPUI on Wayland has no primary display (`src/linux/wayland/client.rs:1256-1258`), and it knows the displays once it has connected, before the first window (`src/linux/wayland/client.rs:1197-1203`), both read in source. The `geometry` block below gives the size and the margins. A test in `crates/lyncast/src/palette/theme.rs` checks the margins the code computes against it, and one in `crates/lyncast/src/palette/tests.rs` checks the window's options for the display of GPUI's test platform.
 
+## The window lets niri's blur through
+
+The root paints `theme::BACKGROUND`, the dark gray `1e1e20` at 90% alpha, with corners of `theme::RADIUS`, 12 logical pixels, so the blur that niri's layer rule draws behind the window shows through it ([decision log](../decisions.md#install)). The rule finds the window by its layer-shell namespace, `lyncast`. The selected row paints white at 7%, so it is lighter than whatever the background shows. An opaque selected row of `2e2e33` read one level from the background in front of anvil's light backdrop, where the background reads `2f2f34`, so no row looked selected (a screenshot under anvil, 2026-10-21). The [screenshot blocks](#a-screenshot-under-anvil-shows-the-palette) check the corners, the background, and the selected row under anvil, which draws no blur.
+
+The window asks GPUI for `WindowBackgroundAppearance::Transparent`, so GPUI draws its text with grayscale antialiasing and not with subpixel antialiasing (`gpui-pre` 0.3.9 `src/window.rs:4899-4902`, read in source), whose color fringes assume an opaque background. Without the option, the list in the screenshot below, the 748 by 386 pixels between the field and the footer, drew 6,866 pixels whose color channels differed by more than 8, and with it none (screenshots under anvil, 2026-10-21). The surface has an alpha channel and no opaque region either way. A layer surface has no decoration object, so GPUI falls back to client decorations, and it counts a window with client decorations as transparent (`gpui-pre-linux` 0.3.9 `src/linux/wayland/window.rs:390-396, 646-649, 2184-2191`, read in source). `the_window_is_placed_as_the_geometry_block_says` checks the option.
+
 ## The field searches the root list
 
 The window holds the field at the top, the list under it, and the footer at the bottom. The theme is dark, and the text is DejaVu Sans. Each summon starts with an empty field and the root list of an empty query. The empty field shows the placeholder `Search for apps and commands`. Each change to the field's text asks the daemon for the root list of the new text, through `Host::ask` on GPUI's main thread, and the list shows the answer. The list draws each section's header, then the section's rows, each with its kind on the right. The calculator's card comes first and has no header. It shows the expression and its badge, an arrow, and the answer and its words.
@@ -2994,7 +3000,7 @@ A `summon` block's `lyncast daemon` line has no `--headless`. Its daemon's stdou
 - `$ wait-summon <open|closed>` runs `lyncast status` until it prints that state.
 - `$ stall-stdout` gives the next daemon a stdout that does not drain: a pipe that the test fills before the daemon starts, in place of `$RUNTIME/daemon.stdout`. `$ drain-stdout` reads what fills it, and from then on what the daemon writes to stdout goes on to `$RUNTIME/daemon.stdout`.
 - launching.md's `$ fake-niri` and `niri:` lines. A summon starts its question to niri on a thread of its own as the daemon handles the toggle, before the reply is written, so the fake may read it before or after the toggle line returns. A `lyncast toggle` line holds no `niri:` lines, and the question counts on the next line's, which waits for the first frame, as the window opens only once the answer is in.
-- `$ shot <name> [<color>...]` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, in which each `<color>` covers at least 1% of the box, and two reads in a row agree. The colors let a block wait for what the window draws after its first frame, such as an image that loads. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` when every pixel on the box's edge has that color, or `edge mixed`, and `colors` with each color that covers at least 1% of the box, most first. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
+- `$ shot <name> [<color>...]` reads the screen, which Xvfb keeps in `$RUNTIME/Xvfb_screen0`, until it shows a box of pixels that differ from the top-left pixel, the compositor's background, in which each `<color>` covers at least 1% of the box, and two reads in a row agree. The colors let a block wait for what the window draws after its first frame, such as an image that loads. It prints `palette at <x>,<y> <w>x<h>` for the box, `edge <color>` for its edge, `corners <n> clear <m>` for its corners, and `colors` with each color that covers at least 1% of the box, most first. The edge's color is the one at the middle of the box's top side. `<n>` counts the pixels at each end of each side before that color, the ones a rounded corner cuts off, and `<m>` counts the pixels of the compositor's background in the square of `<n>` by `<n>` pixels at each corner of the box. It prints `corners mixed` unless the cut is the same at all eight ends, `clear mixed` unless the count is the same in all four squares, and `edge mixed` unless every pixel of the sides between the cut ones has the edge's color. A color is six hex digits. It writes the screen to `target/tmp/palette-shots/<block line>-<name>.png`.
 
 anvil reads the keys after `keys` returns, so a `keys` line holds no `record:` lines, and the programs its keys start count on the next line's. That line waits for what the keys do, as `wait-summon closed` waits for the window that a launch closes. Without that focus, anvil gave a GPUI window no key at all, and with it the window turned active at its first key (a GPUI probe under anvil, 2026-10-17). The keys summon block below fails when `x11.py` skips the focus (a deliberate break, 2026-10-17).
 
@@ -3439,7 +3445,7 @@ nothing =>
 
 ### A screenshot under anvil shows the palette
 
-The window shows at the place the `geometry` block gives for anvil's 1280 by 800 output: (1280 − 750) / 2 = 265 from the left, and (800 − 480) / 3, in whole pixels, 106 from the top. Its edge is the border color. The background covers most of it, then the selected row, then the letter squares of the rows with no icon and the footer's keys, then the borders. The block checks no text pixels, which change with the fonts a machine has.
+The window shows at the place the `geometry` block gives for anvil's 1280 by 800 output: (1280 − 750) / 2 = 265 from the left, and (800 − 480) / 3, in whole pixels, 106 from the top. Its corners cut 12 pixels, `theme::RADIUS`, from each end of each side, and the rest of its edge is the border color. Each corner's square of 12 by 12 pixels shows the compositor's background in 23 of them, the pixels that lie wholly outside a circle of radius 12 about the square's inner corner, so nothing paints outside the rounded corner, where niri would show no blur. anvil's backdrop, `cccce6`, shows through the background, which reads `2f2f34` where an opaque one would read `1e1e20`. The background covers most of the box, then the selected row, white at 7% over it, then the letter squares of the rows with no icon and the footer's keys, then the borders. The block checks no text pixels, which change with the fonts a machine has.
 
 ```summon
 $ lyncast daemon --trace
@@ -3449,7 +3455,8 @@ $ wait-trace frame1_presented 1
 $ shot palette
 palette at 265,106 750x480
 edge 3a3a3e
-colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3d3d42 2a2a2e 3a3a3e
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit
@@ -3469,7 +3476,8 @@ niri: "FocusedOutput"
 $ shot short-output
 palette at 265,40 750x480
 edge 3a3a3e
-colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3d3d42 2a2a2e 3a3a3e
 $ lyncast toggle
 closed
 $ wait-trace window_closed 1
@@ -3481,7 +3489,8 @@ niri: "FocusedOutput"
 $ shot no-output
 palette at 265,106 750x480
 edge 3a3a3e
-colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3d3d42 2a2a2e 3a3a3e
 $ lyncast toggle
 closed
 $ wait-trace window_closed 2
@@ -3493,7 +3502,8 @@ niri: "FocusedOutput"
 $ shot no-logical
 palette at 265,106 750x480
 edge 3a3a3e
-colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3d3d42 2a2a2e 3a3a3e
 $ lyncast toggle
 closed
 $ wait-trace window_closed 3
@@ -3505,7 +3515,8 @@ niri: "FocusedOutput"
 $ shot stalled-niri
 palette at 265,106 750x480
 edge 3a3a3e
-colors 1e1e20 2e2e33 2a2a2e 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3d3d42 2a2a2e 3a3a3e
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit
@@ -3530,7 +3541,8 @@ $ wait-trace frame1_presented 1
 $ shot clipboard 3c8c6e
 palette at 265,106 750x480
 edge 3a3a3e
-colors 1e1e20 3c8c6e 2e2e33 3a3a3e
+corners 12 clear 23
+colors 2f2f34 3c8c6e 3d3d42 3a3a3e
 $ lyncast activate cmd:quit
 ran cmd:quit
 $ wait-exit

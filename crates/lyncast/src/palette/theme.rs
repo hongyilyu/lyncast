@@ -9,14 +9,20 @@ pub fn top_margin(height: f32) -> f32 {
     ((height - HEIGHT) / 3.0).floor().max(0.0)
 }
 
+/// The window's background, as `0xRRGGBBAA`. It lets a tenth of what lies behind the window
+/// through, so the blur that niri's layer rule draws there shows.
+pub const BACKGROUND: u32 = 0x1e1e20e6;
+/// The window's corner radius in logical pixels.
+pub const RADIUS: f32 = 12.0;
+
 /// The dark theme, as `0xRRGGBB`.
-pub const BACKGROUND: u32 = 0x1e1e20;
 pub const BORDER: u32 = 0x3a3a3e;
 pub const TEXT: u32 = 0xe8e8ea;
 /// Section headers, kind labels, and the placeholder.
 pub const MUTED: u32 = 0x8e8e93;
-/// The selected row's background.
-pub const SELECTED: u32 = 0x2e2e33;
+/// The selected row's background, as `0xRRGGBBAA`. White at 7% is lighter than whatever the
+/// translucent background shows.
+pub const SELECTED: u32 = 0xffffff12;
 /// The selected card's border.
 pub const ACCENT: u32 = 0x5e8bff;
 pub const CARET: u32 = 0x5e8bff;
