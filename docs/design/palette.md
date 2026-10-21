@@ -262,6 +262,14 @@ When the compositor goes, GPUI's event loop ends and calls GPUI's quit hooks (`g
 
 Each line's time is read as its event happens, and one thread writes the lines, so a stdout that stops draining, such as a pipe that no one reads, holds up that thread and nothing else: the daemon still answers, as it does when stderr stops draining ([daemon.md](daemon.md#one-thread-writes-the-warnings)). Up to 64 lines wait for the thread. A line that does not fit is dropped, and once stdout drains, `PROBE dropped=<n>` follows the lines that waited. The daemon waits up to 1 s for its lines before it exits, so a stdout that does not drain keeps no daemon from exiting.
 
+The trace thread also prints the log lines of GPUI's renderer, the `gpui_wgpu` crate, at info and above, as `<LEVEL> <target>: <message>` with each newline in the message a space, and they wait in the same 64. Once per process, as the first window opens, they list the GPU adapters and name the one GPUI picked:
+
+```text
+INFO gpui_wgpu::wgpu_context: Selected GPU adapter: "llvmpipe (LLVM 15.0.7, 256 bits)" (Vulkan)
+```
+
+No other crate's log line prints, so the Wayland crates' report of a closed connection still does not ([the compositor's end](#the-compositors-end-stops-the-daemon)). Without `--trace` the daemon's stdout stays empty.
+
 ## The fixtures
 
 These tests read the blocks below. The Tier 3 runner in `crates/lyncast/src/palette/tests.rs` reads the `desktop`, `executable`, `clips`, and `palette` blocks. There too, `the_preview_holds_one_image` reads a `clips` block, `every_zone_reads_as_the_doc_says` reads the `zone` block, and `the_window_is_placed_as_the_geometry_block_says` reads the `geometry` block, which `the_geometry_is_as_the_doc_says` in `crates/lyncast/src/palette/theme.rs` reads too. `every_size_reads_as_the_doc_says` in `crates/lyncast/src/palette/clips.rs` reads the `sizes` block, and `every_icon_loads_as_the_doc_says` in `crates/lyncast/src/palette/icons.rs` reads the `env`, `icon`, and `icons` blocks. The test in `crates/lyncast/tests/palette.rs` reads the `env`, `desktop`, `executable`, and `summon` blocks, and runs each `summon` block as [clipboard-and-paste.md's](clipboard-and-paste.md#the-fixtures) tests run a `clipboard` block: in a fresh `$TREE`, inside its own `scripts/test-env.sh start` environment, whose `XDG_RUNTIME_DIR` is `$RUNTIME`, with only the `env` block's variables and the compositor's `WAYLAND_DISPLAY`. `VK_DRIVER_FILES` selects lavapipe, as `scripts/bench.sh` does.
@@ -3023,10 +3031,30 @@ $ count-trace window_opened
 3
 $ count-trace window_closed
 3
+$ grep -c '^INFO gpui_wgpu::wgpu_context: Selected GPU adapter: ' $RUNTIME/daemon.stdout
+1
+$ grep -v -e '^PROBE ' -e '^[A-Z]* gpui_wgpu::' $RUNTIME/daemon.stdout | wc -l
+0
 $ test -e "$RUNTIME/lyncast.sock" || echo gone
 gone
 $ grep -o '"app:firefox.desktop"' data/lyncast/ranking.json
 "app:firefox.desktop"
+```
+
+### Without --trace the stdout stays empty
+
+The daemon opens a window, and GPUI's renderer picks its adapter as the window opens, on GPUI's main thread. The test waits until the daemon has loaded a Vulkan driver, which it does only then, and the main thread handles Quit once the window has opened. Nothing reaches stdout.
+
+```summon
+$ lyncast daemon
+$ lyncast toggle
+open
+$ until grep -q libvulkan_ /proc/$DAEMON/maps; do sleep 0.01; done
+$ lyncast activate cmd:quit
+ran cmd:quit
+$ wait-exit
+$ wc -c < $RUNTIME/daemon.stdout
+0
 ```
 
 ### Quit waits for the last write with the window open

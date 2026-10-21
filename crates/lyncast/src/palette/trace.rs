@@ -78,6 +78,29 @@ impl Lines {
     }
 }
 
+const RENDERER: &str = "gpui_wgpu";
+
+/// The log lines of GPUI's renderer at info and above, such as the GPU adapter it picks, as
+/// `<LEVEL> <target>: <message>` lines among the PROBE lines.
+struct Renderer;
+
+impl log::Log for Renderer {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+            && metadata.target().split("::").next() == Some(RENDERER)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let (level, target) = (record.level(), record.target());
+            let message = record.args().to_string().replace('\n', " ");
+            LINES.push(format!("{level} {target}: {message}\n"));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 /// Whether the daemon prints PROBE lines, which one thread writes to stdout.
 #[derive(Clone, Copy)]
 pub struct Trace(bool);
@@ -85,11 +108,15 @@ pub struct Trace(bool);
 impl Trace {
     pub const OFF: Trace = Trace(false);
 
-    /// Starts the thread that writes the PROBE lines. Fails only when the thread cannot start.
+    /// Starts the thread that writes the PROBE lines, and passes it the renderer's log lines.
+    /// Fails only when the thread cannot start.
     pub fn start() -> io::Result<Trace> {
         thread::Builder::new()
             .name("trace".to_owned())
             .spawn(|| LINES.write(&mut io::stdout()))?;
+        if log::set_logger(&Renderer).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
         Ok(Trace(true))
     }
 
