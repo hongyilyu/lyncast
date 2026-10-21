@@ -122,7 +122,7 @@ The reviews found three limits, read in source:
 
 ## The bench gate holds the budgets
 
-The limits are in the [Budgets table](../decisions.md#budgets). `bench/summon.py` measures each one for the lyncast daemon on lavapipe under anvil and judges the run against them. [notes/05](../research/notes/05-probe-summon-latency.md) first measured each one for `bench/probe`, as medians, and the limits came from these:
+The limits are in the [Budgets table](../decisions.md#budgets). `bench/summon.py` measures each one for the lyncast daemon on lavapipe under anvil and judges the run against them, and `scripts/check.sh` runs it on every commit. [notes/05](../research/notes/05-probe-summon-latency.md) first measured each one for `bench/probe`, as medians, and the limits came from these:
 
 - **Warm summon.** Time to present, the client's buffer attach and commit, was 44.9 ms, range 44.1 to 48.9, over summons 2 to 20 in 3 processes, run twice.
 - **PSS before the first summon.** 11.9 MiB across 3 processes.
@@ -180,6 +180,7 @@ lavapipe draws on every CPU, so other work on the box slows a summon. On the dev
 
 ```sh
 scripts/bench.sh          # 3 processes of 100 cycles, about 7 minutes
+scripts/bench.sh --gate   # 1 process of 100 cycles, about 2.5 minutes, as scripts/check.sh runs it
 scripts/bench.sh --real   # in a niri session, on its GPU, judging nothing
 ```
 

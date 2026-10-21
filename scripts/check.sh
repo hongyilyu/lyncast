@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The local CI gate: formatting, lints, tests, and a Tier 2 smoke test.
+# The local CI gate: formatting, lints, tests, a Tier 2 smoke test, and the bench gate.
 set -euo pipefail
 # An exported CDPATH would make cd print the directory into captured output.
 unset CDPATH
@@ -14,4 +14,5 @@ cargo clippy --manifest-path bench/score-map/Cargo.toml --target-dir target/benc
 cargo test --workspace --locked
 shellcheck scripts/*.sh
 scripts/test-env.sh run -- python3 -I scripts/wl-globals.py >/dev/null
+scripts/bench.sh --gate
 echo "check.sh: all checks passed"
